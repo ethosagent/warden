@@ -43,7 +43,7 @@ warden control-plane keys export --purpose bundle --state active --state-dir /va
 |---|---|---|
 | `keys list` | `--purpose`, `--jwks`, `--json` | The rows (public metadata) or the published JWKS. Opens the database read-only. |
 | `keys rotate` | `--purpose token`, `--emergency`, `--yes`, `--admin-audit-key-file` | Promote `next`, retire (or, with `--emergency`, revoke) the old active, publish a fresh `next`. |
-| `keys rotate --purpose bundle` | `--stage`, `--activate`, `--force`, `--emergency --yes`, `--admin-url`, `--api-key-file`, `--ca-cert` | The staged bundle rotation of [section 6](#6-staged-bundle-rotation): `--stage` signs with both keys, `--activate` makes the next key the only signer behind the workers' pins. |
+| `keys rotate --purpose bundle` | `--stage`, `--unstage`, `--activate`, `--force`, `--emergency --yes`, `--admin-url`, `--api-key-file`, `--ca-cert` | The staged bundle rotation of [section 6](#6-staged-bundle-rotation): `--stage` signs with both keys, `--activate` makes the next key the only signer behind the workers' pins. |
 | `keys export` | `--purpose`, `--state next\|active` | Public JWK only. Without `--state`: the JWKS of the published keys (active, next, and a retired key during its overlap) — what `controlPlane.bundleKeysFile` takes. |
 | `keys reset` | `--purpose`, `--yes`, `--admin-audit-key-file` | Delete every key of the purpose — files and rows — and regenerate `token`/`bundle` from scratch. |
 
@@ -258,9 +258,56 @@ is merely behind strands that worker: it rejects every bundle (`unknown_kid`)
 and keeps enforcing its last-known-good policy until that bundle expires, then
 fails closed or open per `controlPlane.bundleExpiry`.
 
-Every step writes an admin audit row (`op=stage`, `op=activate`) naming the kids
+Every step writes an admin audit row (`op=stage`, `op=unstage`, `op=activate`) naming the kids
 and logs them; the transitions it causes (`keys.staged`, `keys.activated`,
 `keys.retired`) carry the same actor.
+
+### The pin gate and a restarted control plane
+
+Worker pins live in the control plane's memory. Right after it restarts, a worker
+that has polled but not yet heartbeated shows no capabilities at all, so what it
+pins is unknown: `--activate` counts it as missing (never as a worker that does
+not verify bundles) and says "no heartbeat yet". Retry in a few seconds. Only a
+worker that **has** heartbeated and advertises no `bundle/v1` is treated as
+unpinned and does not block. `--activate` also promotes only the next key whose
+pins it checked: if another next key replaces it meanwhile, it refuses
+(`ErrNextKeyChanged`) and changes nothing.
+
+`--admin-url` must be `https://` (or `http://` to localhost/loopback): the API key
+travels with the request.
+
+The command does not itself prove the control plane is already serving a
+dual-signed envelope — the admin API key cannot read `/policy`, which takes a
+worker token, and the CLI is offline. What guards it is the prepublish window
+counted from the stage. To look at it yourself, fetch the envelope as a worker
+would and list the signers:
+`curl -s -H "Authorization: Bearer $WORKER_TOKEN" -H 'Accept: application/vnd.warden.bundle.v1+json' https://cp/policy | jq -r '.signatures[].kid'` — both kids must be there. The control plane also logs `bundle signed … kids=[…]` each time it signs.
+
+### Staged key material lost
+
+If the staged next key's private material is gone (a restore without the key
+directory, a deleted file), the control plane cannot sign with both keys and
+will not quietly sign with one. A running control plane keeps its last good set;
+a restarting one does not load the bundle purpose: `/readyz` answers `503
+{"keys":"staged_key_unavailable"}`, the `staged_key_unavailable` finding is
+raised, and startup with `--bundles` stops with "the staged next bundle key is
+unavailable". The active key is fine — this is not `signing_key_unavailable`.
+
+Recover with the control plane stopped or running:
+
+```sh
+warden control-plane keys rotate --purpose bundle --unstage --state-dir /var/lib/warden-cp
+```
+
+It never reads the lost material: a staged key that still loads is merely
+unstaged; one that does not is dropped, and the next `--stage` (or the scheduler)
+publishes a fresh next key. The control plane then signs with the active key
+alone. **Risk:** a worker that pinned *only* the staged key (a new-key-only pin,
+as in the emergency flow below, where you re-pin before activating) verifies
+nothing the control plane signs after the unstage. Re-pin such workers to the
+active key (or both) first, or accept that they reject bundles and keep their
+last-known-good policy until they are re-pinned. Then stage again with the new
+key and repeat the rotation.
 
 ### While the bundle publisher is degraded after a token rotation
 
@@ -286,7 +333,9 @@ telling the workers to stop trusting it.
 2. `keys export --purpose bundle --state next` and pin the next key on every
    worker **in place of** the compromised one (a pin file with the next key
    only), then roll the workers. A worker that no longer pins the old key rejects
-   anything it signed (`unknown_kid`).
+   anything it signed (`unknown_kid`). These new-key-only workers depend on the
+   stage: if you unstage (see "Staged key material lost") before activating, they
+   reject every bundle until activation.
 3. `warden control-plane keys rotate --purpose bundle --activate --emergency --yes --state-dir /var/lib/warden-cp`
    promotes the next key at once — no prepublish window — and **revokes** the
    old one: it leaves the exported set immediately and its material is deleted.

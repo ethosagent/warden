@@ -1873,7 +1873,9 @@ warden control-plane keys reset --purpose token --yes --state-dir /var/lib/warde
   the `traffic:read` scope in `--api-key-file` or `$WARDEN_API_KEY`) and refuses
   when it cannot. `--force` overrides the check and records the missing ids in
   the one audit row it writes; `--activate --emergency --yes` promotes at once
-  and revokes the old key. Without a step the bundle purpose is refused and the
+  and revokes the old key; `--unstage` takes the staged key back out of signing and
+  is the recovery when its material is lost (`/readyz` then answers
+  `staged_key_unavailable`). `--admin-url` must be https (http only for loopback). Without a step the bundle purpose is refused and the
   `next` kid to pin is named. The scheduler never rotates the bundle purpose
   (`keys.bundle.rotationInterval` must be `0`). The whole flow, the emergency
   drill and the restore step are in

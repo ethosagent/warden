@@ -11,12 +11,14 @@
 #     envelope to workers that ask for it and the unsigned policy to the rest,
 #     so nothing breaks while a fleet is being pinned. Move to `require` only
 #     once every worker pins (docs/runbooks/key-rotation.md, "Rollout order").
-#   - cp-pins is a one-shot that waits for the control plane's first start
-#     (which creates the keys), then exports the PUBLIC bundle JWKS (active +
-#     next, never private material) into the cp-pins volume.
-#   - Each worker starts only after cp-pins and pins that file: its config is
-#     the stock config.worker.yaml with controlPlane.bundleKeysFile added, so
-#     it applies only bundles that verify.
+#   - cp-pins is a one-shot, run as the image's own warden user, that waits for
+#     the control plane's first start (which creates the keys), then exports the
+#     PUBLIC bundle JWKS (active + next, never private material) into the
+#     cp-pins volume. The volume is mounted at /data, which the image owns as
+#     warden, so a fresh volume inherits that ownership.
+#   - Each worker starts only after cp-pins and mounts the pin file; its config
+#     is configs/config.worker.bundles.yaml (the stock worker config plus
+#     controlPlane.bundleKeysFile), so it applies only bundles that verify.
 #
 # Rotating the bundle key later is the staged flow of the runbook: re-run the
 # export of cp-pins into the volume, restart the workers so they pin both keys,
@@ -39,33 +41,29 @@ services:
       - "--policy-store=versioned"
       - "--bundles=offer"
 
-  # One-shot: export the public bundle JWKS for the workers to pin. It runs as
-  # root only to open the state dir and to write a world-readable public file into
-  # its own volume; it prints and stores public keys only.
   cp-pins:
     image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
     restart: "no"
     network_mode: none
-    user: "0:0"
     depends_on:
       control-plane:
         condition: service_started
     volumes:
       - ../../configs/config.control-plane.bundles.yaml:/etc/warden/config.yaml:ro
-      - cp-data:/data   # read-write only because SQLite's WAL needs its -shm beside the database; the export opens it read-only
-      - cp-pins:/pins
+      - cp-data:/state          # the control plane's state dir; the export only reads public metadata
+      - cp-pins:/data           # warden-owned in the image, so the fresh volume is writable
     entrypoint:
       - sh
       - -c
       - |
         set -e
         for i in $$(seq 1 60); do
-          if warden control-plane keys export --purpose bundle --state-dir /data \
-               --config /etc/warden/config.yaml > /pins/bundle-keys.json.tmp 2>/dev/null; then
-            chmod 0644 /pins/bundle-keys.json.tmp
-            mv /pins/bundle-keys.json.tmp /pins/bundle-keys.json
+          if warden control-plane keys export --purpose bundle --state-dir /state \
+               --config /etc/warden/config.yaml > /data/bundle-keys.json.tmp 2>/dev/null; then
+            chmod 0644 /data/bundle-keys.json.tmp
+            mv /data/bundle-keys.json.tmp /data/bundle-keys.json
             echo "pinned bundle keys:"
-            cat /pins/bundle-keys.json
+            cat /data/bundle-keys.json
             exit 0
           fi
           sleep 1
@@ -78,32 +76,16 @@ services:
       cp-pins:
         condition: service_completed_successfully
     volumes:
+      - ../../configs/config.worker.bundles.yaml:/etc/warden/config.yaml:ro
       - cp-pins:/etc/warden/pins:ro
-    entrypoint:
-      - sh
-      - -c
-      - |
-        set -e
-        sed '/^controlPlane:/a\  bundleKeysFile: /etc/warden/pins/bundle-keys.json' /etc/warden/config.yaml > /data/config.bundles.yaml
-        exec warden run --config=/data/config.bundles.yaml --listen=0.0.0.0:8080 \
-          --ca-cert=/etc/warden/certs/proxy-ca.crt --ca-key=/etc/warden/certs/proxy-ca.key \
-          --admin-listen=0.0.0.0:9090 --admin-token-env=WARDEN_ADMIN_TOKEN --db=/data/warden.db
 
   worker-2:
     depends_on:
       cp-pins:
         condition: service_completed_successfully
     volumes:
+      - ../../configs/config.worker.bundles.yaml:/etc/warden/config.yaml:ro
       - cp-pins:/etc/warden/pins:ro
-    entrypoint:
-      - sh
-      - -c
-      - |
-        set -e
-        sed '/^controlPlane:/a\  bundleKeysFile: /etc/warden/pins/bundle-keys.json' /etc/warden/config.yaml > /data/config.bundles.yaml
-        exec warden run --config=/data/config.bundles.yaml --listen=0.0.0.0:8080 \
-          --ca-cert=/etc/warden/certs/proxy-ca.crt --ca-key=/etc/warden/certs/proxy-ca.key \
-          --admin-listen=0.0.0.0:9090 --admin-token-env=WARDEN_ADMIN_TOKEN --db=/data/warden.db
 
 volumes:
   cp-pins:
