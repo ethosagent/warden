@@ -382,7 +382,7 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 	start := time.Now()
 	var r idResult
 	connLive := cs == identity.StatusValid
-	if connLive && !p.clock().Before(ci.Expiry.Add(h.skew)) {
+	if connLive && !p.validityClock().Before(ci.Expiry.Add(h.skew)) {
 		// Past exp plus skew (or no exp at all, which a valid token always has:
 		// fail closed). The connection's identity is spent.
 		connLive, cs = false, identity.StatusExpired
