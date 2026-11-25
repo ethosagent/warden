@@ -422,6 +422,12 @@ var All = slices.Concat(
 		{Name: "bundles_pinned_worker_unrelated_key_fails_closed", Opts: unrelatedPinsOpts(), Run: pinnedWorkerUnrelatedKeyFailsClosed},
 		{Name: "bundles_pinned_worker_expiry_deny", Opts: pinnedWorkerDenyOpts(), Run: pinnedWorkerExpiryDeny},
 		{Name: "bundles_pinned_worker_tampered_bundle", Opts: tamperedOpts(), Run: pinnedWorkerTamperedBundleKeepsLastKnownGood},
+		// Warden token verification on the worker (W-P2-WBND-01): a pinned worker
+		// takes token keys and issuer only from the verified bundle, so a minted
+		// token verifies while a foreign key, a forged signature and a wrong
+		// issuer are refused; a legacy-wire worker has no keys. In-process only.
+		{Name: "warden_token_verify", Opts: wardenTokenVerifyOpts(), Run: wardenTokenVerify},
+		{Name: "warden_token_legacy_wire", Opts: wardenTokenLegacyOpts(), Run: wardenTokenLegacyWire},
 		// Warden credentials in agent egress (W-P2-APIK-06): a wak_ key or wwt_
 		// token in a request body is flagged as credentials only with
 		// dlp.wardenTokens on, and blocked only in enforce mode with a rule.

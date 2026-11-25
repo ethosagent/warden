@@ -114,6 +114,51 @@ nothing changes.
 | `3` | The issuer (or, in agent mode, the control plane) is unreachable and no valid token remains |
 | `4` | The control plane refused the agent's token exchange (`invalid_client`, `unauthorized_client`, `invalid_grant`, ...) |
 
+### Warden tokens (Phase 2)
+
+A worker that pins the control plane's bundle keys (`controlPlane.bundleKeys`)
+also verifies the **Warden tokens** the control plane's token service mints
+(`typ` `wt+jwt`, signed with EdDSA or ES256). It takes everything it checks
+them against from the last signed bundle it verified, and from nothing else: the
+key set (bundle section `tokenJWKS`), the issuer (the signed `tokenIssuer`) and
+the registered agents. It never fetches keys, and it never uses the control
+plane id as the issuer.
+
+| Rule | Reason when it fails |
+|---|---|
+| `typ` is `wt+jwt`; the header and payload parse | `malformed` |
+| `alg` is EdDSA or ES256 and fits the key type | `alg_not_allowed` |
+| `kid` is in the bundle key set | `unknown_kid` |
+| The signature verifies | `bad_signature` |
+| `iss` equals the bundle `tokenIssuer` byte for byte | `wrong_iss` |
+| `aud` contains `warden-worker` (not the IdP audience) | `wrong_aud` |
+| `sub`, `act.sub`, `sid`, `jti` and `cnf.jkt` are present | `missing_claim` |
+| `exp - iat` at most 15 minutes | `ttl_too_long` |
+| `exp` and `nbf` hold within `identity.clockSkewSeconds` | `expired`, or `malformed` for a future `nbf` |
+
+Until the worker has applied a verified bundle, with no pinned keys (the legacy
+wire), with a bundle that carries no `tokenIssuer` (the control plane mints no
+Warden tokens) or no keys, a Warden token is `unverified` with reason
+`jwks_unavailable`. A `tokenIssuer` that equals `identity.issuer` is refused: the
+worker logs one error and verifies no Warden token until they differ. A token key
+removed from the bundle stops verifying on the next request.
+
+A valid Warden token attributes the user (`sub`, `email`, `groups`). The worker
+verifies the token here but does not yet check that `act.sub` is its own agent
+or that `cnf.jkt` is one of that agent's current keys (agent binding comes
+next), so until then a valid Warden token is attribution, not proof of which
+agent sent it. The `token_type` label of the verify metric is `warden` for these tokens.
+
+**IdP tokens next to Warden tokens.** The worker routes by the token's `iss`:
+the bundle's `tokenIssuer` goes to the Warden verifier, `identity.issuer` to the
+IdP verifier, anything else is `invalid` with reason `wrong_iss`.
+`identity.acceptDexTokens` decides whether IdP tokens are accepted at all: unset
+means true when `identity.issuer` is set and false otherwise; `false` turns each
+IdP token away as `invalid` with reason `unbound_token` (and then `identity.issuer`
+and `identity.audience` are not needed for `attribute`). An accepted IdP token
+is recorded with `token_type` `idp` and logs at most one deprecation warning an
+hour.
+
 ## Transport
 
 The worker reads the token from one of two headers. Both are proxy-only: the
