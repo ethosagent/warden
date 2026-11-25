@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +35,7 @@ type signedCP struct {
 	etag   string
 	accept []string
 	inm    []string
+	hbs    [][]byte // heartbeat bodies, oldest first
 	srv    *httptest.Server
 }
 
@@ -42,6 +45,12 @@ func newSignedCP(t *testing.T) *signedCP {
 	c.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		if r.URL.Path == "/control/heartbeat" {
+			b, _ := io.ReadAll(r.Body)
+			c.hbs = append(c.hbs, b)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		c.accept = append(c.accept, r.Header.Get("Accept"))
 		c.inm = append(c.inm, r.Header.Get("If-None-Match"))
 		if c.etag != "" && r.Header.Get("If-None-Match") == `"`+c.etag+`"` {
@@ -539,5 +548,89 @@ func TestVerifiedBundleTokenIssuerAndBindingInputs(t *testing.T) {
 	in.TokenJWKS[0] = 'X'
 	if again, _ := e.rp.BindingInputs(); again.Agents[0].JKT[0] != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" || string(again.TokenJWKS) != `{"keys":[]}` {
 		t.Fatal("BindingInputs exposed internal state")
+	}
+}
+
+// heartbeat sends one heartbeat and returns the decoded body it carried.
+func (e *bundleEnv) heartbeat() (heartbeatBody, []byte) {
+	e.t.Helper()
+	if err := e.rp.Heartbeat(context.Background()); err != nil {
+		e.t.Fatal(err)
+	}
+	e.cp.mu.Lock()
+	raw := e.cp.hbs[len(e.cp.hbs)-1]
+	e.cp.mu.Unlock()
+	var hb heartbeatBody
+	if err := json.Unmarshal(raw, &hb); err != nil {
+		e.t.Fatal(err)
+	}
+	return hb, raw
+}
+
+// TestHeartbeatBundleFields: a pinned worker that rejected seq 6 keeps
+// reporting seq 5 and says why; the next apply clears the reason; a worker
+// without pins sends none of the new fields.
+func TestHeartbeatBundleFields(t *testing.T) {
+	e := newBundleEnv(t)
+	e.rp.SetCaps(WorkerCaps())
+
+	hb, _ := e.heartbeat()
+	if hb.BundleSeq != 0 || hb.LastRejectReason != "" || len(hb.PinnedKIDs) != 1 || !slices.Contains(hb.Caps, CapBundleV1) {
+		t.Fatalf("before any bundle: %+v", hb)
+	}
+
+	if err := e.pullSeq(5, bundlePolicyA, "e5"); err != nil {
+		t.Fatal(err)
+	}
+	e.cp.serve(flipPayloadByte(t, e.sign(e.bundle(6, bundlePolicyB), nil)), "e6bad")
+	if err := e.rp.Pull(); !errors.Is(err, bundle.ErrBadSignature) {
+		t.Fatalf("err = %v", err)
+	}
+	hb, raw := e.heartbeat()
+	if hb.BundleSeq != 5 || hb.LastRejectReason != "bad_signature" || hb.BundleKID == "" ||
+		hb.BundleIssuedAt != bundleT0.Format(time.RFC3339) || hb.LastRejectAt != e.now.Format(time.RFC3339) ||
+		hb.BundleStale || hb.PolicyETag != "e5" || !slices.Contains(hb.Caps, CapBundleV1) {
+		t.Fatalf("after a rejection: %+v", hb)
+	}
+	if len(raw) > 1024 {
+		t.Errorf("heartbeat body is %d bytes, want well under the control plane's 4096", len(raw))
+	}
+	if !slices.Contains(hb.Caps, CapBlocklistV1) {
+		t.Errorf("existing caps lost: %v", hb.Caps)
+	}
+
+	if err := e.pullSeq(7, bundlePolicyB, "e7"); err != nil {
+		t.Fatal(err)
+	}
+	if hb, _ = e.heartbeat(); hb.BundleSeq != 7 || hb.LastRejectReason != "" || hb.LastRejectAt != "" {
+		t.Fatalf("after the next apply: %+v", hb)
+	}
+
+	e.now = bundleT0.Add(48 * time.Hour)
+	if hb, _ = e.heartbeat(); !hb.BundleStale {
+		t.Fatalf("an expired bundle is not reported stale: %+v", hb)
+	}
+}
+
+func TestHeartbeatBundleFieldsBoundedAndAbsentWithoutPins(t *testing.T) {
+	var hb heartbeatBody
+	st := BundleStatus{Enabled: true}
+	for i := 0; i < 20; i++ {
+		st.PinnedKIDs = append(st.PinnedKIDs, strings.Repeat("k", 43))
+	}
+	caps := bundleHeartbeat(&hb, []string{"a/v1"}, st)
+	if len(hb.PinnedKIDs) != MaxHeartbeatPinnedKIDs || !slices.Equal(caps, []string{"a/v1", CapBundleV1}) {
+		t.Fatalf("pinned %d kids, caps %v", len(hb.PinnedKIDs), caps)
+	}
+
+	hb = heartbeatBody{}
+	if caps := bundleHeartbeat(&hb, []string{"a/v1"}, BundleStatus{}); !slices.Equal(caps, []string{"a/v1"}) {
+		t.Fatalf("caps without pins = %v", caps)
+	}
+	raw, _ := json.Marshal(hb)
+	for _, f := range []string{"bundle", "pinnedKids", "lastReject"} {
+		if strings.Contains(string(raw), f) {
+			t.Errorf("a worker without pins sends %q: %s", f, raw)
+		}
 	}
 }
