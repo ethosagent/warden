@@ -13,6 +13,7 @@ package controlplane
 // of a version, so a rollback can never restore it.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -1066,6 +1067,14 @@ func (s *Server) primeMirror(ctx context.Context, head int64) bool {
 // credential value is left out: it lives only in the served YAML and the
 // credential overlay serves it, so editing it there is not drift. A file the
 // loader rejects hashes to its raw bytes: it is never equal to head.
+//
+// The JSON is canonical (canonicalBlocksJSON): an absent list and an empty one
+// load to the same policy but marshal as null and [], and the two sides of the
+// drift check reach the loader differently. The expected hash loads head
+// rendered by renderDocToRoot, which writes every list (an absent denylist
+// becomes "denylist: []"); the served hash loads the file as written, by the
+// operator or by the mirror. Without the canonical form an idle control plane
+// whose YAML has no denylist reported drift on its first tick.
 func servedBlocksHash(path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -1087,11 +1096,62 @@ func servedBlocksHash(path string) (string, error) {
 		settings.Secrets = &secrets
 		w.Settings = &settings
 	}
-	b, err := json.Marshal(w)
+	b, err := canonicalBlocksJSON(w)
 	if err != nil {
 		return "", err
 	}
 	return sha256Hex(string(b)), nil
+}
+
+// canonicalBlocksJSON is w as JSON with every object member that is null or
+// an empty list removed, recursively, and object keys sorted, so a nil and an empty slice
+// (and a nil pointer and an absent key) encode alike. Numbers keep their
+// literal text. A non-empty list or any other value change still changes the
+// result.
+func canonicalBlocksJSON(w policyWire) ([]byte, error) {
+	b, err := json.Marshal(w)
+	if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	return json.Marshal(dropEmpty(v))
+}
+
+// dropEmpty removes the null and empty-list members of every object in a
+// decoded JSON value. List elements are kept as they are (recursed into), so a
+// list's length and order always count.
+func dropEmpty(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, e := range t {
+			if e = dropEmpty(e); isEmptyJSON(e) {
+				delete(t, k)
+			} else {
+				t[k] = e
+			}
+		}
+		return t
+	case []any:
+		for i, e := range t {
+			t[i] = dropEmpty(e)
+		}
+		return t
+	}
+	return v
+}
+
+// isEmptyJSON is a null or an empty list.
+func isEmptyJSON(v any) bool {
+	if v == nil {
+		return true
+	}
+	l, ok := v.([]any)
+	return ok && len(l) == 0
 }
 
 // LatestPublish implements PolicyVersionStore.
