@@ -30,7 +30,7 @@ func TestControlPlaneAuthFlags(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p.LegacyTokenEnv != "" || p.TokenEnv != "" || p.RequireWorkerTokens || p.AllowInsecureWorkerAuth {
+		if p.LegacyTokenEnv != "" || p.TokenEnv != "" || p.RequireWorkerTokens || p.RequireWorkerCerts || p.AllowInsecureWorkerAuth {
 			t.Errorf("defaults changed behaviour: %+v", p)
 		}
 	})
@@ -41,6 +41,16 @@ func TestControlPlaneAuthFlags(t *testing.T) {
 		}
 		p, _ := controlPlaneParams(cp)
 		if p.LegacyTokenEnv != "L" || p.TokenEnv != "T" || !p.RequireWorkerTokens || !p.AllowInsecureWorkerAuth {
+			t.Errorf("params = %+v", p)
+		}
+	})
+	t.Run("require-worker-certs", func(t *testing.T) {
+		cp, err := parseCPFlags(t, "--require-worker-certs")
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, _ := controlPlaneParams(cp)
+		if !p.RequireWorkerCerts || p.RequireWorkerTokens {
 			t.Errorf("params = %+v", p)
 		}
 	})
@@ -65,6 +75,12 @@ func TestControlPlaneAuthFlags(t *testing.T) {
 		"strict with legacy": {[]string{"--require-worker-tokens", "--state-dir", state, "--legacy-token-env", "L", "--allow-insecure-worker-auth"}, "--legacy-token-env"},
 		"strict with alias":  {[]string{"--require-worker-tokens", "--state-dir", state, "--token-env", "L", "--allow-insecure-worker-auth"}, "--token-env"},
 		"strict no tls":      {[]string{"--require-worker-tokens", "--state-dir", state}, "--allow-insecure-worker-auth"},
+		"certs no state":     {[]string{"--require-worker-certs", "--ca-cert", "c", "--ca-key", "k"}, "--state-dir"},
+		"certs with tokens":  {[]string{"--require-worker-certs", "--require-worker-tokens", "--state-dir", state, "--ca-cert", "c", "--ca-key", "k"}, "--require-worker-tokens"},
+		"certs with legacy":  {[]string{"--require-worker-certs", "--legacy-token-env", "L", "--state-dir", state, "--ca-cert", "c", "--ca-key", "k"}, "--legacy-token-env"},
+		"certs no tls":       {[]string{"--require-worker-certs", "--state-dir", state}, "--ca-cert"},
+		"certs no workerCA":  {[]string{"--require-worker-certs", "--state-dir", state, "--ca-cert", "c", "--ca-key", "k"}, "workerCA.enabled"},
+		"certs insecure":     {[]string{"--require-worker-certs", "--allow-insecure-worker-auth", "--state-dir", state}, "--ca-cert"},
 	}
 	for name, c := range fail {
 		t.Run(name, func(t *testing.T) {

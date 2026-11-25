@@ -37,7 +37,7 @@ type enrollEnv struct {
 	logs  *syncBuf
 }
 
-func newEnrollEnv(t *testing.T) *enrollEnv {
+func newEnrollEnv(t testing.TB) *enrollEnv {
 	t.Helper()
 	clk := clocktest.NewFake(time.Now().Truncate(time.Second))
 	e := &enrollEnv{clk: clk, path: filepath.Join(t.TempDir(), "warden-cp.db"), logs: &syncBuf{}}

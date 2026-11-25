@@ -64,6 +64,36 @@ var (
 	ErrEnrollInUse = errors.New("enrollment token: value already registered")
 	// ErrCertNotFound is RevokeCert naming a serial that does not exist.
 	ErrCertNotFound = errors.New("worker cert: not found")
+	// ErrCertNoIssuer is a worker_certs row with no issuer key id: the row could
+	// not later tell which intermediate signed it.
+	ErrCertNoIssuer = errors.New("worker cert: issuer key id is empty")
+	// ErrCertRevoked is a renewal presenting a serial whose row is revoked.
+	ErrCertRevoked = errors.New("worker cert: revoked")
+	// ErrLineageConflict is a renewal from a serial that is neither the
+	// worker's latest nor its predecessor inside the grace window: a forked
+	// chain, i.e. a copied key.
+	ErrLineageConflict = errors.New("worker cert: lineage conflict")
+	// ErrSameKey is a renewal CSR for a key the worker's recent lineage used.
+	ErrSameKey = errors.New("worker cert: renewal must use a new key")
+	// ErrRenewRateLimited is a renewal the admit callback refused.
+	ErrRenewRateLimited = errors.New("worker cert: renewal rate limited")
+)
+
+// Revoke reasons the control plane itself writes. A cert revoked with one of the
+// failed reasons was never handed to a worker, so the lineage rule skips it.
+const (
+	RevokeReasonEnrollFailed = "enroll_failed"
+	RevokeReasonRenewFailed  = "renew_failed"
+	RevokeReasonLineage      = "lineage_conflict"
+	// RevokeReasonSuperseded marks the successor a grace renewal replaced: it
+	// was issued but never seen in use. Presenting it later proves a second
+	// holder of its key, so it is a lineage conflict, not a plain revocation.
+	RevokeReasonSuperseded = "superseded"
+
+	// renewGrace is how long after a successor was issued its predecessor may
+	// still renew, when this control plane has not seen the successor used (the
+	// response may have been lost).
+	renewGrace = 10 * time.Minute
 )
 
 var enrollPrefixRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,127}$`)
@@ -189,6 +219,14 @@ type CertRecord struct {
 	IssuedAt      time.Time
 	NotAfter      time.Time
 	RevokedAt     time.Time
+	RevokedBy     string
+	RevokeReason  string
+}
+
+// RevokedCert is an entry of the revoked index: a revoked serial that has not
+// expired yet.
+type RevokedCert struct {
+	Serial, WorkerID, Reason string
 }
 
 // RecordFor describes cert, issued by the intermediate issuer, as a
@@ -252,6 +290,36 @@ type WorkerCertStore interface {
 	RevokeCert(ctx context.Context, serial, actor, reason string) error
 	// Cert returns the row of a serial, or ErrCertNotFound.
 	Cert(ctx context.Context, serial string) (CertRecord, error)
+	// RenewCert atomically checks the lineage of presented (the serial the
+	// worker authenticated with), calls issue and records the new certificate
+	// with issued_via=renew and prev_serial=presented. The lineage rule: the
+	// worker's latest serial, ignoring rows revoked as enroll_failed or
+	// renew_failed, may renew; so may its predecessor when the latest was issued
+	// less than 10 minutes ago and seen reports it unused. Anything else is
+	// ErrLineageConflict; a revoked or unknown presented serial is
+	// ErrCertRevoked or ErrCertNotFound. admit runs once the rule has passed and
+	// before issue (grace says the renewal came from a predecessor); returning
+	// false is ErrRenewRateLimited. issue runs inside the transaction.
+	//
+	// spki is the hex sha256 of the CSR's public key: ErrSameKey when it equals
+	// that of the presented certificate or of the three before it in the lineage.
+	// A grace renewal revokes the unused successor as "superseded" in the same
+	// transaction, so only one descendant of the predecessor stays valid; a
+	// presented serial revoked as superseded is ErrLineageConflict.
+	RenewCert(ctx context.Context, workerID, presented, spki string, seen func(serial string) bool, admit func(grace bool) bool, issue IssueFunc) (CertRecord, *x509.Certificate, error)
+	// RevokeWorker revokes every unexpired, unrevoked certificate of the worker
+	// and its unused id-bound enrollment tokens in one transaction, and returns
+	// the serials it revoked. It is idempotent; ErrCertNotFound for a worker id
+	// that never held a certificate.
+	RevokeWorker(ctx context.Context, workerID, actor, reason string) ([]string, error)
+	// LatestCert is the worker's latest certificate under the lineage rule (rows
+	// revoked as failed issuances are skipped), or ErrCertNotFound.
+	LatestCert(ctx context.Context, workerID string) (CertRecord, error)
+	// RevokedCerts lists the revoked certificates that expire after notAfter.
+	RevokedCerts(ctx context.Context, notAfter time.Time) ([]RevokedCert, error)
+	// DataVersion is SQLite's PRAGMA data_version: it changes when another
+	// process commits to the same database.
+	DataVersion(ctx context.Context) (int64, error)
 }
 
 // EnrollmentOptions configures an EnrollmentStore. Zero values use the real
@@ -554,6 +622,9 @@ type execer interface {
 }
 
 func insertCert(ctx context.Context, ex execer, r CertRecord) error {
+	if r.IssuerKID == "" {
+		return ErrCertNoIssuer
+	}
 	_, err := ex.ExecContext(ctx,
 		`INSERT INTO worker_certs (serial, worker_id, spki_sha256, issuer_kid, prev_serial, enroll_token_id, issued_via, issued_at, not_after)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -588,28 +659,248 @@ func (s *EnrollmentStore) RevokeCert(ctx context.Context, serial, actor, reason 
 
 // Cert implements WorkerCertStore.
 func (s *EnrollmentStore) Cert(ctx context.Context, serial string) (CertRecord, error) {
+	return queryCert(ctx, s.db, `WHERE serial = ?`, serial)
+}
+
+const certColumns = `serial, worker_id, spki_sha256, issuer_kid, prev_serial, enroll_token_id, issued_via, issued_at, not_after, revoked_at, revoked_by, revoke_reason`
+
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func queryCert(ctx context.Context, q rowQuerier, where string, args ...any) (CertRecord, error) {
 	var (
-		r                CertRecord
-		prev, tok        sql.NullString
-		issued, notAfter int64
-		revoked          sql.NullInt64
+		r                     CertRecord
+		prev, tok, revBy, rsn sql.NullString
+		issued, notAfter      int64
+		revoked               sql.NullInt64
 	)
-	err := s.db.QueryRowContext(ctx,
-		`SELECT serial, worker_id, spki_sha256, issuer_kid, prev_serial, enroll_token_id, issued_via, issued_at, not_after, revoked_at
-		 FROM worker_certs WHERE serial = ?`, serial).
-		Scan(&r.Serial, &r.WorkerID, &r.SPKISHA256, &r.IssuerKID, &prev, &tok, &r.IssuedVia, &issued, &notAfter, &revoked)
+	err := q.QueryRowContext(ctx, `SELECT `+certColumns+` FROM worker_certs `+where, args...).
+		Scan(&r.Serial, &r.WorkerID, &r.SPKISHA256, &r.IssuerKID, &prev, &tok, &r.IssuedVia, &issued, &notAfter, &revoked, &revBy, &rsn)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CertRecord{}, ErrCertNotFound
 	}
 	if err != nil {
 		return CertRecord{}, fmt.Errorf("worker certs: lookup: %w", err)
 	}
-	r.PrevSerial, r.EnrollTokenID = prev.String, tok.String
+	r.PrevSerial, r.EnrollTokenID, r.RevokedBy, r.RevokeReason = prev.String, tok.String, revBy.String, rsn.String
 	r.IssuedAt, r.NotAfter = time.Unix(issued, 0), time.Unix(notAfter, 0)
 	if revoked.Valid {
 		r.RevokedAt = time.Unix(revoked.Int64, 0)
 	}
 	return r, nil
+}
+
+// latestWhere selects a worker's latest certificate: the newest row that was
+// not revoked as a failed issuance (its certificate never reached the worker).
+const latestWhere = `WHERE worker_id = ? AND (revoke_reason IS NULL OR revoke_reason NOT IN ('` + RevokeReasonEnrollFailed + `', '` + RevokeReasonRenewFailed + `'))
+ ORDER BY issued_at DESC, rowid DESC LIMIT 1`
+
+// beginImmediate opens a write transaction on a dedicated connection, so two
+// processes serialise on the database lock.
+func (s *EnrollmentStore) beginImmediate(ctx context.Context) (conn *sql.Conn, finish func(commit bool) error, err error) {
+	conn, err = s.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err = conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	done := false
+	return conn, func(commit bool) error {
+		defer func() { _ = conn.Close() }()
+		if done {
+			return nil
+		}
+		done = true
+		stmt := `ROLLBACK`
+		if commit {
+			stmt = `COMMIT`
+		}
+		_, err := conn.ExecContext(context.WithoutCancel(ctx), stmt)
+		return err
+	}, nil
+}
+
+// RenewCert implements WorkerCertStore.
+func (s *EnrollmentStore) RenewCert(ctx context.Context, workerID, presented, spki string, seen func(string) bool, admit func(bool) bool, issue IssueFunc) (CertRecord, *x509.Certificate, error) {
+	conn, finish, err := s.beginImmediate(ctx)
+	if err != nil {
+		return CertRecord{}, nil, fmt.Errorf("worker certs: renew: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = finish(false)
+		}
+	}()
+	cur, err := queryCert(ctx, conn, `WHERE serial = ?`, presented)
+	if err != nil {
+		return CertRecord{}, nil, err
+	}
+	if cur.WorkerID != workerID {
+		return CertRecord{}, nil, ErrCertNotFound
+	}
+	if !cur.RevokedAt.IsZero() {
+		if cur.RevokeReason == RevokeReasonSuperseded {
+			return CertRecord{}, nil, ErrLineageConflict
+		}
+		return CertRecord{}, nil, ErrCertRevoked
+	}
+	// The new key must differ from this certificate's and the last three before it.
+	for row, i := cur, 0; i < 4; i++ {
+		if row.SPKISHA256 == spki {
+			return CertRecord{}, nil, ErrSameKey
+		}
+		if row.PrevSerial == "" {
+			break
+		}
+		prev, err := queryCert(ctx, conn, `WHERE serial = ?`, row.PrevSerial)
+		if err != nil {
+			break
+		}
+		row = prev
+	}
+	latest, err := queryCert(ctx, conn, latestWhere, workerID)
+	if err != nil {
+		return CertRecord{}, nil, err
+	}
+	now := s.clk.Now()
+	grace := false
+	if latest.Serial != presented {
+		// The successor is not the one the worker holds: only a response lost on
+		// its way (the successor was never used) justifies it, and only briefly.
+		if latest.PrevSerial != presented || now.Sub(latest.IssuedAt) > renewGrace || seen(latest.Serial) {
+			return CertRecord{}, nil, ErrLineageConflict
+		}
+		grace = true
+	}
+	if !admit(grace) {
+		return CertRecord{}, nil, ErrRenewRateLimited
+	}
+	cert, issuer, err := issue(workerID)
+	if err != nil {
+		return CertRecord{}, nil, err
+	}
+	if grace {
+		// The predecessor is renewing again, so the successor it never used is
+		// a second descendant of one key: revoke it, leaving one live branch.
+		if _, err := conn.ExecContext(ctx,
+			`UPDATE worker_certs SET revoked_at = ?, revoked_by = ?, revoke_reason = ? WHERE serial = ? AND revoked_at IS NULL`,
+			now.Unix(), lineageActor, RevokeReasonSuperseded, latest.Serial); err != nil {
+			return CertRecord{}, nil, fmt.Errorf("worker certs: renew: %w", err)
+		}
+	}
+	rec := RecordFor(cert, issuer, workerID, CertIssuedViaRenew, now)
+	rec.PrevSerial = presented
+	if err := insertCert(ctx, conn, rec); err != nil {
+		return CertRecord{}, nil, err
+	}
+	if err := finish(true); err != nil {
+		return CertRecord{}, nil, fmt.Errorf("worker certs: renew: commit: %w", err)
+	}
+	committed = true
+	return rec, cert, nil
+}
+
+// RevokeWorker implements WorkerCertStore.
+func (s *EnrollmentStore) RevokeWorker(ctx context.Context, workerID, actor, reason string) ([]string, error) {
+	if actor == "" || reason == "" {
+		return nil, fmt.Errorf("%w: actor and reason are required", ErrInvalidInput)
+	}
+	conn, finish, err := s.beginImmediate(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = finish(false)
+		}
+	}()
+	var one int
+	if err := conn.QueryRowContext(ctx, `SELECT 1 FROM worker_certs WHERE worker_id = ? LIMIT 1`, workerID).Scan(&one); errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrCertNotFound
+	} else if err != nil {
+		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+	}
+	now := s.clk.Now()
+	rows, err := conn.QueryContext(ctx,
+		`SELECT serial FROM worker_certs WHERE worker_id = ? AND revoked_at IS NULL AND not_after > ?`, workerID, now.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+	}
+	var serials []string
+	for rows.Next() {
+		var sn string
+		if err := rows.Scan(&sn); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+		}
+		serials = append(serials, sn)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE worker_certs SET revoked_at = ?, revoked_by = ?, revoke_reason = ? WHERE worker_id = ? AND revoked_at IS NULL AND not_after > ?`,
+		now.Unix(), actor, reason, workerID, now.Unix()); err != nil {
+		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+	}
+	// A certificate revoked as superseded re-fires a lineage conflict on every
+	// use; the worker is revoked now, so its reason becomes the plain one and
+	// later uses of that dead key are ordinary 401s.
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE worker_certs SET revoke_reason = ? WHERE worker_id = ? AND revoked_at IS NOT NULL AND revoke_reason = ?`,
+		reason, workerID, RevokeReasonSuperseded); err != nil {
+		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE worker_enroll_tokens SET revoked_at = ?, revoked_by = ? WHERE worker_id = ? AND uses = 0 AND revoked_at IS NULL`,
+		now.Unix(), actor, workerID); err != nil {
+		return nil, fmt.Errorf("worker certs: revoke worker: %w", err)
+	}
+	if err := finish(true); err != nil {
+		return nil, fmt.Errorf("worker certs: revoke worker: commit: %w", err)
+	}
+	committed = true
+	if err := s.reload(ctx); err != nil {
+		s.log.Warn("enrollment tokens: index reload failed after revoking a worker", "err", err)
+	}
+	return serials, nil
+}
+
+// RevokedCerts implements WorkerCertStore.
+func (s *EnrollmentStore) RevokedCerts(ctx context.Context, notAfter time.Time) ([]RevokedCert, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT serial, worker_id, COALESCE(revoke_reason, '') FROM worker_certs WHERE revoked_at IS NOT NULL AND not_after > ?`, notAfter.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("worker certs: list revoked: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []RevokedCert
+	for rows.Next() {
+		var r RevokedCert
+		if err := rows.Scan(&r.Serial, &r.WorkerID, &r.Reason); err != nil {
+			return nil, fmt.Errorf("worker certs: list revoked: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("worker certs: list revoked: %w", err)
+	}
+	return out, nil
+}
+
+// DataVersion implements WorkerCertStore.
+func (s *EnrollmentStore) DataVersion(ctx context.Context) (int64, error) {
+	return s.readDataVersion(ctx)
+}
+
+// LatestCert returns the worker's latest certificate under the lineage rule
+// (rows revoked as failed issuances are skipped), or ErrCertNotFound.
+func (s *EnrollmentStore) LatestCert(ctx context.Context, workerID string) (CertRecord, error) {
+	return queryCert(ctx, s.db, latestWhere, workerID)
 }
 
 // Revoke implements EnrollmentTokenStore. It is idempotent: revoking a revoked

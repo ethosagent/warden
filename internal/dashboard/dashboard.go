@@ -260,7 +260,8 @@ type WorkerView struct {
 	PolicyVersion int64 `json:"policyVersion,omitempty"`
 	Behind        bool  `json:"behind"`
 	Online        bool  `json:"online"`
-	// AuthKind is how the worker last authenticated: token (a per-worker
+	// AuthKind is how the worker last authenticated: cert (a worker CA
+	// certificate; ProxyID is the id in its SAN), token (a per-worker
 	// token; ProxyID is the token's bound id), legacy (the shared token; the
 	// id is the worker's unverified header) or none (open control plane).
 	// Empty until the worker has made an authenticated request.
@@ -270,6 +271,10 @@ type WorkerView struct {
 	// once a minute, so it can trail LastSeen.
 	TokenName     string `json:"tokenName,omitempty"`
 	TokenLastUsed string `json:"tokenLastUsed,omitempty"`
+	// CertSerial (lowercase hex) and CertNotAfter (RFC 3339) describe the worker
+	// certificate behind an authKind=cert worker.
+	CertSerial   string `json:"certSerial,omitempty"`
+	CertNotAfter string `json:"certNotAfter,omitempty"`
 	// LegacyRequests counts the worker's requests authenticated with the shared
 	// token since the control plane started (in memory; a restart resets it).
 	LegacyRequests int64 `json:"legacyRequests"`

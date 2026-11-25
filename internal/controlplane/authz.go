@@ -229,6 +229,9 @@ func cpRouteTable() map[routeKey]authzRow {
 		// Credential is the enrollment token; mounted only with workerCA enabled
 		// and a state dir (W-P2-WCA-02).
 		{post, enrollPath, worker},
+		// Credential is the worker certificate, checked per request by the
+		// authenticator; mounted with /control/enroll (W-P2-WCA-04).
+		{post, renewPath, worker},
 		{post, "/central/ingest", worker},
 		{get, "/central/secrets", readRow(config.RoleAdmin, "secrets.read", none)},
 		{post, "/central/secrets", auditedRow(config.RoleAdmin, "secrets.write", "secrets", none)},

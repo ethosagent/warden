@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/apikeys"
 	"github.com/ethosagent/warden/internal/clock"
+	"github.com/ethosagent/warden/internal/workerca"
 )
 
 // WorkerKind is how a worker request authenticated.
@@ -26,14 +28,24 @@ const (
 	KindLegacy WorkerKind = "legacy"
 	// KindNone is an anonymous caller on an open control plane.
 	KindNone WorkerKind = "none"
+	// KindCert is a worker client certificate issued by the worker CA (W-P2-WCA-04);
+	// its proxy id is the SPIFFE id's worker id, verified against the pinned
+	// intermediates on every request.
+	KindCert WorkerKind = "cert"
 )
 
 // WorkerPrincipal is the authenticated identity of a worker request. ProxyID is
 // the id the registry, ingest store and every ingest callback record: the
 // token's bound id for KindToken, the self-reported header otherwise.
+//
+// For KindCert, ProxyID is the worker id in the certificate's SAN and the
+// request header may only repeat it; CertSerial (lowercase hex), SpiffeID and
+// NotAfter describe the certificate that authenticated the request.
 type WorkerPrincipal struct {
 	TokenID, TokenName, ProxyID string
 	Kind                        WorkerKind
+	CertSerial, SpiffeID        string
+	NotAfter                    time.Time
 }
 
 // Worker authentication errors. Both carry no detail on purpose: the reason
@@ -53,13 +65,18 @@ type workerAuthMode string
 const (
 	modeOpen   workerAuthMode = "open"   // no shared token: anonymous accepted
 	modeMixed  workerAuthMode = "mixed"  // shared token set: tokens or the shared token
-	modeStrict workerAuthMode = "strict" // --require-worker-tokens: wwt_ tokens only
+	modeStrict workerAuthMode = "strict" // --require-worker-tokens: wwt_ tokens (and certs) only
+	// modeStrictCerts is --require-worker-certs: worker certificates only.
+	modeStrictCerts workerAuthMode = "strict-certs"
 )
 
-// resolveWorkerAuthMode picks the mode: strict wins over everything (a shared
-// token never authenticates a worker in it), then a shared token means mixed.
-func resolveWorkerAuthMode(legacy string, strict bool) workerAuthMode {
+// resolveWorkerAuthMode picks the mode: strict-certs wins over everything,
+// then strict (a shared token never authenticates a worker in either), then a
+// shared token means mixed.
+func resolveWorkerAuthMode(legacy string, strict, strictCerts bool) workerAuthMode {
 	switch {
+	case strictCerts:
+		return modeStrictCerts
 	case strict:
 		return modeStrict
 	case legacy == "":
@@ -96,6 +113,15 @@ type WorkerAuthConfig struct {
 	// Strict (--require-worker-tokens) accepts wwt_ worker tokens only: the
 	// shared token and anonymous callers get 401 whatever Legacy holds.
 	Strict bool
+	// StrictCerts (--require-worker-certs) accepts worker certificates only: a
+	// wwt_ token, the shared token and anonymous callers all get 401.
+	StrictCerts bool
+	// Verifier pins the worker intermediates; nil disables certificate
+	// authentication (workerCA off). Certs is the revoked-serial index it
+	// consults; with a verifier but no index every certificate is refused
+	// (revocation would be unknowable).
+	Verifier *workerca.Verifier
+	Certs    *certIndex
 }
 
 // WorkerAuthenticator authenticates the worker-plane routes (/policy,
@@ -110,6 +136,16 @@ type WorkerAuthenticator struct {
 	log      *slog.Logger
 	clk      clock.Clock
 	tls      bool
+
+	// verifier is the pinned worker intermediates (swappable for rotation),
+	// certs the revoked index, certCache the verified-certificate cache.
+	verifier  atomic.Pointer[workerca.Verifier]
+	certs     *certIndex
+	certCache certCache
+	// onSuperseded is called when a certificate revoked as superseded is
+	// presented: a second holder of its key exists (set by the Server, which
+	// revokes the worker and audits the conflict).
+	onSuperseded func(workerID, serial, remote string)
 
 	mu         sync.Mutex
 	counters   map[[2]string]int64 // {kind, outcome}: bounded labels, no proxy id
@@ -140,8 +176,8 @@ func NewWorkerAuthenticator(c WorkerAuthConfig) *WorkerAuthenticator {
 		c.Clock = clock.Real()
 	}
 	a := &WorkerAuthenticator{
-		mode: resolveWorkerAuthMode(c.Legacy, c.Strict), legacy: c.Legacy, tokens: c.Tokens,
-		registry: c.Registry, log: c.Logger, clk: c.Clock, tls: c.TLS,
+		mode: resolveWorkerAuthMode(c.Legacy, c.Strict, c.StrictCerts), legacy: c.Legacy, tokens: c.Tokens,
+		registry: c.Registry, log: c.Logger, clk: c.Clock, tls: c.TLS, certs: c.Certs,
 		counters:   map[[2]string]int64{},
 		legacyReqs: map[string]int64{},
 		rejectedAt: map[string]time.Time{},
@@ -151,30 +187,52 @@ func NewWorkerAuthenticator(c WorkerAuthConfig) *WorkerAuthenticator {
 	if c.Tokens != nil {
 		c.Tokens.OnRevoked(a.cancelToken)
 	}
+	if c.Verifier != nil {
+		a.verifier.Store(c.Verifier)
+	}
+	if c.Certs != nil {
+		c.Certs.onRevoked = func(serial string) { a.cancelToken(certCancelKey(serial)) }
+	}
 	return a
 }
+
+// SetVerifier swaps the pinned intermediates (rotation) and drops every cached
+// verification, so the next request of each certificate is verified afresh.
+func (a *WorkerAuthenticator) SetVerifier(v *workerca.Verifier) {
+	a.verifier.Store(v)
+	a.certCache.reset()
+}
+
+// certCancelKey is the cancel-registry key of a certificate's held long-polls.
+func certCancelKey(serial string) string { return "cert:" + serial }
 
 // WatchRevoke registers a parked long-poll of p and returns a channel closed
 // when its credential is revoked, plus a release func to call when the poll
 // returns. Only token principals have a per-credential identity: for legacy
 // and none it returns a nil channel (never ready) and a no-op release.
 func (a *WorkerAuthenticator) WatchRevoke(p WorkerPrincipal) (<-chan struct{}, func()) {
-	if p.Kind != KindToken || p.TokenID == "" {
+	var key string
+	switch {
+	case p.Kind == KindToken && p.TokenID != "":
+		key = p.TokenID
+	case p.Kind == KindCert && p.CertSerial != "":
+		key = certCancelKey(p.CertSerial)
+	default:
 		return nil, func() {}
 	}
 	a.cancelMu.Lock()
-	e := a.cancels[p.TokenID]
+	e := a.cancels[key]
 	if e == nil {
 		e = &cancelEntry{ch: make(chan struct{})}
-		a.cancels[p.TokenID] = e
+		a.cancels[key] = e
 	}
 	e.waiters++
 	a.cancelMu.Unlock()
 	return e.ch, func() {
 		a.cancelMu.Lock()
 		defer a.cancelMu.Unlock()
-		if e.waiters--; e.waiters == 0 && a.cancels[p.TokenID] == e {
-			delete(a.cancels, p.TokenID)
+		if e.waiters--; e.waiters == 0 && a.cancels[key] == e {
+			delete(a.cancels, key)
 		}
 	}
 }
@@ -190,24 +248,48 @@ func (a *WorkerAuthenticator) cancelToken(id string) {
 	}
 }
 
-// Reauthenticate re-checks p against the in-memory token index before a
-// response is written after a wait. It does no DB I/O and does not count or
-// mark the token used. Legacy and none principals always pass.
+// Reauthenticate re-checks p against the in-memory token index (or, for a
+// certificate, its expiry and the revoked-serial index) before a response is
+// written after a wait. It does no DB I/O and does not count or mark the
+// credential used. Legacy and none principals always pass.
 func (a *WorkerAuthenticator) Reauthenticate(p WorkerPrincipal) error {
-	if p.Kind != KindToken {
-		return nil
-	}
-	if a.tokens == nil || a.tokens.Valid(p.TokenID) != nil {
-		return ErrUnauthorized
+	switch p.Kind {
+	case KindToken:
+		if a.tokens == nil || a.tokens.Valid(p.TokenID) != nil {
+			return ErrUnauthorized
+		}
+	case KindCert:
+		if a.verifier.Load() == nil || !a.clk.Now().Before(p.NotAfter) {
+			return ErrUnauthorized
+		}
+		if a.certs == nil {
+			return ErrUnauthorized
+		}
+		if revoked, loaded := a.certs.Revoked(p.CertSerial); revoked || !loaded {
+			return ErrUnauthorized
+		}
 	}
 	return nil
+}
+
+// SeenCertSerial reports whether the worker authenticated with the certificate
+// of this serial in this process. Renewal's lineage rule uses it to tell a
+// successor that was never used (the response was lost) from one the worker
+// already holds. A restart forgets everything, which is the safe direction: an
+// unseen successor only widens the 10-minute grace.
+func (a *WorkerAuthenticator) SeenCertSerial(workerID, serial string) bool {
+	return a.registry != nil && a.registry.certSeen(workerID, serial)
 }
 
 // LogMode logs the resolved mode once, with the open-mode and no-TLS warnings.
 func (a *WorkerAuthenticator) LogMode() {
 	a.log.Info("control plane worker auth", "auth_mode", string(a.mode),
 		"legacy_token", a.legacy != "", "tls", a.tls,
-		"worker_tokens", a.tokens != nil, "active_worker_tokens", a.activeTokens())
+		"worker_tokens", a.tokens != nil, "active_worker_tokens", a.activeTokens(),
+		"worker_certs", a.verifier.Load() != nil)
+	if a.verifier.Load() != nil && a.certs == nil {
+		a.log.Warn("worker certificates are refused: no certificate store (workerCA needs --state-dir to check revocations)")
+	}
 	if a.mode == modeOpen {
 		a.log.Warn("worker auth is open: anonymous callers are accepted on /policy, /control/heartbeat and /central/ingest (issue worker tokens, or set --legacy-token-env)")
 	}
@@ -263,7 +345,7 @@ func (a *WorkerAuthenticator) Authenticate(r *http.Request) (WorkerPrincipal, er
 			outcome = "forbidden"
 		}
 		a.count(p.Kind, outcome)
-		a.logRejected(reason, tokenID, r)
+		a.logRejected(reason, tokenID, p.CertSerial, r)
 		return WorkerPrincipal{}, err
 	}
 	a.count(p.Kind, "ok")
@@ -283,12 +365,30 @@ func (a *WorkerAuthenticator) Authenticate(r *http.Request) (WorkerPrincipal, er
 // resolve authenticates without side effects. On error p.Kind names the
 // credential family that was attempted (for the counter label).
 func (a *WorkerAuthenticator) resolve(r *http.Request) (p WorkerPrincipal, reason, tokenID string, err error) {
+	// A presented client certificate is judged alone: invalid is a 401 whatever
+	// bearer rides along, and a valid one is the identity (the bearer is not
+	// consulted), so there is no fallback to a weaker credential.
+	if v := a.verifier.Load(); v != nil {
+		if leaf := presentedCert(r); leaf != nil {
+			return a.resolveCert(r, v, leaf)
+		}
+	}
 	tok, has := bearer(r)
 	// An API key is a human credential for the admin API: refused here whatever
 	// the mode (open included) and before any comparison, so it can never match
 	// the shared token or pass as no credential.
 	if hasAPIKeyBearer(r) || (has && apikeys.LooksLikeKey(tok)) {
 		return WorkerPrincipal{Kind: KindNone}, "api_key_bearer", "", ErrUnauthorized
+	}
+	if a.mode == modeStrictCerts {
+		p.Kind = KindNone
+		if has {
+			p.Kind = KindLegacy
+			if strings.HasPrefix(tok, workerTokenPrefix) {
+				p.Kind = KindToken
+			}
+		}
+		return p, "worker_cert_required", "", ErrUnauthorized
 	}
 	if has && strings.HasPrefix(tok, workerTokenPrefix) {
 		p.Kind = KindToken
@@ -432,9 +532,10 @@ func (a *WorkerAuthenticator) legacyIDs() int {
 }
 
 // logRejected logs one "worker auth rejected" line per reason and remote host
-// per minute. The reason, token id (when known) and address are all it carries:
+// per minute. The reason, token id and certificate serial (when known) and the
+// address are all it carries:
 // never the Authorization header, the plaintext or the hash.
-func (a *WorkerAuthenticator) logRejected(reason, tokenID string, r *http.Request) {
+func (a *WorkerAuthenticator) logRejected(reason, tokenID, serial string, r *http.Request) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
@@ -464,6 +565,9 @@ func (a *WorkerAuthenticator) logRejected(reason, tokenID string, r *http.Reques
 	attrs := []any{"reason", reason}
 	if tokenID != "" {
 		attrs = append(attrs, "token_id", tokenID)
+	}
+	if serial != "" {
+		attrs = append(attrs, "serial", serial)
 	}
 	attrs = append(attrs, "remote_addr", host)
 	a.log.Warn("worker auth rejected", attrs...)

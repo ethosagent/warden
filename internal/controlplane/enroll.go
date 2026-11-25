@@ -62,6 +62,8 @@ type enrollState struct {
 
 	logMu  sync.Mutex
 	logged map[string]time.Time
+
+	renew *renewState
 }
 
 // newEnrollState returns nil unless workerCA is enabled and both stores exist.
@@ -82,6 +84,7 @@ func newEnrollState(cfg Config) *enrollState {
 	for _, o := range enrollOutcomes {
 		e.counts[o] = new(atomic.Int64)
 	}
+	e.renew = newRenewState(e)
 	return e
 }
 
@@ -100,12 +103,24 @@ func (s *Server) EnrollCount(outcome string) int64 {
 // the CSR.
 func (e *enrollState) reject(outcome, reason, tokenID, addr string) {
 	e.counts[outcome].Add(1)
-	now := e.clk.Now()
-	key := reason + "\x00" + addr
-	e.logMu.Lock()
-	if last, ok := e.logged[key]; ok && now.Sub(last) < enrollLogEvery {
-		e.logMu.Unlock()
+	if !e.shouldLog(reason + "\x00" + addr) {
 		return
+	}
+	attrs := []any{"reason", reason, "remote_addr", addr}
+	if tokenID != "" {
+		attrs = append(attrs, "token_id", tokenID)
+	}
+	e.log.Warn("worker enroll rejected", attrs...)
+}
+
+// shouldLog reports whether a rejection log line for key is due, and records
+// it: one line per key per enrollLogEvery.
+func (e *enrollState) shouldLog(key string) bool {
+	now := e.clk.Now()
+	e.logMu.Lock()
+	defer e.logMu.Unlock()
+	if last, ok := e.logged[key]; ok && now.Sub(last) < enrollLogEvery {
+		return false
 	}
 	if len(e.logged) >= maxEnrollLogs {
 		for k, t := range e.logged {
@@ -115,12 +130,7 @@ func (e *enrollState) reject(outcome, reason, tokenID, addr string) {
 		}
 	}
 	e.logged[key] = now
-	e.logMu.Unlock()
-	attrs := []any{"reason", reason, "remote_addr", addr}
-	if tokenID != "" {
-		attrs = append(attrs, "token_id", tokenID)
-	}
-	e.log.Warn("worker enroll rejected", attrs...)
+	return true
 }
 
 type enrollRequest struct {
@@ -291,7 +301,7 @@ func (s *Server) finishEnroll(ctx context.Context, ca *workerca.CA, res Redeemed
 	if err == nil {
 		return nil
 	}
-	if rerr := s.enroll.certs.RevokeCert(context.WithoutCancel(ctx), serial, "enroll:"+res.Token.ID, "enroll_failed"); rerr != nil {
+	if rerr := s.enroll.certs.RevokeCert(context.WithoutCancel(ctx), serial, "enroll:"+res.Token.ID, RevokeReasonEnrollFailed); rerr != nil {
 		s.cfg.Logger.Error("worker enroll: revoking the unrecorded certificate failed", "serial", serial, "error", rerr.Error())
 	}
 	return err

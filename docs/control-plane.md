@@ -1207,6 +1207,7 @@ startup and logged as `auth_mode=...`:
 | `open` | no shared token, not strict | any caller without a `wwt_` token (development; a warning is logged). A `wwt_` bearer is always validated |
 | `mixed` | `--legacy-token-env` set (or its deprecated alias `--token-env`) | a worker token or the shared token |
 | `strict` | `--require-worker-tokens` | a worker token only: the shared token and anonymous callers get `401` |
+| `strict-certs` | `--require-worker-certs` | a worker certificate only (workerCA): tokens, the shared token and anonymous callers get `401` |
 
 The startup line `control plane worker auth` also carries `legacy_token` (whether a shared token is
 configured, never its value), `tls` and `active_worker_tokens`. Worker tokens over plain HTTP log a
@@ -1221,6 +1222,7 @@ disables them. The shared token reaches the write guard only as the fallback whi
 |---|---|
 | `--legacy-token-env <ENV>` | env var holding the shared worker token. Unset (the default) means there is none. `--token-env` is a deprecated alias: it still works and logs a deprecation notice; naming two different variables with the two flags is a startup error. |
 | `--require-worker-tokens` | strict mode (default off). Needs `--state-dir` (tokens live in its database), TLS (`--ca-cert` and `--ca-key`) unless `--allow-insecure-worker-auth` is set, and no legacy token. |
+| `--require-worker-certs` | strict-certs mode (default off). Needs `workerCA.enabled`, `--state-dir` and TLS, and neither `--require-worker-tokens` nor a legacy token. See "Worker certificate authentication". |
 | `--allow-insecure-worker-auth` | lets `--require-worker-tokens` run without TLS (development only). |
 
 A violation exits non-zero before the control plane listens, with an error that names the flag
@@ -1712,6 +1714,61 @@ through `console.trustedProxies` (the resolver in `adminaudit_mw.go`).
 Re-running `create` with the same name, value and binding is always a no-op,
 even after the token was used up, expired or revoked: it is never revived or
 extended, and the command prints its state.
+
+### Worker certificate authentication and `POST /control/renew`
+
+With `workerCA.enabled` and TLS (`--ca-cert`/`--ca-key`), the listener asks every
+client for a certificate but verifies nothing in the handshake. The worker
+authenticator judges a presented certificate on each request to `/policy`,
+`/control/heartbeat` and `/central/ingest`: it must chain to a pinned worker
+intermediate, carry clientAuth, have exactly one `spiffe://<trust domain>/warden/worker/<id>`
+URI SAN, be inside its validity window by the control plane clock and not be
+revoked. Anything else is a uniform `401 unauthorized` (never a handshake error),
+the request is **not** retried against a bearer in the same request, and the
+reason (`bad_chain`, `bad_eku`, `bad_san`, `expired`, `revoked`) goes only to the
+rate-limited `worker auth rejected` log line with the serial. The worker id is the
+SAN's: a missing `X-Warden-Proxy-ID` header resolves to it and a different one is
+a `403 proxy id mismatch`. The fleet view shows `authKind=cert`, `certSerial` and
+`certNotAfter`; `warden_cp_worker_auth_total{kind=cert,outcome}` counts the results.
+
+Verification uses the intermediates pinned at startup, so it keeps working while
+the CA key is degraded (only enrollment and renewal answer 503). The revoked-serial
+index is in memory (no database access per request), is reloaded on the 2 s
+`PRAGMA data_version` poll and keeps the last good set when a reload fails. Until
+the first load succeeds, and when there is no `--state-dir`, certificates are
+refused. `/central/secrets` and `/dashboard/*` never accept a worker certificate:
+a request that presents one and no bearer of its own gets 401 on `/central/secrets`
+in every method.
+
+Modes: with workerCA enabled, the open, mixed and `--require-worker-tokens` modes
+accept a certificate next to their tokens. `--require-worker-certs` (default off)
+accepts certificates only, logs `auth_mode=strict-certs`, and refuses to start
+without workerCA, `--state-dir` and TLS, or together with `--require-worker-tokens`
+or `--legacy-token-env`.
+
+`POST /control/renew {"csr": "<PEM>"}` is authenticated by the certificate alone (a
+bearer is a 401). It needs a P-256 or Ed25519 CSR for a new public key (400
+`same_key` otherwise) and a lineage head: the worker's latest certificate (rows
+revoked as `enroll_failed` or `renew_failed` do not count), or its predecessor
+within 10 minutes when this control plane has not seen the successor used (a lost
+response; up to 3 retries). A grace renewal revokes that unused successor
+(`revoke_reason=superseded`), so only one descendant of the predecessor stays valid;
+presenting a superseded serial later, or a renewal from any other serial, revokes the
+worker (all its certificates and its unused id-bound enrollment tokens), cuts off its
+held long-polls and appends `worker.cert_lineage_conflict`; the worker must re-enroll
+with a new token. "Seen" is kept in memory: a control plane restart clears it, which
+widens the grace (a successor that was in use looks unseen for the first 10 minutes).
+The new key must differ from the presented certificate's and the three before it.
+A successful renewal inserts `worker_certs` with `issued_via=renew` and `prev_serial`
+and returns 201 with the enrollment response shape plus `prevSerial`; it is logged
+and counted (`warden_cp_worker_renew_total{outcome}`), not admin-audited. At most
+one renewal per worker per 10 minutes (429 with `Retry-After`; only a committed
+renewal spends it), 30 requests a minute per remote address, 503 `ca_unavailable`
+while the CA is degraded.
+
+`workerCA.enabled` requires `--ca-cert` and `--ca-key`: enrollment tokens and
+certificates never travel over plain HTTP, and the control plane exits before
+listening otherwise.
 
 ## Block list: offline CLI
 

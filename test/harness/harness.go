@@ -224,7 +224,9 @@ type H struct {
 	// enabled; workerCA is the fixture minted on first use.
 	wantWorkerCA bool
 	workerCA     *workerCAFixture
-	keyStore     *fakes.FakeKeyStore
+	// wantStrictCerts (WithRequireWorkerCerts) adds --require-worker-certs.
+	wantStrictCerts bool
+	keyStore        *fakes.FakeKeyStore
 	// awsAccount is the fake AWS Secrets Manager account of WithAWSKeyStore;
 	// the control plane's injected role is scoped to keysAWSNamePrefix.
 	awsAccount *fakes.FakeAWSSecretsClient
@@ -825,6 +827,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyKeys(&ip.cp.params)
 	h.applyAPIKeys(&ip.cp.params)
 	h.applyStrict(&ip.cp.params)
+	h.applyStrictCerts(&ip.cp.params)
 	return ip
 }
 

@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"io"
@@ -42,7 +43,7 @@ type wcaFixture struct {
 	interKey *ecdsa.PrivateKey
 }
 
-func newWCAFixture(t *testing.T, now time.Time) wcaFixture {
+func newWCAFixture(t testing.TB, now time.Time) wcaFixture {
 	t.Helper()
 	f := wcaFixture{dir: t.TempDir()}
 	var err error
@@ -245,7 +246,9 @@ func mustCSR(t *testing.T) *x509.CertificateRequest {
 // healthzBody returns /healthz's body.
 func healthzBody(t *testing.T, base string) string {
 	t.Helper()
-	resp, err := http.Get(base + "/healthz")
+	// The control plane serves a certificate minted from a throwaway CA.
+	cl := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}}}
+	resp, err := cl.Get(base + "/healthz")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +262,7 @@ func healthzBody(t *testing.T, base string) string {
 
 func TestWorkerCAStartupLogsOneLineAndServes(t *testing.T) {
 	f := newWCAFixture(t, time.Now())
-	base, logs, stop := runCPServing(t, Params{ConfigPath: wcaConfig(t, f.yaml("file"))})
+	base, logs, stop := runCPServing(t, withTestTLS(t, Params{ConfigPath: wcaConfig(t, f.yaml("file"))}))
 	defer stop()
 	if got := healthzBody(t, base); got != "ok\n" {
 		t.Fatalf("healthz = %q", got)
@@ -302,9 +305,34 @@ func TestWorkerCAStartupRefusals(t *testing.T) {
 	if err := os.WriteFile(f.keyFile, mustRead(t, g.keyFile), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = run(Params{ConfigPath: wcaConfig(t, f.yaml("file"))})
+	err = run(withTestTLS(t, Params{ConfigPath: wcaConfig(t, f.yaml("file"))}))
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("key mismatch: %v", err)
+	}
+}
+
+// withTestTLS gives p a generated --ca-cert/--ca-key: workerCA needs TLS.
+func withTestTLS(t *testing.T, p Params) Params {
+	t.Helper()
+	p.CACert, p.CAKey, _ = genTestCA(t)
+	p.TLSHost = "127.0.0.1"
+	return p
+}
+
+// TestWorkerCARequiresTLS: workerCA.enabled without --ca-cert/--ca-key is a
+// startup error, so enrollment tokens and certificates never cross plain HTTP.
+func TestWorkerCARequiresTLS(t *testing.T) {
+	f := newWCAFixture(t, time.Now())
+	for name, p := range map[string]Params{
+		"neither":    {},
+		"only a key": {CAKey: "k"},
+	} {
+		p.ConfigPath = wcaConfig(t, f.yaml("file"))
+		p.ListenAddr, p.AnalyticsProvider = "127.0.0.1:0", "memory"
+		err := Run(context.Background(), io.Discard, p)
+		if err == nil || !strings.Contains(err.Error(), "workerCA.enabled requires --ca-cert and --ca-key") {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
 
@@ -325,7 +353,7 @@ func TestWorkerCADegradedUntilTheKeyArrives(t *testing.T) {
 	f := newWCAFixture(t, time.Now())
 	clk := clocktest.NewFake(time.Now())
 	cfg := writeKeysPolicy(t, keysEnabledYAML+f.yaml("keys"))
-	base, logs, stop := runCPServing(t, Params{ConfigPath: cfg, StateDir: stateDir, Clock: clk})
+	base, logs, stop := runCPServing(t, withTestTLS(t, Params{ConfigPath: cfg, StateDir: stateDir, Clock: clk}))
 	defer stop()
 	if got := healthzBody(t, base); !strings.HasPrefix(got, "degraded") {
 		t.Fatalf("healthz = %q, want degraded", got)

@@ -315,6 +315,13 @@ var All = slices.Concat(
 		{Name: "workerca_degraded_then_ready", Opts: workerCAOpts(), Run: workerCADegradedThenReady},
 		{Name: "workerca_enroll", Opts: workerCAEnrollOpts(), Run: workerCAEnroll},
 		{Name: "workerca_enroll_off", Run: workerCAEnrollOff},
+		// Worker certificate authentication and /control/renew (W-P2-WCA-04):
+		// per-request verification on the three worker routes, SAN-bound ids,
+		// hostile certificates refused with a 401, no cert on human routes, the
+		// renewal lineage rule, and --require-worker-certs. In-process only.
+		{Name: "workerca_cert_auth", Opts: workerCACertAuthOpts(), Run: workerCACertAuth},
+		{Name: "workerca_renew", Opts: workerCACertAuthOpts(), Run: workerCARenew},
+		{Name: "workerca_strict_certs", Opts: workerCAStrictCertsOpts(), Run: workerCAStrictCerts},
 		{Name: "keys_disabled_creates_nothing", Opts: []harness.Option{harness.WithBackup()}, Run: keysDisabledCreatesNothing},
 		// Key rotation (W-P2-KEYS-06): rotate-key is refused while the control
 		// plane runs, rotates offline once it is stopped (signed handover, new
