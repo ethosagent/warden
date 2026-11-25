@@ -122,6 +122,9 @@ type H struct {
 	mcpEnabled bool
 	// mcpConfig (WithMCPConfig) replaces the monitor-mode default.
 	mcpConfig *config.MCPConfig
+	// dlp (WithDLP) is the outbound request-body DLP config every worker boots
+	// with; nil leaves DLP off.
+	dlp *config.DLPConfig
 	// transparent (TransparentIntercept) boots the workers in interception mode
 	// `both` (#376): the CONNECT proxy keeps working AND the transparent
 	// listeners bind on loopback port 0 (addresses via TransparentAddrs).
@@ -188,6 +191,10 @@ type H struct {
 	// wantAdminAudit (WithAdminAudit) boots the control plane with
 	// console.adminAudit.enabled and a state dir.
 	wantAdminAudit bool
+	// wantAPIKeys (WithAPIKeys) enables console.apiKeys on the oidc console.
+	wantAPIKeys  bool
+	apiKeyMu     sync.Mutex
+	apiKeyCounts func() map[string]int64
 	// wantBreakGlass (WithBreakGlass) enables console.breakGlass with a hash
 	// file under the harness root; breakGlassHash is that file's path.
 	wantBreakGlass bool
@@ -414,6 +421,14 @@ func WithMCPConfig(cfg config.MCPConfig) Option {
 		h.mcpEnabled = true
 		h.mcpConfig = &cfg
 	}
+}
+
+// WithDLP boots the workers with outbound request-body DLP configured as given
+// (mode, rules, class defaults, WardenTokens), for scenarios that assert what the
+// worker detects, records or blocks in an agent's request body. Left out, DLP is
+// off.
+func WithDLP(cfg config.DLPConfig) Option {
+	return func(h *H) { h.dlp = &cfg }
 }
 
 // WithOIDCIssuer starts the in-process OIDC issuer fake (fakes.OIDCIssuer) for
@@ -804,6 +819,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyCPAdmin(&ip.cp.params)
 	h.applyBackup(&ip.cp.params)
 	h.applyKeys(&ip.cp.params)
+	h.applyAPIKeys(&ip.cp.params)
 	h.applyStrict(&ip.cp.params)
 	return ip
 }
@@ -910,6 +926,9 @@ func (h *H) workerParams(i int) worker.Params {
 			policy.MCP = *h.mcpConfig
 			policy.MCP.Enabled = true
 		}
+	}
+	if h.dlp != nil {
+		policy.DLP = *h.dlp
 	}
 	if h.transparent {
 		// Interception mode `both` (#376): port-0 loopback listeners, so a
