@@ -817,6 +817,7 @@ func (s *Server) Handler() http.Handler {
 		views := tracker.Views()
 		FlagNoGroupPolicy(views, s.scopedEntries())
 		FlagNoIdentityChallenge(views, s.challengeServed())
+		FlagNoIdentityRequire(views, s.servedSettings())
 		for i := range views {
 			views[i].Behind = views[i].PolicyETag != "" && views[i].PolicyETag != cur
 		}
@@ -927,6 +928,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	s.noteWorkerBundle(principal.ProxyID, caps, wb)
 	s.noteGroupPolicy(principal.ProxyID, caps)
 	s.noteIdentityChallenge(principal.ProxyID, caps)
+	s.noteIdentityRequire(principal.ProxyID, agentID, caps)
 	w.WriteHeader(http.StatusNoContent)
 }
 

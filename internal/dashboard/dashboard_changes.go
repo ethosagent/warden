@@ -484,7 +484,7 @@ func (s *Server) approveChange(w http.ResponseWriter, r *http.Request, id string
 		writeError(w, http.StatusBadRequest, "revision and doc_sha256 are required")
 		return
 	}
-	res, err := s.changeDrafts.Approve(r.Context(), id, in)
+	res, err := s.changeDrafts.Approve(withForce(r.Context(), r), id, in)
 	s.writeChangeResult(w, res, err)
 }
 

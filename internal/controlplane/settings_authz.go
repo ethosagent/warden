@@ -22,8 +22,9 @@ import (
 // settings on disk, so a concurrent admin edit cannot slip between the check
 // and the write. A refusal is a *dashboard.RoleRequiredError naming the fields.
 func (s *Server) writeSettingsAs(ctx context.Context, in config.SettingsWire, meta dashboard.WriteMeta) error {
+	guard := func(live *config.SettingsWire) error { return s.requireGuard(ctx, live, in) }
 	if s.cfg.Console.Auth != config.ConsoleAuthOIDC {
-		return s.WriteSettings(ctx, in, meta)
+		return s.writeSettingsChecked(ctx, in, meta, guard)
 	}
 	var role config.Role
 	p, ok := PrincipalFrom(ctx)
@@ -34,7 +35,7 @@ func (s *Server) writeSettingsAs(ctx context.Context, in config.SettingsWire, me
 		return &dashboard.RoleRequiredError{Need: config.RoleEditor.String()}
 	}
 	if role >= config.RoleAdmin {
-		return s.WriteSettings(ctx, in, meta)
+		return s.writeSettingsChecked(ctx, in, meta, guard)
 	}
 	return s.writeSettingsChecked(ctx, in, meta, func(live *config.SettingsWire) error {
 		changed, err := settingsWireFieldsChanged(live, in)
@@ -57,6 +58,8 @@ func (s *Server) writeSettingsAs(ctx context.Context, in config.SettingsWire, me
 			"sub", p.Sub, "fields", denied)
 		return &dashboard.RoleRequiredError{Need: need.String(), Fields: denied}
 	})
+	// An editor never changes identity modes (admin-only fields), so the
+	// rollout guard has nothing to check on this path.
 }
 
 // settingsWireFieldsChanged reports the fields in differs from live in, after

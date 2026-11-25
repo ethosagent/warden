@@ -2560,6 +2560,41 @@ worker without it with *identity: challenge not supported, still allowing*, and
 the control plane logs `worker_lacks_identity_challenge` once per worker per
 policy version. Do not rely on challenge mode until no worker carries that mark.
 
+### Moving an agent from attribute to require
+
+A worker that does not know `require` keeps its previous identity config, which is
+attribute mode: it would let token-less traffic through for an agent you believe is
+enforced. So the control plane guards the switch.
+
+1. **Name every worker's agent.** Start each worker with `--agent-id` or set
+   `central.agentID`. A worker that sends no agent id is shown as *agent unknown*
+   and does **not** block a per-agent switch (the control plane cannot tell which
+   agent it serves), but it does block `identity.defaultMode: require`.
+2. **Upgrade the workers.** Workers on this build advertise `identity/require-v1` in
+   every heartbeat. The Agents tab and the worker list show *N connected workers
+   for this agent do not enforce require mode* (and *identity: require not
+   supported, still allowing*) for any that do not.
+3. **Save the mode.** `POST`/`PUT /dashboard/api/settings` (or applying a held
+   change draft) that newly sets `agents[].identity` or `identity.defaultMode` to
+   `require` is refused with `409 {"error":"workers_lack_capability","workers":[ids]}`
+   while a connected worker serving that agent (any connected worker, for the
+   default) lacks the capability. Nothing is written. "Connected" means a heartbeat
+   or poll in the last 45 seconds; a worker that is offline is not listed, so a
+   worker that reappears later without the capability is only flagged in the fleet
+   view and logged once per policy version as `worker_lacks_identity_require`.
+   Re-check the fleet view after every worker restart. An unrelated settings save
+   while `require` is already in force is never refused for this reason.
+4. **Force, if you must.** `?force=true` on the same request overrides the refusal.
+   Only an admin may force; the admin audit row of the write records
+   `force=true` and the refused worker ids (`workersLacking`, with
+   `workersLackingCount`). Applying a held draft takes the same `?force=true` on
+   the approve request.
+5. **Roll back.** Set the agent's identity back to `attribute` (or `off`) in the same
+   settings form; leaving require is never refused.
+
+`agents[].identity` and `identity.defaultMode` are admin-only settings fields, so an
+editor gets `403 role_required` for them.
+
 ### Where the token travels
 
 - `Proxy-Authorization` on `CONNECT` works everywhere, with or without TLS

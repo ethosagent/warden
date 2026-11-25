@@ -306,6 +306,11 @@ type WorkerView struct {
 	// it cannot apply the mode and keeps allowing callers it should challenge.
 	// Set by the control plane per snapshot.
 	NoIdentityChallenge bool `json:"noIdentityChallenge"`
+	// NoIdentityRequire is true when the served settings put the worker's agent
+	// (or, for a worker with no agent id, the default mode) in require mode and
+	// the worker does not advertise identity/require-v1: it keeps attribute mode
+	// and lets token-less traffic through. Set by the control plane per snapshot.
+	NoIdentityRequire bool `json:"noIdentityRequire"`
 	// AgentID is the registered agent the worker's latest heartbeat says it
 	// serves, and IdentityMode the identity mode it says it runs. Both are
 	// validated by the control plane and empty for a worker that reports none.
@@ -1112,7 +1117,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.settingsWriter(r.Context(), settings, meta); err != nil {
+	if err := s.settingsWriter(withForce(r.Context(), r), settings, meta); err != nil {
 		writeWriterError(w, err)
 		return
 	}
