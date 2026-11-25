@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/ethosagent/warden/internal/clock"
@@ -13,17 +14,59 @@ import (
 // bundleExpiryInterval is how often the applied bundle's expiry is checked.
 const bundleExpiryInterval = 10 * time.Second
 
+// serialEvaluator serializes every policy apply on the worker. The embedded
+// evaluator is the gated one (agent gate, then swap); raw is the evaluator
+// itself, for deny-all, which must not run the gate with a policy that lacks
+// the registry list (that would re-enable a disabled agent). The long-poll loop
+// applies through Replace; the expiry loop through denyIfExpired and
+// restoreIfValid, which re-check the bundle state and read the newest policy
+// snapshot under the same lock, so an older snapshot is never applied over a
+// newer one.
+type serialEvaluator struct {
+	proxy.PolicyEvaluator
+	raw proxy.PolicyEvaluator
+	mu  sync.Mutex
+}
+
+func (s *serialEvaluator) Replace(p config.Policy) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.PolicyEvaluator.Replace(p)
+}
+
+// denyIfExpired swaps in deny-all when the applied bundle is expired now.
+func (s *serialEvaluator) denyIfExpired(cp ControlPlaneClient) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !cp.BundleStatus().Expired {
+		return false
+	}
+	s.raw.Replace(config.Policy{})
+	return true
+}
+
+// restoreIfValid re-applies the newest policy when the bundle is valid again.
+func (s *serialEvaluator) restoreIfValid(cp ControlPlaneClient) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cp.BundleStatus().Expired {
+		return false
+	}
+	pol, err := cp.GetPolicy()
+	if err != nil {
+		return false
+	}
+	s.PolicyEvaluator.Replace(pol)
+	return true
+}
+
 // enforceBundleExpiry applies controlPlane.bundleExpiry to the applied signed
 // bundle. A bundle is only checked for expiry when it arrives, so a worker whose
 // control plane went away keeps the bundle it has. While the bundle is within
 // expiresAt plus the skew nothing happens. Past it, mode keep logs one WARN and
 // keeps enforcing; mode deny swaps in an empty policy (deny all) until a bundle
 // that is valid again arrives, and then puts that policy back.
-//
-// raw is the evaluator itself: deny-all must bypass the agent gate, whose
-// apply of a policy without the registry list would re-enable a disabled agent.
-// restore goes through the gate like any applied policy.
-func enforceBundleExpiry(ctx context.Context, clk clock.Clock, cp ControlPlaneClient, raw, restore proxy.PolicyEvaluator, logger *slog.Logger) {
+func enforceBundleExpiry(ctx context.Context, clk clock.Clock, cp ControlPlaneClient, ev *serialEvaluator, logger *slog.Logger) {
 	t := clk.NewTimer(bundleExpiryInterval)
 	defer t.Stop()
 	var denied, warned bool
@@ -41,25 +84,16 @@ func enforceBundleExpiry(ctx context.Context, clk clock.Clock, cp ControlPlaneCl
 				logger.Warn("applied bundle has expired and no valid replacement arrived",
 					"seq", st.Seq, "expiresAt", st.ExpiresAt, "mode", string(st.Expiry))
 			}
-			if st.Expiry != config.BundleExpiryDeny || denied {
-				continue
+			if st.Expiry == config.BundleExpiryDeny && !denied && ev.denyIfExpired(cp) {
+				denied = true
+				logger.Warn("bundle expired: denying all traffic until a valid bundle arrives", "seq", st.Seq)
 			}
-			raw.Replace(config.Policy{})
-			denied = true
-			logger.Warn("bundle expired: denying all traffic until a valid bundle arrives", "seq", st.Seq)
-			// A valid bundle may have been applied while this ran; its own
-			// swap could then have come first. Look again.
-			if cp.BundleStatus().Expired {
-				continue
-			}
+			continue
 		}
-		warned = st.Applied && st.Expired
-		if denied && !cp.BundleStatus().Expired {
-			if pol, err := cp.GetPolicy(); err == nil {
-				restore.Replace(pol)
-				denied = false
-				logger.Info("bundle valid again; enforcement restored", "seq", cp.BundleStatus().Seq)
-			}
+		warned = false
+		if denied && ev.restoreIfValid(cp) {
+			denied = false
+			logger.Info("bundle valid again; enforcement restored", "seq", cp.BundleStatus().Seq)
 		}
 	}
 }

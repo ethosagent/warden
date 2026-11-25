@@ -438,3 +438,58 @@ func TestRemoteProviderWithoutPinsIsLegacy(t *testing.T) {
 		t.Fatal("SetBundleTrust accepted no clock")
 	}
 }
+
+func TestRemoteProviderSignedBundleExpiredIsRetried(t *testing.T) {
+	e := newBundleEnv(t)
+	e.now = bundleT0.Add(48 * time.Hour) // past expiresAt + skew
+	err := e.pullSeq(1, bundlePolicyA, "e1")
+	if !errors.Is(err, bundle.ErrExpired) || !IsBundleRejection(err) {
+		t.Fatalf("err = %v, want a bundle rejection wrapping ErrExpired", err)
+	}
+	if _, err := e.rp.PollLong(context.Background(), time.Millisecond); !errors.Is(err, bundle.ErrExpired) {
+		t.Fatalf("an expired bundle must be fetched again: %v", err)
+	}
+	if got := e.cp.lastINM(); got != "" {
+		t.Fatalf("If-None-Match = %s, want none for a clock-dependent rejection", got)
+	}
+	st := e.rp.BundleStatus()
+	if !st.LastRejectAt.Equal(e.now) || len(st.PinnedKIDs) != 1 || st.PinnedKIDs[0] != e.sg.KID() {
+		t.Fatalf("status = %+v", st)
+	}
+}
+
+func TestRemoteProviderSignedBundleInvalidPolicyLeaksNothing(t *testing.T) {
+	e := newBundleEnv(t)
+	bad := `{"allowlist":[{"domain":"secret-host.example.com"}],"registeredAgents":[{"id":"leaky-agent-id","status":"paused","jkt":["` + strings.Repeat("A", 43) + `"]}]}`
+	err := e.pullSeq(1, bad, "e1")
+	if err == nil || !IsBundleRejection(err) {
+		t.Fatalf("err = %v", err)
+	}
+	for _, out := range []string{err.Error(), e.logs.String()} {
+		if strings.Contains(out, "leaky-agent-id") || strings.Contains(out, "secret-host") || strings.Contains(out, "paused") {
+			t.Fatalf("payload content leaked: %s", out)
+		}
+	}
+	if !strings.Contains(e.logs.String(), BundleReasonInvalidPolicy) {
+		t.Fatalf("no reason in logs: %s", e.logs)
+	}
+}
+
+func TestRemoteProviderUnpinnedWorkerGetsHintOn406(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotAcceptable)
+	}))
+	defer srv.Close()
+	rp, err := NewRemoteProvider(srv.URL, "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp.client, rp.longClient = srv.Client(), srv.Client()
+	err = rp.Pull()
+	if err == nil || !strings.Contains(err.Error(), "controlPlane.bundleKeys") {
+		t.Fatalf("err = %v, want a hint naming controlPlane.bundleKeys", err)
+	}
+	if IsBundleRejection(err) {
+		t.Fatal("a 406 is not a bundle rejection")
+	}
+}

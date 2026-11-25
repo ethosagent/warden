@@ -46,6 +46,7 @@ type RemoteProvider struct {
 	trust         *BundleTrust
 	bundle        *VerifiedBundle
 	lastReject    string
+	lastRejectAt  time.Time
 	rejects       map[string]int64
 	loggedRejects map[string]bool
 	// caps are the capabilities advertised on every heartbeat (see WorkerCaps).
@@ -237,7 +238,7 @@ func (r *RemoteProvider) Pull() error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return r.setErr(fmt.Errorf("config: remote: unexpected status %d", resp.StatusCode))
+		return r.setErr(r.statusErr(resp.StatusCode))
 	}
 	_, err = r.applyResponse(resp)
 	return err
@@ -318,7 +319,7 @@ func (r *RemoteProvider) PollLong(ctx context.Context, wait time.Duration) (chan
 	case http.StatusOK:
 		return r.applyResponse(resp)
 	default:
-		return false, r.setErr(fmt.Errorf("config: remote: unexpected status %d", resp.StatusCode))
+		return false, r.setErr(r.statusErr(resp.StatusCode))
 	}
 }
 
@@ -365,6 +366,19 @@ func (r *RemoteProvider) Heartbeat(ctx context.Context) error {
 		return fmt.Errorf("config: remote: heartbeat status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// statusErr is the error for an unexpected status. A 406 to a worker without
+// pins is a control plane in --bundles=require talking to a worker that does
+// not ask for the envelope; the error says what to configure.
+func (r *RemoteProvider) statusErr(code int) error {
+	r.mu.RLock()
+	pinned := r.trust != nil
+	r.mu.RUnlock()
+	if code == http.StatusNotAcceptable && !pinned {
+		return fmt.Errorf("config: remote: unexpected status %d: the control plane requires signed bundles; pin its bundle keys in controlPlane.bundleKeys", code)
+	}
+	return fmt.Errorf("config: remote: unexpected status %d", code)
 }
 
 // setAccept asks for the signed envelope when pins are set. Without pins the

@@ -31,11 +31,18 @@ type bundleCP struct {
 	body []byte
 	etag string
 	inm  []string
+	// wake is closed (and replaced) whenever set changes the served bundle, so
+	// a held 304 poll returns at once.
+	wake chan struct{}
 }
 
 func (c *bundleCP) set(body []byte, etag string) {
 	c.mu.Lock()
 	c.body, c.etag = body, etag
+	if c.wake != nil {
+		close(c.wake)
+	}
+	c.wake = make(chan struct{})
 	c.mu.Unlock()
 }
 
@@ -54,9 +61,16 @@ func (c *bundleCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.mu.Lock()
 	body, etag := c.body, c.etag
 	c.inm = append(c.inm, r.Header.Get("If-None-Match"))
+	if c.wake == nil {
+		c.wake = make(chan struct{})
+	}
+	wake := c.wake
 	c.mu.Unlock()
 	if r.Header.Get("If-None-Match") == `"`+etag+`"` {
-		time.Sleep(5 * time.Millisecond) // a held poll
+		select { // a held poll: until the bundle changes or the client leaves
+		case <-wake:
+		case <-r.Context().Done():
+		}
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -186,7 +200,7 @@ func TestEnforceBundleExpiry(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {
-			enforceBundleExpiry(ctx, clk, cp, raw, restore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			enforceBundleExpiry(ctx, clk, cp, &serialEvaluator{PolicyEvaluator: restore, raw: raw}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			close(done)
 		}()
 		t.Cleanup(func() { cancel(); <-done })
@@ -245,4 +259,96 @@ func TestEnforceBundleExpiry(t *testing.T) {
 			t.Fatal("deny-all without an applied bundle")
 		}
 	})
+}
+
+// hookClient is a ControlPlaneClient whose bundle status and policy the test
+// sets, and whose GetPolicy runs a hook (the restore window).
+type hookClient struct {
+	fakeControlPlaneClient
+	mu2    sync.Mutex
+	status config.BundleStatus
+	pol    config.Policy
+	hook   func() config.Policy // when set, replaces the next GetPolicy once
+}
+
+func (c *hookClient) BundleStatus() config.BundleStatus {
+	c.mu2.Lock()
+	defer c.mu2.Unlock()
+	return c.status
+}
+
+func (c *hookClient) GetPolicy() (config.Policy, error) {
+	c.mu2.Lock()
+	hook := c.hook
+	c.hook = nil
+	pol := c.pol
+	c.mu2.Unlock()
+	if hook != nil {
+		return hook(), nil
+	}
+	return pol, nil
+}
+
+// TestBundleExpiryRestoreNeverRevertsOrReenables: the restore window of the
+// expiry loop overlaps a long-poll apply that disables the bound agent. The
+// applies are serialized, so the disable lands last: the agent is never
+// re-enabled and the evaluator never goes back to the older policy.
+func TestBundleExpiryRestoreNeverRevertsOrReenables(t *testing.T) {
+	a, _, _ := newTestApplier(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	g := newAgentGate(a.p, "claude-code", logger)
+	rec := &recordingEvaluator{}
+	ev := &serialEvaluator{PolicyEvaluator: gatedEvaluator{PolicyEvaluator: rec, gate: g}, raw: rec}
+
+	p1 := config.Policy{
+		Allowlist:        []config.AllowlistEntry{{Domain: "old.example.com"}},
+		RegisteredAgents: []config.RegisteredAgent{registered("claude-code", config.RegisteredAgentActive)},
+	}
+	p2 := config.Policy{
+		Allowlist:        []config.AllowlistEntry{{Domain: "new.example.com"}},
+		RegisteredAgents: []config.RegisteredAgent{registered("claude-code", config.RegisteredAgentDisabled)},
+	}
+	expired := config.BundleStatus{Enabled: true, Applied: true, Seq: 1, Expired: true, Expiry: config.BundleExpiryDeny}
+	cp := &hookClient{status: expired, pol: p1}
+
+	clk := clocktest.NewFake(bundleStart)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { enforceBundleExpiry(ctx, clk, cp, ev, logger); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	count := func() int { rec.mu.Lock(); defer rec.mu.Unlock(); return len(rec.replaced) }
+	await(t, 2*time.Second, "the expiry loop to arm", func() bool { return clk.PendingTimers() == 1 })
+
+	clk.Advance(bundleExpiryInterval)
+	await(t, 2*time.Second, "deny-all", func() bool { return count() == 1 })
+
+	// The bundle becomes valid again. While the restore holds the lock and
+	// reads a snapshot, the long poll applies the newer policy that disables
+	// the agent (the restore's snapshot is the older one).
+	applied := make(chan struct{})
+	cp.mu2.Lock()
+	cp.status = config.BundleStatus{Enabled: true, Applied: true, Seq: 2, Expiry: config.BundleExpiryDeny}
+	cp.hook = func() config.Policy {
+		go func() { ev.Replace(p2); close(applied) }()
+		return p1
+	}
+	cp.mu2.Unlock()
+	await(t, 2*time.Second, "restore and the concurrent apply", func() bool {
+		clk.Advance(bundleExpiryInterval)
+		select {
+		case <-applied:
+			return count() == 3
+		default:
+			return false
+		}
+	})
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if got := rec.replaced[2].Allowlist; len(got) != 1 || got[0].Domain != "new.example.com" {
+		t.Fatalf("the evaluator ended on %+v, want the newer policy", got)
+	}
+	if !a.p.AgentDisabled() {
+		t.Fatal("the bound agent was re-enabled")
+	}
 }

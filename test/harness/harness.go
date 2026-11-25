@@ -254,7 +254,10 @@ type H struct {
 	bundleMode string
 	// bundlePins (WithBundlePins, WithUnrelatedBundlePins) are the bundle keys
 	// every worker pins; bundleExpiry (WithBundleExpiry) is its expiry mode.
-	bundlePins   bundlePinSet
+	bundlePins bundlePinSet
+	// bundleTamper (WithTamperingBundleProxy) is the proxy workers reach the
+	// control plane through; nil unless the option is set.
+	bundleTamper *tamperProxy
 	bundleExpiry config.BundleExpiry
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
@@ -929,7 +932,7 @@ func (h *H) workerParams(i int) worker.Params {
 		Secrets:         mappings,
 		Observability:   config.ObservabilityConfig{Enabled: true, ServiceName: "warden-harness"},
 		ControlPlane: config.ControlPlaneConfig{
-			Endpoint:          "https://" + h.ControlPlaneAddr() + "/policy",
+			Endpoint:          "https://" + h.workerCPAddr() + "/policy",
 			TokenEnv:          cpTokenEnv,
 			CACert:            h.proxyCACertDst,
 			PollInterval:      time.Second,

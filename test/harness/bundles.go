@@ -1,7 +1,18 @@
 package harness
 
 import (
+	"bytes"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethosagent/warden/internal/bundle"
@@ -127,4 +138,97 @@ func (h *H) VerifyBundle(raw []byte, applied bundle.State) bundle.Verified {
 		h.tb.Fatalf("harness: the served bundle does not verify: %v", err)
 	}
 	return v
+}
+
+// tamperProxy is a TLS reverse proxy between the workers and the control plane
+// that can flip one payload byte of every signed bundle it relays. It speaks
+// for the control plane's ETags: a worker sends back the ETag of the bundle it
+// rejected and the proxy answers as the control plane would (304 while the
+// real envelope is unchanged).
+type tamperProxy struct {
+	addr     string
+	on       atomic.Bool
+	tampered atomic.Int64
+}
+
+const tamperedETagPrefix = "tampered-"
+
+// WithTamperingBundleProxy puts a tampering proxy between the workers and the
+// control plane (their controlPlane.endpoint points at it). Switch it with
+// TamperBundles. In-process only.
+func WithTamperingBundleProxy() Option {
+	return func(h *H) { h.bundleTamper = &tamperProxy{} }
+}
+
+// TamperBundles turns bundle tampering on or off.
+func (h *H) TamperBundles(on bool) {
+	h.tb.Helper()
+	if h.bundleTamper == nil {
+		h.tb.Fatal("harness: TamperBundles needs WithTamperingBundleProxy")
+	}
+	h.bundleTamper.on.Store(on)
+}
+
+// TamperedBundles is how many bundles the proxy has tampered with.
+func (h *H) TamperedBundles() int64 {
+	if h.bundleTamper == nil {
+		return 0
+	}
+	return h.bundleTamper.tampered.Load()
+}
+
+// workerCPAddr is the control plane address workers dial: the tampering proxy
+// when there is one.
+func (h *H) workerCPAddr() string {
+	tp := h.bundleTamper
+	if tp == nil {
+		return h.ControlPlaneAddr()
+	}
+	if tp.addr != "" {
+		return tp.addr
+	}
+	cert, err := h.proxyCA.leaf("127.0.0.1")
+	if err != nil {
+		h.tb.Fatalf("harness: tampering proxy cert: %v", err)
+	}
+	target, _ := url.Parse("https://" + h.ControlPlaneAddr())
+	rp := httputil.NewSingleHostReverseProxy(target)
+	rp.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: h.proxyCA.pool(), MinVersion: tls.VersionTLS12}}
+	dir := rp.Director
+	rp.Director = func(r *http.Request) {
+		dir(r)
+		if inm := r.Header.Get("If-None-Match"); strings.HasPrefix(inm, `"`+tamperedETagPrefix) {
+			r.Header.Set("If-None-Match", `"`+strings.TrimPrefix(inm, `"`+tamperedETagPrefix))
+		}
+	}
+	rp.ModifyResponse = func(resp *http.Response) error {
+		if !tp.on.Load() || resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != BundleMediaType {
+			return nil
+		}
+		raw, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return err
+		}
+		var env bundle.Envelope
+		if err := json.Unmarshal(raw, &env); err != nil || len(env.Payload) == 0 {
+			return fmt.Errorf("harness: tampering proxy: not an envelope")
+		}
+		p := []byte(env.Payload)
+		p[len(p)/2] ^= 1
+		env.Payload = string(p)
+		raw, _ = json.Marshal(env)
+		resp.Body = io.NopCloser(bytes.NewReader(raw))
+		resp.ContentLength = int64(len(raw))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(raw)))
+		resp.Header.Set("ETag", `"`+tamperedETagPrefix+strings.Trim(resp.Header.Get("ETag"), `"`)+`"`)
+		tp.tampered.Add(1)
+		return nil
+	}
+	srv := httptest.NewUnstartedServer(rp)
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	srv.StartTLS()
+	h.tb.Cleanup(srv.Close)
+	tp.addr = strings.TrimPrefix(srv.URL, "https://")
+	return tp.addr
 }

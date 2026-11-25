@@ -413,6 +413,7 @@ var All = slices.Concat(
 		{Name: "bundles_pinned_worker_enforces", Opts: pinnedWorkerEnforcesOpts(), Run: pinnedWorkerEnforces},
 		{Name: "bundles_pinned_worker_unrelated_key_fails_closed", Opts: unrelatedPinsOpts(), Run: pinnedWorkerUnrelatedKeyFailsClosed},
 		{Name: "bundles_pinned_worker_expiry_deny", Opts: pinnedWorkerDenyOpts(), Run: pinnedWorkerExpiryDeny},
+		{Name: "bundles_pinned_worker_tampered_bundle", Opts: tamperedOpts(), Run: pinnedWorkerTamperedBundleKeepsLastKnownGood},
 		// Warden credentials in agent egress (W-P2-APIK-06): a wak_ key or wwt_
 		// token in a request body is flagged as credentials only with
 		// dlp.wardenTokens on, and blocked only in enforce mode with a rule.

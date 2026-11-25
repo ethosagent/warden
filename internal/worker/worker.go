@@ -1030,12 +1030,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		}
 		// The long-poll swaps the evaluator through gatedEvaluator, so the agent
 		// switch flips (and cuts sessions) BEFORE the new allow policy is live.
-		go longPollControlPlane(ctx, clk, controlPlane, gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
+		// Every evaluator apply (long-poll, expiry deny, expiry restore) goes
+		// through one lock: the agent gate is single-goroutine, and a restore
+		// must never apply an older snapshot over a newer one.
+		applyEv := &serialEvaluator{PolicyEvaluator: gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, raw: evaluator}
+		go longPollControlPlane(ctx, clk, controlPlane, applyEv, pol.ControlPlane.LongPollWait, logger, onPolicyApplied(applier.Apply, pxy.CloseBlockedSessions))
 		go heartbeatControlPlane(ctx, clk, controlPlane, pol.ControlPlane.HeartbeatInterval, logger)
 		if pol.ControlPlane.BundleVerification() {
-			// The raw evaluator, not the gated one: deny-all must not run the
-			// agent gate with a policy that lacks the registry list.
-			go enforceBundleExpiry(ctx, clk, controlPlane, evaluator, gatedEvaluator{PolicyEvaluator: evaluator, gate: gate}, logger)
+			go enforceBundleExpiry(ctx, clk, controlPlane, applyEv, logger)
 		}
 	}
 	if syncWorker != nil {

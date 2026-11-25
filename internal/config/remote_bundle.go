@@ -42,6 +42,27 @@ const BundleSectionTokenJWKS = "tokenJWKS"
 // addition to the bundle.Reason values.
 const BundleReasonInvalidPolicy = "invalid_policy"
 
+// BundleRejectError is a rejected bundle response. It carries the reason, seq
+// and kid only; Unwrap exposes the bundle error for errors.Is.
+type BundleRejectError struct {
+	Reason string
+	Seq    int64
+	KID    string
+	err    error
+}
+
+func (e *BundleRejectError) Error() string {
+	return "config: remote: bundle rejected (" + e.Reason + "): " + e.err.Error()
+}
+func (e *BundleRejectError) Unwrap() error { return e.err }
+
+// IsBundleRejection reports whether err is a rejected bundle, which the
+// provider has already logged.
+func IsBundleRejection(err error) bool {
+	var b *BundleRejectError
+	return errors.As(err, &b)
+}
+
 // maxLoggedRejects bounds the set of rejections already warned about.
 const maxLoggedRejects = 64
 
@@ -113,6 +134,11 @@ type BundleStatus struct {
 	// LastRejectReason is the reason of the newest rejection since the last
 	// apply ("" when none): a bundle.Reason value or BundleReasonInvalidPolicy.
 	LastRejectReason string
+	// LastRejectAt is when the newest rejection happened (zero when none yet).
+	// It is kept after a later apply, unlike LastRejectReason.
+	LastRejectAt time.Time
+	// PinnedKIDs are the kids of the pinned keys, in pin order.
+	PinnedKIDs []string
 	// Rejected counts rejections by reason since the provider was created.
 	Rejected map[string]int64
 }
@@ -160,7 +186,15 @@ func (r *RemoteProvider) BundleStatus() BundleStatus {
 		Enabled:          true,
 		Expiry:           r.trust.Expiry,
 		LastRejectReason: r.lastReject,
+		LastRejectAt:     r.lastRejectAt,
 		Rejected:         make(map[string]int64, len(r.rejects)),
+	}
+	for _, j := range r.trust.Pins {
+		kid := j.Kid
+		if kid == "" {
+			kid, _ = keys.Thumbprint(j)
+		}
+		st.PinnedKIDs = append(st.PinnedKIDs, kid)
 	}
 	for k, n := range r.rejects {
 		st.Rejected[k] = n
@@ -211,7 +245,9 @@ func (r *RemoteProvider) applyBundleBody(t *BundleTrust, resp *http.Response) (b
 		// The signature is good but the wire is not one this worker can
 		// enforce (for example an invalid registeredAgents list): reject it
 		// whole so the last-known-good policy, and a disabled agent, stay.
-		return false, r.reject(t, fmt.Errorf("policy: %w", perr), BundleReasonInvalidPolicy, v.Seq, v.KID, "", body, etag)
+		// The decode error is dropped on purpose: it can quote ids and domains
+		// from the payload, which belong in no log.
+		return false, r.reject(t, errors.New("policy is not enforceable by this worker"), BundleReasonInvalidPolicy, v.Seq, v.KID, "", body, etag)
 	}
 	if c := v.Credentials; c != nil {
 		// In memory only: the sidecar never reaches disk or a log.
@@ -253,15 +289,15 @@ func (r *RemoteProvider) applyBundleBody(t *BundleTrust, resp *http.Response) (b
 // reject records a rejected response: nothing applied changes, the rejection
 // is counted and warned about once per distinct (reason, digest), and the
 // rejected ETag becomes the next long-poll's If-None-Match so the same bad
-// bundle is not downloaded again. A "future" bundle is the exception: a clock
-// that catches up makes it valid without the envelope changing, so it is
-// fetched again.
+// bundle is not downloaded again. A "future" or "expired" bundle is the exception:
+// both depend on the clock, which can move without the envelope changing, so
+// it is fetched again.
 func (r *RemoteProvider) reject(t *BundleTrust, err error, reason string, seq int64, kid, digest string, body []byte, etag string) error {
 	if digest == "" {
 		sum := sha256.Sum256(body)
 		digest = hex.EncodeToString(sum[:8])
 	}
-	wrapped := fmt.Errorf("config: remote: bundle rejected: %w", err)
+	wrapped := &BundleRejectError{Reason: reason, Seq: seq, KID: kid, err: err}
 
 	r.mu.Lock()
 	r.lastErr = wrapped
@@ -270,9 +306,10 @@ func (r *RemoteProvider) reject(t *BundleTrust, err error, reason string, seq in
 		r.rejects = map[string]int64{}
 	}
 	r.rejects[reason]++
-	if reason != "future" {
+	if !errors.Is(err, bundle.ErrFuture) && !errors.Is(err, bundle.ErrExpired) {
 		r.pollETag = etag
 	}
+	r.lastRejectAt = t.Now()
 	key := reason + "/" + digest
 	first := !r.loggedRejects[key]
 	if first {

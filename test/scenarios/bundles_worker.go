@@ -137,3 +137,46 @@ func pinnedWorkerExpiryDeny(t *testing.T, h *harness.H) {
 		return connectStatus(t, h, "api.example.com:443") == http.StatusOK
 	})
 }
+
+func tamperedOpts() []harness.Option {
+	return pinnedWorkerOpts(harness.WithTamperingBundleProxy())
+}
+
+// pinnedWorkerTamperedBundleKeepsLastKnownGood: a path between the worker and
+// the control plane flips a byte of the next bundle. The worker rejects it,
+// keeps enforcing the previous policy (the new host stays blocked), does not
+// re-download the bad bundle, and applies the next good one the control
+// plane signs.
+func pinnedWorkerTamperedBundleKeepsLastKnownGood(t *testing.T, h *harness.H) {
+	h.Upstream(rollbackHost)
+	h.Eventually("the worker applies a verified bundle", func() bool {
+		return connectStatus(t, h, "api.example.com:443") == http.StatusOK
+	})
+
+	h.TamperBundles(true)
+	saveAllowing(t, h, rollbackHost, `"v1"`)
+	h.Eventually("the worker rejects the tampered bundle", func() bool {
+		h.Clock().Advance(time.Second)
+		return h.TamperedBundles() > 0 && strings.Contains(h.Logs(), "bad_signature")
+	})
+	if connectStatus(t, h, rollbackHost+":443") != http.StatusForbidden {
+		t.Fatal("the worker applied a tampered bundle")
+	}
+	if connectStatus(t, h, "api.example.com:443") != http.StatusOK {
+		t.Fatal("the worker lost its last-known-good policy")
+	}
+	seen := h.TamperedBundles()
+	for i := 0; i < 5; i++ {
+		h.Clock().Advance(5 * time.Second)
+	}
+	if h.TamperedBundles() != seen {
+		t.Fatalf("the rejected bundle was downloaded again (%d -> %d)", seen, h.TamperedBundles())
+	}
+
+	// The control plane re-signs on a timer; the next good bundle applies.
+	h.TamperBundles(false)
+	h.Eventually("the next good bundle is applied", func() bool {
+		h.Clock().Advance(time.Hour)
+		return connectStatus(t, h, rollbackHost+":443") == http.StatusOK
+	})
+}

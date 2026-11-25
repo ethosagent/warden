@@ -60,7 +60,12 @@ func longPollControlPlane(ctx context.Context, clk clock.Clock, cp ControlPlaneC
 			if ctx.Err() != nil {
 				return
 			}
-			logger.Warn("control plane long-poll failed; keeping last-known policy", "error", err)
+			if config.IsBundleRejection(err) {
+				// The provider already warned once per distinct rejection.
+				logger.Debug("signed bundle rejected; keeping last-known policy", "error", err)
+			} else {
+				logger.Warn("control plane long-poll failed; keeping last-known policy", "error", err)
+			}
 			select {
 			case <-ctx.Done():
 				return
