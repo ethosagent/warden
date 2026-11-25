@@ -341,9 +341,12 @@ type remoteWire struct {
 	Policy
 	// BlockedUsers is decoded here, not through Policy (whose field is
 	// json:"-" for rule X2), then copied onto the policy in parseRemotePolicy.
-	BlockedUsers    []BlockedUser    `json:"blockedUsers,omitempty"`
-	Settings        *SettingsWire    `json:"settings,omitempty"`
-	ScopedAllowlist []AllowlistEntry `json:"scopedAllowlist,omitempty"`
+	BlockedUsers []BlockedUser `json:"blockedUsers,omitempty"`
+	// RegisteredAgents likewise (W-P2-AREG-04): decoded here, sorted and
+	// validated in parseRemotePolicy.
+	RegisteredAgents []RegisteredAgent `json:"registeredAgents,omitempty"`
+	Settings         *SettingsWire     `json:"settings,omitempty"`
+	ScopedAllowlist  []AllowlistEntry  `json:"scopedAllowlist,omitempty"`
 	// ScopedAllowPos[i] is the index ScopedAllowlist[i] had in the full
 	// allowlist, strictly ascending. Absent: the entries are appended.
 	ScopedAllowPos []int `json:"scopedAllowPos,omitempty"`
@@ -374,6 +377,14 @@ func parseRemotePolicy(body []byte) (*Policy, *SettingsWire, error) {
 		p.Denylist[i].Domain = strings.ToLower(p.Denylist[i].Domain)
 	}
 	p.BlockedUsers = normalizeBlockedUsers(w.BlockedUsers)
+	if len(w.RegisteredAgents) > 0 {
+		agents := append([]RegisteredAgent(nil), w.RegisteredAgents...)
+		SortRegisteredAgents(agents)
+		if err := ValidateRegisteredAgents(agents); err != nil {
+			return nil, nil, err
+		}
+		p.RegisteredAgents = agents
+	}
 	// The wire carries scoped entries only in scopedAllowlist: a plain entry
 	// with principals is what an older worker would read as global, so it is
 	// refused here even though validate (W-P1-GPOL-10) now accepts principals.

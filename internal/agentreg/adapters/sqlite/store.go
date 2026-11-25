@@ -48,6 +48,11 @@ type Store struct {
 	snap  *snapshot
 	group singleflight.Group
 
+	// syncMu guards syncLast/syncSeen, the data_version Sync last saw.
+	syncMu   sync.Mutex
+	syncLast int64
+	syncSeen bool
+
 	// Test seams (export_test.go); nil in production.
 	afterRead func()                               // after a load's reads, before it is cached
 	version   func(context.Context) (int64, error) // replaces dataVersion
@@ -204,6 +209,29 @@ func (s *Store) Watch(ctx context.Context, interval time.Duration) {
 			s.invalidate()
 		}
 	}
+}
+
+// Sync reads PRAGMA data_version now and drops the snapshot if another
+// connection has committed since the previous Sync (or if this is the first
+// call, or the read fails), so the next read comes from the database. The
+// control plane calls it on every policy reload, which bounds how stale a
+// write by the offline CLI can be to the reload interval rather than to the
+// reload interval plus Watch's poll. It is a single pragma read; it does not
+// touch the registry tables.
+func (s *Store) Sync(ctx context.Context) error {
+	v, err := s.readVersion(ctx)
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	if err != nil {
+		s.syncSeen = false
+		s.invalidate()
+		return err
+	}
+	if !s.syncSeen || v != s.syncLast {
+		s.syncLast, s.syncSeen = v, true
+		s.invalidate()
+	}
+	return nil
 }
 
 func (s *Store) readVersion(ctx context.Context) (int64, error) {

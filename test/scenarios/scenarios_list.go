@@ -381,6 +381,11 @@ var All = slices.Concat(
 		// reload interval, each appends one cli audit row without key material,
 		// a stale revision changes nothing. In-process only (CP state dir).
 		{Name: "agent_registry_cli", Opts: agentRegistryCLIOpts(), Run: agentRegistryCLI},
+		// Registered agents in the policy wire (W-P2-AREG-04): an out-of-process
+		// register, disable and enable reach GET /policy within one reload tick
+		// with a new ETag each time, and the wire carries only id, status and
+		// thumbprints. In-process only (CP state dir).
+		{Name: "agent_registry_policy_wire", Opts: agentRegistryPolicyWireOpts(), Run: agentRegistryPolicyWire},
 		// Signed bundles (W-P2-SBND-02): --bundles=off answers the envelope
 		// Accept header with the unchanged legacy policy; --bundles=offer signs
 		// the served policy with the bundle key, moves the seq forward on a save,

@@ -388,3 +388,69 @@ func TestMigrationsDeclareTheRegistryTables(t *testing.T) {
 		t.Fatalf("Migrations() = %+v", migs)
 	}
 }
+
+// Sync drops the snapshot as soon as data_version has moved, without waiting
+// for Watch's poll: a second handle's write is seen by the next read after a
+// Sync, and a Sync with no write in between leaves the cache alone.
+func TestStore_SyncSeesAnotherProcessImmediately(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "warden-cp.db")
+	open := func() *cpstate.DB {
+		db, err := cpstate.Open(ctx, path, sqlite.Migrations())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return db
+	}
+	a, b := sqlite.New(open()), sqlite.New(open())
+	if _, err := a.Create(ctx, newAgent(t, "s1"), actor); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Sync(ctx); err != nil { // baseline
+		t.Fatal(err)
+	}
+	if _, err := a.List(ctx); err != nil { // warm
+		t.Fatal(err)
+	}
+	if _, err := b.SetStatus(ctx, "s1", agentreg.StatusDisabled, 1, actor); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := a.Get(ctx, "s1"); got.Status != agentreg.StatusActive {
+		t.Fatalf("a should serve its snapshot before Sync, got %s", got.Status)
+	}
+	if err := a.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := a.Get(ctx, "s1"); got.Status != agentreg.StatusDisabled {
+		t.Fatalf("after Sync a serves %s, want disabled", got.Status)
+	}
+}
+
+// A failing version read drops the cache, reports the error, and the next
+// good read re-baselines.
+func TestStore_SyncErrorDropsCache(t *testing.T) {
+	ctx := context.Background()
+	s := sqlite.New(openDB(t))
+	if _, err := s.Create(ctx, newAgent(t, "e1"), actor); err != nil {
+		t.Fatal(err)
+	}
+	var fail atomic.Bool
+	sqlite.SetVersionReader(s, func(context.Context) (int64, error) {
+		if fail.Load() {
+			return 0, errors.New("boom")
+		}
+		return 1, nil
+	})
+	if err := s.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fail.Store(true)
+	if err := s.Sync(ctx); err == nil {
+		t.Fatal("Sync swallowed the version read error")
+	}
+	fail.Store(false)
+	if err := s.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
