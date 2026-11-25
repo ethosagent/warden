@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	agentregsqlite "github.com/ethosagent/warden/internal/agentreg/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/approvals/adapters/sqlstore"
 	"github.com/ethosagent/warden/internal/clock"
@@ -42,6 +43,7 @@ func StateMigrations() []cpstate.Migration {
 	migs = append(migs, adminaudit.Migrations()...)
 	migs = append(migs, BlockMigrations()...)
 	migs = append(migs, WorkerTokenMigrations()...)
+	migs = append(migs, agentregsqlite.Migrations()...)
 	migs = append(migs, EnrollmentMigrations()...)
 	// Feature-gated: known to the downgrade guard, applied only with
 	// keys.enabled (stateMigrationsFor).
