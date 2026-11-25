@@ -1264,7 +1264,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         <div><h1>API Keys</h1><div class="desc">Scoped, expiring keys for scripts and CI. A key acts for you, limited to its scopes and to your current role</div></div>
         <span style="display:flex;align-items:center;gap:8px"><span class="sub" id="ak-status"></span><button class="btn primary sm" id="ak-new" style="display:none">+ New key</button></span>
       </div>
-      <div class="note" id="ak-nosession" style="margin-bottom:10px; display:none">Keys are created from a signed-in console session only. This console has no sign-in, so keys can be listed and revoked here but not created.</div>
+      <div class="note" id="ak-nosession" style="margin-bottom:10px; display:none">Could not confirm a signed-in OIDC session; keys cannot be created from this session.</div>
       <div class="card">
         <div id="ak-list"><div class="card-pad note">Loading…</div></div>
       </div>
@@ -2538,7 +2538,7 @@ async function loadAPIKeys(){
   const list=document.getElementById('ak-list'); if(!list) return;
   await authInit();
   ak.admin=roleAllows('admin');
-  ak.canCreate=authMode==='oidc';
+  ak.canCreate=authMode==='oidc'&&!!me&&me.authMethod==='oidc';
   document.getElementById('ak-new').style.display=ak.canCreate?'':'none';
   document.getElementById('ak-nosession').style.display=ak.canCreate?'none':'';
   let r=null, d=null;
@@ -2603,7 +2603,7 @@ async function akRevokeOwner(k){
   else akMsg('Revoke failed: '+(r?('status '+r.status):'network error')+'.');
   loadAPIKeys();
 }
-/* Whole seconds -> the largest whole unit ("h" or "d") for the expiry field, e.g. 2160h. Hours keep the API's duration syntax. */
+/* Whole seconds -> whole hours (at least 1) for the expiry field; sent as "<n>h", a duration the API parses. */
 function akHours(sec){ return Math.max(1,Math.floor(sec/3600)); }
 function akCloseDialog(){ const d=document.getElementById('ak-dialog'); if(d) d.remove(); }
 function akOverlay(title){
@@ -2626,7 +2626,7 @@ async function akShowCreate(){
   const pad=akOverlay('New API key');
   const f=(label,node)=>{ const w=akEl('div',null,'field'); w.style.marginBottom='10px'; w.appendChild(akEl('label',label)); w.appendChild(node); pad.appendChild(w); return node; };
   const name=akEl('input'); name.type='text'; name.maxLength=64; name.autocomplete='off'; f('Name',name);
-  const desc=akEl('input'); desc.type='text'; desc.maxLength=200; desc.autocomplete='off'; f('Description (optional)',desc);
+  const desc=akEl('input'); desc.type='text'; desc.maxLength=512; desc.autocomplete='off'; f('Description (optional)',desc);
   const maxH=akHours(cfg.maxTTLSeconds||0), defH=Math.min(akHours(cfg.defaultTTLSeconds||0),maxH);
   const exp=akEl('input'); exp.type='number'; exp.min=1; exp.max=maxH; exp.value=defH; f('Expires in (hours, up to '+maxH+')',exp);
   const sw=akEl('div'); sw.appendChild(akEl('label','Scopes (only those your role may grant)'));

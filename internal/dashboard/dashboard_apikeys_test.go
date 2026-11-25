@@ -87,7 +87,7 @@ func TestAPIKeysTab(t *testing.T) {
 		}
 	}
 	// Escaping: values are text, never markup. The plaintext is never stored.
-	for _, bad := range []string{"innerHTML", "insertAdjacentHTML", "outerHTML", "document.write", "fetch(", "localStorage", "sessionStorage", "console.log", "console.error"} {
+	for _, bad := range []string{"innerHTML", "insertAdjacentHTML", "outerHTML", "document.write", "fetch(", "localStorage", "sessionStorage", "console.log", "console.error", "console.info", "console.warn", "console.debug"} {
 		if strings.Contains(js, bad) {
 			t.Errorf("api keys script uses %q", bad)
 		}
@@ -103,5 +103,32 @@ func TestAPIKeysScriptEscapesName(t *testing.T) {
 	}
 	if strings.Contains(js, "<img") {
 		t.Error("script contains literal markup")
+	}
+}
+
+// TestAPIKeysPlaintextFlow pins where the plaintext may go: it is read from the
+// 201 body once, handed to akShowSecret, and never assigned into page state.
+func TestAPIKeysPlaintextFlow(t *testing.T) {
+	js := apiKeysBlock(t, servedIndex(t))
+	if n := strings.Count(js, "b.key"); n != 2 { // typeof check + the call
+		t.Errorf("b.key occurs %d times, want 2 (type check and akShowSecret call)", n)
+	}
+	if n := strings.Count(js, "akShowSecret("); n != 2 { // definition + one call
+		t.Errorf("akShowSecret occurs %d times, want 2", n)
+	}
+	a := strings.Index(js, "function akShowSecret(")
+	b := strings.Index(js, "(function(){")
+	if a < 0 || b < a {
+		t.Fatal("cannot locate akShowSecret")
+	}
+	outside := js[:a] + js[b:]
+	if strings.Contains(outside, "secret") {
+		t.Error("the secret identifier is used outside akShowSecret")
+	}
+	for _, line := range strings.Split(js, "\n") {
+		l := strings.ToLower(line)
+		if strings.Contains(l, "ak.") && strings.Contains(l, "=") && (strings.Contains(l, "key)") || strings.Contains(l, ".key;") || strings.Contains(l, "secret")) && !strings.Contains(l, "ak.rows=d") {
+			t.Errorf("possible page-state store of the key: %s", line)
+		}
 	}
 }
