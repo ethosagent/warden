@@ -633,8 +633,49 @@ does not enforce identity, such a request goes through unattributed. Its exit co
 command's, or 128+N when signal N killed it.
 
 **Same-uid limit.** A command that runs as the same user can still read the
-identity cache file (it is 0600 to that user). Run the command as a separate
-uid; Phase 2 adds `--run-as`.
+identity cache file and, with `--agent-id`, the agent key (both are 0600 to
+that user). Without `--run-as`, `exec` protects against leaks through the
+environment, argv and logs and against stale tokens, but not against a hostile
+command running as the same uid. Use `--run-as` (below) or run the command as
+another user.
+
+#### Phase 2 addendum: `--agent-id` and `--run-as`
+
+```sh
+warden identity exec --agent-id claude-code --worker 127.0.0.1:8080 --ca certs/proxy-ca.crt -- my-agent
+sudo warden identity exec --agent-id claude-code --run-as 65534:65534 --worker 127.0.0.1:8080 -- my-agent
+```
+
+For an agent behind a worker in `require` mode, `exec --agent-id ID` sends the
+agent's Warden token (see [Warden tokens](#warden-tokens-phase-2)) instead of
+the user's ID token. It takes `--token-endpoint`, `--agent-key-file`,
+`--cp-ca` and `--subject-token-file` (or their `WARDEN_IDENTITY_*` variables)
+exactly as `token` does, and uses the same forwarder as `forward`: a token
+renewal or a worker 407 drains tunnels opened with the old token, and a
+CONNECT with no usable token gets a 503 with its reason in
+`X-Warden-Forwarder-Reason`. Nothing else changes: the per-run loopback
+credential, the child environment rules, signal forwarding and the exit codes
+are the same, and no header or claim of Contract v1 changes. The Warden token,
+the user's token and the key path never enter the command's environment, argv
+or files.
+
+- The first exchange happens before the command starts. If the control plane
+  refuses it (`invalid_client` and the other denials), `exec` exits 4 and the
+  command never runs. Without a login, `exec` runs the device-code login on a
+  terminal and otherwise exits 2, as in Phase 1. A control plane that is
+  unreachable or unavailable at start exits 3; once running, `exec` keeps
+  retrying like `forward`.
+- `--agent-id` cannot be combined with `--challenge`, `--challenge-in-tunnel`
+  or `--signin-notify`: those ask the user to sign in for their own token.
+- `--run-as UID:GID` (Linux only, `exec` must run as root) starts the command
+  with exactly that numeric uid and gid and no supplementary groups, so a
+  command that is hostile cannot read the agent key or the login cache, which
+  stay owned by the user that runs `exec` and are readable by that user alone.
+  `exec` refuses `--run-as` when it is not root, on other platforms, and for a
+  uid or gid of 0; a failed credential change stops the command from starting.
+  Because HOME, USER, LOGNAME and SHELL describe the parent, a `--run-as`
+  command does not inherit them; pass one with `--env NAME` if the command
+  needs it.
 
 ### warden identity forward
 
