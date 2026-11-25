@@ -219,7 +219,7 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 	// to carry one: a transparent connection (no CONNECT identity) is refused
 	// here, before any dial.
 	if h := p.identity(); h != nil && h.mode == IdentityModeRequire &&
-		!(ci.status() == identity.StatusValid && ci.Claims.TokenType == identity.TokenWarden) {
+		(ci.status() != identity.StatusValid || ci.Claims.TokenType != identity.TokenWarden) {
 		p.storeDeny(ci, domain, port, "tcp", denyreason.IdentityRequired, "")
 		return
 	}
