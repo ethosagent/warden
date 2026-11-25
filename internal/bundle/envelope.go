@@ -57,6 +57,9 @@ func Sign(ctx context.Context, b Bundle, creds *Credentials, signers ...keys.Sig
 	if !utf8.ValidString(b.CPID) {
 		return nil, errors.New("bundle: cpID is not valid UTF-8")
 	}
+	if !utf8.ValidString(b.TokenIssuer) {
+		return nil, errors.New("bundle: tokenIssuer is not valid UTF-8")
+	}
 	for name := range b.Sections {
 		if !utf8.ValidString(name) {
 			return nil, errors.New("bundle: a section name is not valid UTF-8")
@@ -91,7 +94,7 @@ func Sign(ctx context.Context, b Bundle, creds *Credentials, signers ...keys.Sig
 		sidecar = &c
 		b.CredentialsSHA256 = c.hash()
 	}
-	b.ContentSHA256 = contentSHA256(b.CPID, b.Policy, b.CredentialsSHA256, b.Sections)
+	b.ContentSHA256 = contentSHA256(b.CPID, b.Policy, b.CredentialsSHA256, b.Sections, b.TokenIssuer)
 
 	payload, err := marshalNoEscape(b)
 	if err != nil {

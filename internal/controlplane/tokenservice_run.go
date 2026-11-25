@@ -50,11 +50,23 @@ func resolveTokenService(logger *slog.Logger, configPath, stateDir string, id co
 		return config.TokenServiceConfig{}, errors.New("control-plane: tokenService.enabled needs a served identity block with issuer and audience (subject tokens are verified against the same IdP as workers)")
 	case !kc.Enabled:
 		return config.TokenServiceConfig{}, errors.New("control-plane: tokenService.enabled needs keys.enabled: true (issued tokens are signed with the token key)")
+	case sameIssuer(tc.Issuer, id.Issuer):
+		// A shared issuer would let a worker accept an IdP-issued token where a
+		// Warden token is expected (and the other way round): the two token
+		// kinds are told apart by their issuer.
+		return config.TokenServiceConfig{}, fmt.Errorf("control-plane: tokenService.issuer %q must differ from identity.issuer %q (Warden tokens and IdP tokens are told apart by their issuer)", tc.Issuer, id.Issuer)
 	}
 	if need := tc.TTL + tokenOverlapSlack; kc.Token.Overlap < need {
 		return config.TokenServiceConfig{}, fmt.Errorf("control-plane: keys.token.overlap %s is below tokenService.ttl + 2m (%s): a retired key must keep verifying until the last token it signed expires", kc.Token.Overlap, need)
 	}
 	return tc, nil
+}
+
+// sameIssuer reports whether two issuer URLs name the same issuer, ignoring a
+// trailing slash and ASCII case (scheme and host are case-insensitive, and an
+// operator typing one with a slash must not slip past the collision check).
+func sameIssuer(a, b string) bool {
+	return strings.EqualFold(strings.TrimRight(strings.TrimSpace(a), "/"), strings.TrimRight(strings.TrimSpace(b), "/"))
 }
 
 // tokenKeyPublishWindow is how long a token key must have been published
@@ -117,6 +129,9 @@ func (s *Server) servesTokenKID(kid string) bool {
 // before Handler; once Handler has built the mux the routes are fixed.
 func (s *Server) EnableTokens(ex TokenExchanger, issuer string, edge TokenEdge) {
 	s.cfg.Tokens, s.cfg.TokenIssuer, s.cfg.TokenEdge = ex, issuer, edge
+	// The same value is the signed bundle's tokenIssuer (W-P2-WBND-06), so the
+	// issuer a worker verifies Warden tokens against is the one that mints them.
+	s.policy.setTokenIssuer(issuer)
 }
 
 // tokenRetentionInterval is how often expired token rows are purged.

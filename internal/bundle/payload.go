@@ -65,7 +65,7 @@ func decodePayload(payload []byte) (Bundle, error) {
 // memberNames are the top-level payload members decodePayload reads. A name
 // that matches one only case-insensitively is rejected: encoding/json would
 // accept it, but the signer never writes it, so it is not a bundle.
-var memberNames = []string{"typ", "seq", "policyVersion", "issuedAt", "expiresAt", "cpID", "contentSha256", "policy", "credentialsSha256", "sections"}
+var memberNames = []string{"typ", "seq", "policyVersion", "issuedAt", "expiresAt", "cpID", "contentSha256", "policy", "credentialsSha256", "tokenIssuer", "sections"}
 
 func (b *Bundle) setMember(key string, val []byte) error {
 	if isCaseVariant(key, memberNames...) {
@@ -88,6 +88,8 @@ func (b *Bundle) setMember(key string, val []byte) error {
 		return json.Unmarshal(val, &b.ContentSHA256)
 	case "credentialsSha256":
 		return json.Unmarshal(val, &b.CredentialsSHA256)
+	case "tokenIssuer":
+		return json.Unmarshal(val, &b.TokenIssuer)
 	case "policy":
 		b.Policy = val
 	case "sections":
