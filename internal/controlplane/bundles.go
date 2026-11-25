@@ -213,6 +213,9 @@ type signedBundle struct {
 	// fp fingerprints the signed content (policy, credential, sections), so a
 	// re-sign of the same seq can prove it signs the same content.
 	fp string
+	// tokenKIDs are the kids of the tokenJWKS section this envelope signs: the
+	// keys a worker holds once it applies it. The token mint guard reads them.
+	tokenKIDs map[string]struct{}
 }
 
 // bundlePublisher builds and signs the envelope. Its mutable state is guarded
@@ -461,7 +464,7 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		b.fail(ctx, 0, "", err)
 		return
 	}
-	jwks, jsha, err := tokenJWKSSection(b.keys)
+	jwks, jsha, tokenKIDs, err := tokenJWKSSection(b.keys)
 	if err != nil {
 		b.fail(ctx, 0, signer.KID(), err)
 		return
@@ -543,7 +546,7 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 	sum := sha256.Sum256(env)
 	sb := &signedBundle{
 		env: env, etag: hex.EncodeToString(sum[:8]), seq: last.Seq, kid: signer.KID(),
-		issuedAt: now, expiresAt: bd.ExpiresAt, fp: fp,
+		issuedAt: now, expiresAt: bd.ExpiresAt, fp: fp, tokenKIDs: tokenKIDs,
 	}
 	// Persist before publishing: an envelope nobody can prove was recorded is
 	// never served.
@@ -567,18 +570,40 @@ func (b *bundlePublisher) fail(_ context.Context, seq int64, kid string, err err
 }
 
 // tokenJWKSSection returns the token JWKS as the tokenJWKS section (nil when
-// no token key is published) and the SHA-256 of it, hex.
-func tokenJWKSSection(k bundleKeys) (json.RawMessage, string, error) {
+// no token key is published), the SHA-256 of it, hex, and the set of its kids.
+func tokenJWKSSection(k bundleKeys) (json.RawMessage, string, map[string]struct{}, error) {
 	set := k.JWKS(keys.PurposeToken)
 	if len(set.Keys) == 0 {
-		return nil, "", nil
+		return nil, "", nil, nil
 	}
 	raw, err := json.Marshal(set)
 	if err != nil {
-		return nil, "", fmt.Errorf("encode token jwks: %w", err)
+		return nil, "", nil, fmt.Errorf("encode token jwks: %w", err)
+	}
+	kids := make(map[string]struct{}, len(set.Keys))
+	for _, j := range set.Keys {
+		kids[j.Kid] = struct{}{}
 	}
 	sum := sha256.Sum256(raw)
-	return raw, hex.EncodeToString(sum[:]), nil
+	return raw, hex.EncodeToString(sum[:]), kids, nil
+}
+
+// servesBundleTokenKID is the bundle half of the token mint guard. With bundles
+// off it is true: workers do not take token keys from a bundle, so there is
+// nothing more to wait for. With bundles on it is true only when the envelope
+// served now (the last one signed, which stays served while the publisher is
+// degraded) carries kid in its tokenJWKS section, so a key is never used to
+// mint before a pinned worker can hold it. No envelope yet is false.
+func (ps *policyServer) servesBundleTokenKID(kid string) bool {
+	if ps.bundles == nil {
+		return true
+	}
+	sb, _ := ps.watch.bundleSnapshot()
+	if sb == nil {
+		return false
+	}
+	_, ok := sb.tokenKIDs[kid]
+	return ok
 }
 
 // bundlePolicy splits the served wire into the signed policy bytes and the
