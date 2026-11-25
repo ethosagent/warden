@@ -80,7 +80,16 @@ for tool in docker jq curl openssl flock; do
 done
 
 # Take the shared e2e lock (the stack publishes fixed host ports), once.
-[ -n "${WARDEN_E2E_LOCKED:-}" ] || exec env WARDEN_E2E_LOCKED=1 flock /tmp/warden-e2e.lock "$ROOT/scripts/recipe-isolation.sh" "$@"
+# Wait at most 30 minutes: a caller that wraps this script in its own flock on
+# the same file would otherwise block forever on a lock its parent holds.
+if [ -z "${WARDEN_E2E_LOCKED:-}" ]; then
+	rc=0
+	WARDEN_E2E_LOCKED=1 flock -w 1800 -E 75 /tmp/warden-e2e.lock "$ROOT/scripts/recipe-isolation.sh" "$@" || rc=$?
+	if [ "$rc" -eq 75 ]; then
+		echo "FAIL setup: could not take /tmp/warden-e2e.lock within 30 minutes (another stack holds it, or this script was wrapped in flock; do not wrap it)" >&2
+	fi
+	exit "$rc"
+fi
 
 # Dev placeholders for every Dex variable the caller has not set.
 while IFS='=' read -r k v; do
@@ -191,16 +200,19 @@ allow_lines() {
 
 # ---- setup ----------------------------------------------------------------------
 
+present() { [ -e "$1" ] || [ -L "$1" ]; }
+
 setup() {
 	# Generate a throwaway dev CA only when neither half exists; never touch a
 	# CA the operator already has (a lone half is a broken state: refuse it).
-	if [ ! -e "$CERTS_DIR/proxy-ca.crt" ] && [ ! -e "$CERTS_DIR/proxy-ca.key" ]; then
+	# -L too: a dangling symlink is "present" (openssl would write through it).
+	if ! present "$CERTS_DIR/proxy-ca.crt" && ! present "$CERTS_DIR/proxy-ca.key"; then
 		[ -d "$CERTS_DIR" ] || CREATED_CERTS_DIR=1
 		CREATED_CERTS=1 # set before gen-certs so a half-written CA is still removed
 		OUT_DIR="$CERTS_DIR" "$ROOT/scripts/gen-certs.sh" >/dev/null 2>&1 || fail setup "gen-certs failed"
 		# Dev only, throwaway CA: the worker's user (uid 100) must read the key.
 		chmod 644 "$CERTS_DIR/proxy-ca.key"
-	elif [ ! -e "$CERTS_DIR/proxy-ca.crt" ] || [ ! -e "$CERTS_DIR/proxy-ca.key" ]; then
+	elif ! present "$CERTS_DIR/proxy-ca.crt" || ! present "$CERTS_DIR/proxy-ca.key"; then
 		fail setup "$CERTS_DIR holds only one of proxy-ca.crt and proxy-ca.key"
 	fi
 
