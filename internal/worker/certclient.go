@@ -278,7 +278,8 @@ func workerIDSuffix(env string) string {
 	}
 	b := []byte(v)
 	for i, c := range b {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-') {
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-'
+		if !ok {
 			b[i] = '-'
 		}
 	}
