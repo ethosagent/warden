@@ -792,6 +792,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// publisher can sign. A mode it cannot honour stops the control plane.
 	if bundlesCfg.On() {
 		if err := srv.policy.startBundles(context.WithoutCancel(ctx)); err != nil {
+			if cause := bundleKeyLoadError(srv.cfg.Keys); cause != "" {
+				err = fmt.Errorf("%w (the key manager says: %s)", err, cause)
+			}
 			if srv.integrationsStore != nil {
 				_ = srv.integrationsStore.Close() // Start never ran, so nothing else closes it
 			}

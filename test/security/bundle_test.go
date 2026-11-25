@@ -211,6 +211,36 @@ func bundleCases() []Case {
 		bundleCase("unpinned key", "unknown_kid", replacing(func(t testing.TB, s *Stack, base bundle.Bundle) Plan {
 			return Plan{Body: Sign(t, s.hostile(t, base), nil, UnpinnedSigner(t))}
 		})),
+		// Staged key rotation (W-P2-SBND-07). A worker accepts what a key it
+		// pins signed and nothing else, whatever else rides in the envelope: a
+		// key rotated out of the pin set verifies nothing, however many of them
+		// sign, and a forged signature under a pinned kid is a failure even
+		// beside a perfectly valid one by a key nobody pins.
+		bundleCase("rotated-out keys only", "unknown_kid", replacing(func(t testing.TB, s *Stack, base bundle.Bundle) Plan {
+			return Plan{Body: Sign(t, s.hostile(t, base), nil, UnpinnedSigner(t), UnpinnedSigner(t))}
+		})),
+		bundleCase("forged pinned signature beside an unpinned one", "bad_signature", replacing(func(t testing.TB, s *Stack, base bundle.Bundle) Plan {
+			raw := Sign(t, s.hostile(t, base), nil, UnpinnedSigner(t))
+			forged := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
+			return Plan{Body: mutateEnvelope(raw, func(m map[string]json.RawMessage) {
+				var sigs []bundle.Signature
+				if err := json.Unmarshal(m["signatures"], &sigs); err != nil {
+					t.Fatalf("security: decode the signatures member: %v", err)
+				}
+				sigs = append(sigs, bundle.Signature{KID: s.BundleSigner(t).KID(), Sig: forged})
+				m["signatures"], _ = json.Marshal(sigs)
+			})}
+		})),
+		// Only a forged signature under the pinned kid: nothing verifies, whatever
+		// the envelope claims (the valid-beside-forged mix of a staged rotation is
+		// a unit test: TestBundleForgedBesideValidSignature).
+		bundleCase("forged signature under the pinned kid only", "bad_signature", replacing(func(t testing.TB, s *Stack, base bundle.Bundle) Plan {
+			raw := Sign(t, s.hostile(t, base), nil, s.BundleSigner(t))
+			forged := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
+			return Plan{Body: mutateEnvelope(raw, func(m map[string]json.RawMessage) {
+				m["signatures"], _ = json.Marshal([]bundle.Signature{{KID: s.BundleSigner(t).KID(), Sig: forged}})
+			})}
+		})),
 		bundleCase("bad signature", "bad_signature", func(t testing.TB, _ *Stack, tp *TamperProxy, _ bundle.Bundle) {
 			tp.Mutate(func(raw []byte) []byte {
 				return mutateEnvelope(raw, func(m map[string]json.RawMessage) {
