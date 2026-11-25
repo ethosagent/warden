@@ -18,4 +18,5 @@ FuzzFastEnvelope ./internal/bundle
 FuzzParse ./internal/apikeys
 FuzzClassify ./internal/approvals
 FuzzClassifyNewKeyWidens ./internal/approvals
+FuzzBundleVerify ./test/security
 FuzzWardenToken ./test/security
