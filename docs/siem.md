@@ -182,6 +182,7 @@ Alert on `unspecified`: it should never occur, and seeing it means a deny path s
 | `group_not_allowed` | denyreason | A verified subject matched the destination only through identity-scoped allow entries that do not name it. |
 | `identity_groups_truncated` | denyreason | Like `group_not_allowed`, but the subject's group list was cut at the cap, so the miss may come from the cut; it fails closed under its own name. |
 | `user_blocked` | denyreason | The request's identity claims (verified or not) match an entry on the user block list. |
+| `agent_disabled` | denyreason | The agent this worker is bound to is disabled in the control plane's agent registry; every request is refused and open sessions are closed. |
 | `h2_request_trailers_unsupported` | denyreason | An HTTP/2 stream declared request trailers, which the h2 forward path does not relay. |
 | `h2_extended_connect_unsupported` | denyreason | An RFC 8441 extended CONNECT (WebSocket over h2) the stream path cannot relay faithfully. |
 | `transform_needs_buffered_body` | denyreason | An auth transform needed the body but it could not be buffered (streaming or unknown length). |
@@ -233,7 +234,7 @@ Alert on `unspecified`: it should never occur, and seeing it means a deny path s
 
 Each schema is versioned by its `schema` value and revised inside a version by `schema_rev`.
 
-- **Within v1** only additive optional fields appear, and each bumps `schema_rev`. Nothing is renamed, retyped or removed. The Go record (`internal/auditlog`), the JSON Schema and this page change in the same pull request, and tests fail if they drift.
+- **Within v1** only additive optional fields and new declared reason values appear, and each bumps `schema_rev`. Nothing is renamed, retyped or removed. The Go record (`internal/auditlog`), the JSON Schema and this page change in the same pull request, and tests fail if they drift.
 - **A breaking change** ships as `warden.decision.v2` (or `warden.admin.v2`) next to v1 for one minor release, so a pipeline can move at its own pace.
 - **Consumers must ignore unknown fields** and must route on `schema`. Send a `schema` value your pipeline does not know to a dead-letter output (both example files do) instead of dropping it, so a new version cannot disappear silently.
 - `user.status` and `outcome` are open strings or small enums: handle a value you have not seen.

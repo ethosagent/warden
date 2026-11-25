@@ -94,6 +94,18 @@ func (p *Proxy) handleTransparentTLS(conn net.Conn) {
 	// declared reason; NoMatch with a judge, and a Conditional destination (no
 	// Proxy-Authorization exists here), proceed to termination so the judge or
 	// the per-request subject can decide the real request.
+	if p.agentDisabled.Load() {
+		// A disabled agent refuses the connection before any handshake; there is
+		// no CONNECT to answer, so the audited close is the whole refusal.
+		p.emitDenyEvent(connIdentity{}, analytics.Event{
+			Timestamp: time.Now(),
+			Domain:    domain,
+			Port:      transparentHTTPSPort,
+			Protocol:  "tcp",
+			Reason:    string(denyreason.AgentDisabled),
+		})
+		return
+	}
 	g := p.admit(policy.RequestContext{Domain: domain, Port: transparentHTTPSPort, Scheme: policy.SchemeHTTPS})
 	if g.deny {
 		p.emitDenyEvent(connIdentity{}, analytics.Event{

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -153,5 +154,28 @@ audit:
 				t.Fatalf("expected validation error for %q, got nil", name)
 			}
 		})
+	}
+}
+
+// TestCentralAgentID: central.agentID parses, is trimmed, and a value that is
+// not a valid agent id stops the load with an error that does not echo it.
+func TestCentralAgentID(t *testing.T) {
+	ok := baseAllow + "\ncentral:\n  mode: worker\n  endpoint: https://agg.example.com/central/ingest\n  agentID: \"  claude-code \"\n"
+	p, err := parse([]byte(ok))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := p.policy.Central.AgentID; got != "claude-code" {
+		t.Errorf("central.agentID = %q, want claude-code", got)
+	}
+	absent, err := parse([]byte(baseAllow))
+	if err != nil || absent.policy.Central.AgentID != "" {
+		t.Errorf("absent central.agentID = %q, %v; want empty", absent.policy.Central.AgentID, err)
+	}
+	bad := baseAllow + "\ncentral:\n  mode: worker\n  endpoint: https://agg.example.com/central/ingest\n  agentID: \"not valid!\"\n"
+	if _, err := parse([]byte(bad)); err == nil {
+		t.Error("an invalid central.agentID was accepted")
+	} else if strings.Contains(err.Error(), "not valid!") {
+		t.Errorf("error %q echoes the value", err)
 	}
 }

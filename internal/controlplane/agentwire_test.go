@@ -244,3 +244,14 @@ func TestPolicyWireRegisteredAgents_JKTCapMatchesMaxKeys(t *testing.T) {
 		t.Fatalf("agentreg.MaxKeys = %d, config.MaxRegisteredAgentJKT = %d", agentreg.MaxKeys, config.MaxRegisteredAgentJKT)
 	}
 }
+
+// TestWorkerCapsAcceptedByControlPlane: every capability a worker advertises,
+// and the require cap a later ticket adds, survives the control plane's
+// capability filter, so the console sees the literal the worker sent.
+func TestWorkerCapsAcceptedByControlPlane(t *testing.T) {
+	in := append(config.WorkerCaps(), config.CapIdentityRequireV1)
+	got := normalizeCaps(in)
+	if len(got) != len(in) {
+		t.Fatalf("normalizeCaps(%v) = %v, dropped a capability", in, got)
+	}
+}
