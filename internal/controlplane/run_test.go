@@ -451,6 +451,9 @@ func runCPServing(t *testing.T, p Params) (string, *syncBuffer, func()) {
 			t.Errorf("Run = %v", err)
 		}
 	}
+	if p.CACert != "" {
+		return "https://" + addr, out, stop
+	}
 	return "http://" + addr, out, stop
 }
 

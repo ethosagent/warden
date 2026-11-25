@@ -47,7 +47,7 @@ func blockActor(ctx context.Context) string {
 	if p.Kind == PrincipalBreakglass {
 		return breakglassSubPrefix + strings.TrimPrefix(p.Sub, breakglassSubPrefix)
 	}
-	return "oidc:" + p.Sub
+	return "oidc:" + p.ActorSub()
 }
 
 // isSelf reports whether entry blocks the caller in ctx: its sub equals the
@@ -58,7 +58,7 @@ func isSelf(ctx context.Context, e BlockEntry) bool {
 	if !ok {
 		return false
 	}
-	if p.Sub != "" && e.Sub != "" && (e.Sub == p.Sub || e.Sub == strings.TrimPrefix(p.Sub, breakglassSubPrefix)) {
+	if sub := p.ActorSub(); sub != "" && e.Sub != "" && (e.Sub == sub || e.Sub == strings.TrimPrefix(sub, breakglassSubPrefix)) {
 		return true
 	}
 	return p.Email != "" && e.Email != "" && strings.EqualFold(e.Email, strings.TrimSpace(p.Email))

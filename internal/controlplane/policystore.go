@@ -59,6 +59,7 @@ const (
 	AuthorKindBearer     = "bearer"
 	AuthorKindNone       = "none"
 	AuthorKindSystem     = "system"
+	AuthorKindAPIKey     = "apikey"
 )
 
 // maxPolicyMessage caps a version message, in characters.
@@ -90,7 +91,7 @@ var (
 
 var authorKinds = map[string]bool{
 	AuthorKindOIDC: true, AuthorKindBreakglass: true, AuthorKindCLI: true,
-	AuthorKindBearer: true, AuthorKindNone: true, AuthorKindSystem: true,
+	AuthorKindBearer: true, AuthorKindNone: true, AuthorKindSystem: true, AuthorKindAPIKey: true,
 }
 
 var versionSources = map[string]bool{

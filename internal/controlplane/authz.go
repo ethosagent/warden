@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/ethosagent/warden/internal/apikeys"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
 )
@@ -46,15 +47,45 @@ type authzRow struct {
 	// Audited is true exactly when Class is classAudited.
 	Audited bool
 	Class   routeClass
+	// Scope is the API key scope a key must hold to reach the route
+	// (W-P2-APIK-02): a registered scope, apikeys.ScopeNone (no key may reach it)
+	// or apikeys.ScopeSelf (any valid key). Every row declares one explicitly;
+	// the empty value is a classification gap and TestAuthzRouteCoverage fails
+	// on it, so a new route is unreachable by keys until someone classifies it.
+	Scope apikeys.Scope
+	// SessionOnly marks a route a key must never reach AND that answers a key
+	// 403 session_required instead of insufficient_scope: key creation, so no
+	// key can mint or extend a key (W-P2-APIK-03).
+	SessionOnly bool
 }
 
-// Row constructors keep the tables readable.
-func readRow(role config.Role, action string) authzRow {
-	return authzRow{MinRole: role, Action: action, Class: classReadOnly}
+// The P2 scopes the table names. They must be registered in
+// apikeys.NewP2Registry (TestAuthzScopesRegistered).
+const (
+	scopePolicyRead     apikeys.Scope = "policy:read"
+	scopePolicyWrite    apikeys.Scope = "policy:write"
+	scopeSettingsRead   apikeys.Scope = "settings:read"
+	scopeTrafficRead    apikeys.Scope = "traffic:read"
+	scopeAuditRead      apikeys.Scope = "audit:read"
+	scopeAdminAuditRead apikeys.Scope = "adminaudit:read"
+	// scopeWorkersAdmin guards workers/{id}/revoke (W-P2-WCA-05).
+	scopeWorkersAdmin apikeys.Scope = "workers:admin"
+	// TODO(W-P2-AREG-02, #72): GET agents rows take agents:read, writes take
+	// agents:write. TODO(W-P2-WCA-08): worker-enrollments take workers:admin
+	// (POST enrollments stays none).
+	// TODO(W-P2-APPR-04): changes rows (policy:draft, policy:write, none for
+	// approve/reject/emergency-apply/review). Each ticket adds its constants and
+	// rows here; the coverage test fails until every row is classified.
+)
+
+// Row constructors keep the tables readable. The scope is the last argument so
+// a row cannot be written without classifying it.
+func readRow(role config.Role, action string, scope apikeys.Scope) authzRow {
+	return authzRow{MinRole: role, Action: action, Class: classReadOnly, Scope: scope}
 }
 
-func auditedRow(role config.Role, action, target string) authzRow {
-	return authzRow{MinRole: role, Action: action, Target: target, Audited: true, Class: classAudited}
+func auditedRow(role config.Role, action, target string, scope apikeys.Scope) authzRow {
+	return authzRow{MinRole: role, Action: action, Target: target, Audited: true, Class: classAudited, Scope: scope}
 }
 
 // authzTable is the deny-by-default authorization table for the dashboard
@@ -79,73 +110,87 @@ func authzTable() map[routeKey]authzRow {
 		viewer = config.RoleViewer
 		editor = config.RoleEditor
 		admin  = config.RoleAdmin
+
+		none = apikeys.ScopeNone
 	)
 	rows := []struct {
 		method, path string
 		row          authzRow
 	}{
-		{get, "/dashboard/", readRow(viewer, "ui.read")},
-		{get, "/dashboard/api/traffic", readRow(viewer, "traffic.read")},
-		{get, "/dashboard/api/policy", readRow(viewer, "policy.read")},
-		{post, "/dashboard/api/policy", auditedRow(editor, "policy.write", "policy")},
-		{put, "/dashboard/api/policy", auditedRow(editor, "policy.write", "policy")},
-		{get, "/dashboard/api/settings", readRow(viewer, "settings.read")},
-		{post, "/dashboard/api/settings", auditedRow(editor, "settings.write", "settings")},
-		{put, "/dashboard/api/settings", auditedRow(editor, "settings.write", "settings")},
-		{get, "/dashboard/api/secrets", readRow(viewer, "secrets.read")},
-		{get, "/dashboard/api/endpoints", readRow(viewer, "endpoints.read")},
-		{get, "/dashboard/api/analytics", readRow(viewer, "analytics.read")},
-		{get, "/dashboard/api/mcp", readRow(viewer, "mcp.read")},
-		{get, "/dashboard/api/workers", readRow(viewer, "workers.read")},
-		{get, "/dashboard/api/query/schema", readRow(viewer, "query.schema")},
-		{post, "/dashboard/api/query", readRow(viewer, "query.run")},
-		{post, "/dashboard/api/query/generate", readRow(editor, "query.generate")},
-		{get, "/dashboard/api/secretstore", readRow(viewer, "secretstore.read")},
-		{post, "/dashboard/api/secretstore", auditedRow(admin, "secretstore.write", "secrets")},
-		{del, "/dashboard/api/secretstore", auditedRow(admin, "secretstore.delete", "secrets")},
-		{get, "/dashboard/api/alerts", readRow(viewer, "alerts.read")},
-		{get, "/dashboard/api/integrations", readRow(viewer, "integrations.read")},
-		{post, "/dashboard/api/integrations", auditedRow(admin, "integrations.write", "integrations")},
-		{del, "/dashboard/api/integrations", auditedRow(admin, "integrations.delete", "integrations")},
-		{get, "/dashboard/api/detection", readRow(viewer, "detection.read")},
-		{post, "/dashboard/api/detection", auditedRow(editor, "detection.write", "detection")},
-		{put, "/dashboard/api/detection", auditedRow(editor, "detection.write", "detection")},
-		{get, "/dashboard/api/llmproviders", readRow(viewer, "llmproviders.read")},
-		{post, "/dashboard/api/llmproviders", auditedRow(admin, "llmproviders.write", "llmproviders")},
-		{put, "/dashboard/api/llmproviders", auditedRow(admin, "llmproviders.write", "llmproviders")},
-		{get, "/dashboard/api/audit", readRow(viewer, "audit.read")},
-		{post, "/dashboard/api/audit/verify", readRow(viewer, "audit.verify")},
+		{get, "/dashboard/", readRow(viewer, "ui.read", none)},
+		{get, "/dashboard/api/traffic", readRow(viewer, "traffic.read", scopeTrafficRead)},
+		{get, "/dashboard/api/policy", readRow(viewer, "policy.read", scopePolicyRead)},
+		{post, "/dashboard/api/policy", auditedRow(editor, "policy.write", "policy", scopePolicyWrite)},
+		{put, "/dashboard/api/policy", auditedRow(editor, "policy.write", "policy", none)},
+		{get, "/dashboard/api/settings", readRow(viewer, "settings.read", scopeSettingsRead)},
+		{post, "/dashboard/api/settings", auditedRow(editor, "settings.write", "settings", none)},
+		{put, "/dashboard/api/settings", auditedRow(editor, "settings.write", "settings", none)},
+		{get, "/dashboard/api/secrets", readRow(viewer, "secrets.read", none)},
+		{get, "/dashboard/api/endpoints", readRow(viewer, "endpoints.read", scopeTrafficRead)},
+		{get, "/dashboard/api/analytics", readRow(viewer, "analytics.read", scopeTrafficRead)},
+		{get, "/dashboard/api/mcp", readRow(viewer, "mcp.read", scopeTrafficRead)},
+		{get, "/dashboard/api/workers", readRow(viewer, "workers.read", scopeTrafficRead)},
+		{get, "/dashboard/api/query/schema", readRow(viewer, "query.schema", scopeTrafficRead)},
+		{post, "/dashboard/api/query", readRow(viewer, "query.run", scopeTrafficRead)},
+		{post, "/dashboard/api/query/generate", readRow(editor, "query.generate", none)},
+		{get, "/dashboard/api/secretstore", readRow(viewer, "secretstore.read", none)},
+		{post, "/dashboard/api/secretstore", auditedRow(admin, "secretstore.write", "secrets", none)},
+		{del, "/dashboard/api/secretstore", auditedRow(admin, "secretstore.delete", "secrets", none)},
+		{get, "/dashboard/api/alerts", readRow(viewer, "alerts.read", scopeTrafficRead)},
+		{get, "/dashboard/api/integrations", readRow(viewer, "integrations.read", none)},
+		{post, "/dashboard/api/integrations", auditedRow(admin, "integrations.write", "integrations", none)},
+		{del, "/dashboard/api/integrations", auditedRow(admin, "integrations.delete", "integrations", none)},
+		{get, "/dashboard/api/detection", readRow(viewer, "detection.read", scopePolicyRead)},
+		{post, "/dashboard/api/detection", auditedRow(editor, "detection.write", "detection", scopePolicyWrite)},
+		{put, "/dashboard/api/detection", auditedRow(editor, "detection.write", "detection", none)},
+		{get, "/dashboard/api/llmproviders", readRow(viewer, "llmproviders.read", none)},
+		{post, "/dashboard/api/llmproviders", auditedRow(admin, "llmproviders.write", "llmproviders", none)},
+		{put, "/dashboard/api/llmproviders", auditedRow(admin, "llmproviders.write", "llmproviders", none)},
+		{get, "/dashboard/api/audit", readRow(viewer, "audit.read", scopeAuditRead)},
+		{post, "/dashboard/api/audit/verify", readRow(viewer, "audit.verify", scopeAuditRead)},
 		// The admin audit log (W-P1-AAUD-03). verify is a read-only POST; the
 		// public keys are not secret, so any role may read them.
-		{get, "/dashboard/api/admin-audit", readRow(admin, "adminaudit.read")},
-		{post, "/dashboard/api/admin-audit/verify", readRow(admin, "adminaudit.verify")},
-		{get, "/dashboard/api/admin-audit/pubkey", readRow(viewer, "adminaudit.pubkey")},
-		{get, "/dashboard/api/setup", readRow(viewer, "setup.read")},
+		{get, "/dashboard/api/admin-audit", readRow(admin, "adminaudit.read", scopeAdminAuditRead)},
+		{post, "/dashboard/api/admin-audit/verify", readRow(admin, "adminaudit.verify", scopeAdminAuditRead)},
+		{get, "/dashboard/api/admin-audit/pubkey", readRow(viewer, "adminaudit.pubkey", scopeAdminAuditRead)},
+		{get, "/dashboard/api/setup", readRow(viewer, "setup.read", none)},
 		// Policy history (W-P1-PVER-03). Requests are matched on their template
 		// ({v} is any version segment; dashboard.RoutePath).
-		{get, "/dashboard/api/policy/versions", readRow(viewer, "policy.versions.read")},
-		{get, "/dashboard/api/policy/versions/{v}", readRow(viewer, "policy.version.read")},
-		{get, "/dashboard/api/policy/versions/{v}/diff", readRow(viewer, "policy.diff")},
-		{post, "/dashboard/api/policy/versions/{v}/rollback", auditedRow(editor, "policy.rollback", "policy")},
+		{get, "/dashboard/api/policy/versions", readRow(viewer, "policy.versions.read", scopePolicyRead)},
+		{get, "/dashboard/api/policy/versions/{v}", readRow(viewer, "policy.version.read", scopePolicyRead)},
+		{get, "/dashboard/api/policy/versions/{v}/diff", readRow(viewer, "policy.diff", scopePolicyRead)},
+		{post, "/dashboard/api/policy/versions/{v}/rollback", auditedRow(editor, "policy.rollback", "policy", none)},
 		// On-demand backup (W-P1-OPS1-11); 404 unless --backup-dir is set.
-		{post, "/dashboard/api/backup", auditedRow(admin, "backup.run", "backup")},
+		{post, "/dashboard/api/backup", auditedRow(admin, "backup.run", "backup", none)},
 		// Worker tokens (W-P1-WTOK-03): viewers may list; minting and revoking are
 		// admin only, and the handler also refuses them outside console.auth oidc.
-		{get, "/dashboard/api/worker-tokens", readRow(viewer, "worker_token.read")},
-		{post, "/dashboard/api/worker-tokens", auditedRow(admin, "worker_token.create", "worker_tokens")},
-		{del, "/dashboard/api/worker-tokens/{id}", auditedRow(admin, "worker_token.revoke", "worker_tokens")},
+		// Worker certificate revoke (W-P2-WCA-05): admin only; 404 unless
+		// workerCA is enabled, and refused outside console.auth oidc (use_cli).
+		{post, "/dashboard/api/workers/{id}/revoke", auditedRow(admin, actionWorkerRevoked, auditTargetWorkerCerts, scopeWorkersAdmin)},
+		{get, "/dashboard/api/worker-tokens", readRow(viewer, "worker_token.read", none)},
+		{post, "/dashboard/api/worker-tokens", auditedRow(admin, "worker_token.create", "worker_tokens", none)},
+		{del, "/dashboard/api/worker-tokens/{id}", auditedRow(admin, "worker_token.revoke", "worker_tokens", none)},
 		// The user block list (W-P1-BLOCK-11). Requests are matched on their
 		// template ({id} is any entry id; dashboard.RoutePath).
-		{get, "/dashboard/api/blocked-users", readRow(admin, "blocked_users.read")},
-		{post, "/dashboard/api/blocked-users", auditedRow(admin, "blocked_users.add", blockedUsersTarget)},
-		{del, "/dashboard/api/blocked-users/{id}", auditedRow(admin, "blocked_users.remove", blockedUsersTarget)},
+		{get, "/dashboard/api/blocked-users", readRow(admin, "blocked_users.read", scopePolicyRead)},
+		{post, "/dashboard/api/blocked-users", auditedRow(admin, "blocked_users.add", blockedUsersTarget, scopePolicyWrite)},
+		{del, "/dashboard/api/blocked-users/{id}", auditedRow(admin, "blocked_users.remove", blockedUsersTarget, scopePolicyWrite)},
 		// Signing keys (W-P2-KEYS-04): admin only; 404 unless keys.enabled. A
 		// rotation is refused outside console.auth oidc (use_cli).
-		{get, "/dashboard/api/keys", readRow(admin, "keys.read")},
-		{post, "/dashboard/api/keys/rotate", auditedRow(admin, "keys.rotate_requested", auditTargetKeys)},
+		{get, "/dashboard/api/keys", readRow(admin, "keys.read", none)},
+		{post, "/dashboard/api/keys/rotate", auditedRow(admin, "keys.rotate_requested", auditTargetKeys, none)},
 		// Served by the control plane itself, ahead of dash.Handler (cpDashboardRoutes).
-		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read")},
-		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions")},
+		{get, "/dashboard/api/sessions", readRow(admin, "sessions.read", none)},
+		{del, "/dashboard/api/sessions", auditedRow(admin, "sessions.revoke", "sessions", none)},
+		// API key management (W-P2-APIK-03), served by the control plane itself.
+		// Every row is ScopeNone but /self: no key lists, creates or revokes keys.
+		// The handlers apply the object-level rules (own keys unless admin; create
+		// only from an OIDC session, capped by the creator's role).
+		{get, apiKeysPath, readRow(viewer, "api_key.list", none)},
+		{post, apiKeysPath, authzRow{MinRole: viewer, Action: "api_key.create", Target: auditTargetAPIKeys, Audited: true, Class: classAudited, Scope: none, SessionOnly: true}},
+		{del, apiKeysPath, auditedRow(admin, "api_key.revoke_owner", auditTargetAPIKeys, none)},
+		{del, apiKeysPath + "/{id}", auditedRow(viewer, "api_key.revoke", auditTargetAPIKeys, none)},
+		{get, apiKeysPath + "/self", readRow(viewer, "api_key.self", apikeys.ScopeSelf)},
 	}
 	t := make(map[routeKey]authzRow, len(rows))
 	for _, r := range rows {
@@ -166,8 +211,14 @@ func cpRouteTable() map[routeKey]authzRow {
 		post = http.MethodPost
 		del  = http.MethodDelete
 	)
-	worker := authzRow{Class: classWorkerPlane}
-	handler := func(action string) authzRow { return authzRow{Action: action, Class: classHandlerRecorded} }
+	// None of these is reachable with an API key (WorkerAuthenticator refuses a
+	// wak_ bearer; the human routes answer a key 401 or 403), so every row is
+	// ScopeNone.
+	const none = apikeys.ScopeNone
+	worker := authzRow{Class: classWorkerPlane, Scope: none}
+	handler := func(action string) authzRow {
+		return authzRow{Action: action, Class: classHandlerRecorded, Scope: none}
+	}
 	rows := []struct {
 		method, path string
 		row          authzRow
@@ -180,11 +231,17 @@ func cpRouteTable() map[routeKey]authzRow {
 		{get, jwksPath, worker},
 		{get, "/policy", worker},
 		{post, "/control/heartbeat", worker},
+		// Credential is the enrollment token; mounted only with workerCA enabled
+		// and a state dir (W-P2-WCA-02).
+		{post, enrollPath, worker},
+		// Credential is the worker certificate, checked per request by the
+		// authenticator; mounted with /control/enroll (W-P2-WCA-04).
+		{post, renewPath, worker},
 		{post, "/central/ingest", worker},
-		{get, "/central/secrets", readRow(config.RoleAdmin, "secrets.read")},
-		{post, "/central/secrets", auditedRow(config.RoleAdmin, "secrets.write", "secrets")},
-		{del, "/central/secrets/", auditedRow(config.RoleAdmin, "secrets.delete", "secrets")},
-		{get, "/auth/me", readRow(0, "auth.me")},
+		{get, "/central/secrets", readRow(config.RoleAdmin, "secrets.read", none)},
+		{post, "/central/secrets", auditedRow(config.RoleAdmin, "secrets.write", "secrets", none)},
+		{del, "/central/secrets/", auditedRow(config.RoleAdmin, "secrets.delete", "secrets", none)},
+		{get, "/auth/me", readRow(0, "auth.me", none)},
 		{get, "/auth/login", handler("auth.login")},
 		{get, "/auth/callback", handler("auth.callback")},
 		{post, "/auth/logout", handler("auth.logout")},
@@ -212,6 +269,17 @@ func ActionFrom(ctx context.Context) (string, bool) {
 // console.roles applies to live sessions after a restart. It never reads the
 // Authorization header, so a shared or admin bearer cannot open a human route.
 func requireRole(next http.Handler, table map[routeKey]authzRow, console config.ConsoleConfig, logger *slog.Logger) http.Handler {
+	return requireRoleKeys(next, table, console, logger, nil, nil)
+}
+
+// requireRoleKeys is requireRole that decides API key Principals too, counting
+// each outcome on counts (nil counts nothing). A key is allowed only
+// when it holds the row's scope and its owner's CURRENT role covers the row;
+// every other outcome is 403 insufficient_scope naming the scope the row needs
+// ("none" for a route no key may reach), so a refusal says nothing about the
+// owner's role. The refusal is chained as denied by the audit middleware
+// outside this one.
+func requireRoleKeys(next http.Handler, table map[routeKey]authzRow, console config.ConsoleConfig, logger *slog.Logger, counts *apiKeyCounters, ownerBlocked func(Principal) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, ok := PrincipalFrom(r.Context())
 		if !ok {
@@ -230,7 +298,24 @@ func requireRole(next http.Handler, table map[routeKey]authzRow, console config.
 			writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 			return
 		}
-		if role < row.MinRole {
+		if p.Kind == PrincipalAPIKey {
+			if row.SessionOnly {
+				counts.inc(APIKeyOutcomeInsufficientScope)
+				logDenied(logger, row, role, p, r)
+				writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "session_required"})
+				return
+			}
+			if ok, need := keyAuthorized(p, row, role); !ok || (ownerBlocked != nil && ownerBlocked(p)) {
+				if ok {
+					need = apikeys.ScopeNone // refused for who the owner is, not for a scope
+				}
+				counts.inc(APIKeyOutcomeInsufficientScope)
+				logDenied(logger, row, role, p, r)
+				writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "insufficient_scope", "need": string(need)})
+				return
+			}
+			counts.inc(APIKeyOutcomeOK)
+		} else if role < row.MinRole {
 			logDenied(logger, row, role, p, r)
 			writeAuthzJSON(w, http.StatusForbidden, map[string]string{"error": "role_required", "need": row.MinRole.String()})
 			return
