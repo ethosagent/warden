@@ -48,10 +48,10 @@ func renderAuthzMatrix(table map[routeKey]authzRow) string {
 	var b strings.Builder
 	b.WriteString("<!-- Generated from authzTable() and internal/config/settings_roles.go; do not edit by hand.\n")
 	b.WriteString("     Regenerate: go test ./internal/controlplane -run TestAuthzMatrixDoc -update -->\n\n")
-	b.WriteString("| Route | Method | Minimum role | Action |\n|---|---|---|---|\n")
+	b.WriteString("| Route | Method | Minimum role | Action | API key scope |\n|---|---|---|---|---|\n")
 	for _, k := range keys {
 		r := table[k]
-		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", code(k.Path), k.Method, r.MinRole, code(r.Action))
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", code(k.Path), k.Method, r.MinRole, code(r.Action), code(string(r.Scope)))
 	}
 	b.WriteString("\nA method and path with no row is refused (`403`) for every role, `GET` included.\n\n")
 	b.WriteString("Settings writes (`POST`/`PUT /dashboard/api/settings`) are then checked per changed field:\n\n")

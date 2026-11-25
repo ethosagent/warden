@@ -43,6 +43,7 @@ const (
 	AuthMethodBearer     = "bearer"
 	AuthMethodNone       = "none"
 	AuthMethodSystem     = "system"
+	AuthMethodAPIKey     = "apikey"
 )
 
 // Outcomes an entry may carry.
@@ -61,7 +62,7 @@ const (
 	maxRequestIDLen  = 64
 	maxStateHashLen  = 128
 	maxActorRoleLen  = 64
-	maxDetails       = 16
+	maxDetails       = 24
 	maxDetailKeyLen  = 32
 	maxDetailValLen  = 256
 	maxHTTPStatus    = 599
@@ -74,6 +75,10 @@ const (
 // writers that fit free-form text (an error's own words) into one.
 const MaxDetailValueLen = maxDetailValLen
 
+// MaxDetails is the most detail keys an entry accepts, exported so a writer can
+// budget its keys against it.
+const MaxDetails = maxDetails
+
 // ErrInvalidEntry is returned (wrapped, naming the field but never its value)
 // when an entry fails validation. Nothing is written.
 var ErrInvalidEntry = errors.New("adminaudit: invalid entry")
@@ -84,7 +89,7 @@ var (
 
 	authMethods = map[string]bool{
 		AuthMethodOIDC: true, AuthMethodBreakglass: true, AuthMethodCLI: true,
-		AuthMethodBearer: true, AuthMethodNone: true, AuthMethodSystem: true,
+		AuthMethodBearer: true, AuthMethodNone: true, AuthMethodSystem: true, AuthMethodAPIKey: true,
 	}
 	outcomes = map[string]bool{
 		OutcomeOK: true, OutcomeDenied: true, OutcomeRejected: true, OutcomeError: true,
@@ -193,7 +198,7 @@ func invalid(field, why string) error {
 // checked here.
 func (e *Entry) validate() error {
 	if !authMethods[e.AuthMethod] {
-		return invalid("auth_method", "is not one of oidc, breakglass, cli, bearer, none, system")
+		return invalid("auth_method", "is not one of oidc, breakglass, cli, bearer, none, system, apikey")
 	}
 	if !outcomes[e.Outcome] {
 		return invalid("outcome", "is not one of ok, denied, rejected, error")
@@ -232,7 +237,7 @@ func (e *Entry) validate() error {
 
 func validateDetails(d map[string]string) error {
 	if len(d) > maxDetails {
-		return invalid("details", "must have at most 16 keys")
+		return invalid("details", "must have at most 24 keys")
 	}
 	for k, v := range d {
 		if k == "" || len(k) > maxDetailKeyLen || !utf8.ValidString(k) {

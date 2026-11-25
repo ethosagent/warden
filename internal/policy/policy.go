@@ -180,6 +180,16 @@ type parsedTimeWindow struct {
 	endHour   int
 }
 
+// admits reports whether hour (0-23, server local time) is inside the window.
+// A start after the end wraps midnight (22-6 is 22:00-06:00); an equal start
+// and end admits no hour.
+func (tw parsedTimeWindow) admits(hour int) bool {
+	if tw.startHour <= tw.endHour {
+		return hour >= tw.startHour && hour < tw.endHour
+	}
+	return hour >= tw.startHour || hour < tw.endHour
+}
+
 // NewEvaluator builds an Evaluator from a policy.
 func NewEvaluator(p config.Policy) *Evaluator {
 	e := &Evaluator{now: time.Now}
@@ -507,18 +517,9 @@ func (e *Evaluator) evaluate(rc RequestContext, mode evalMode, peek bool) Reques
 		// Time window check (hours in server local time).
 		// If this entry fails, try next entry.
 		if tw, ok := e.timeWindows[i]; ok {
-			hour := e.now().Hour()
-			if tw.startHour <= tw.endHour {
-				if hour < tw.startHour || hour >= tw.endHour {
-					timeWindowExcluded = true
-					continue
-				}
-			} else {
-				// Wrap-around (e.g. 22-6 means 22:00-06:00)
-				if hour < tw.startHour && hour >= tw.endHour {
-					timeWindowExcluded = true
-					continue
-				}
+			if !tw.admits(e.now().Hour()) {
+				timeWindowExcluded = true
+				continue
 			}
 		}
 
@@ -543,7 +544,7 @@ func (e *Evaluator) evaluate(rc RequestContext, mode evalMode, peek bool) Reques
 		// any) passed, so a denied request never consumes budget. If this entry
 		// is exhausted, try next entry.
 		if rl, ok := e.rateLimits[i]; ok {
-			key := fmt.Sprintf("%s:%d", rateLimitPattern(entry.Domain), inferredPort(entry.Port, scheme))
+			key := rateBucketKey(entry.Domain, inferredPort(entry.Port, scheme))
 			if entryScoped {
 				// Scoped entries get their own bucket per entry, never shared
 				// with an unscoped entry (or another scoped one) for the host.
@@ -627,6 +628,11 @@ func pathMatchesAny(patterns []string, path string) bool {
 // against the normalised host.
 func NormalizeHost(host string) string {
 	return strings.ToLower(strings.TrimRight(host, "."))
+}
+
+// rateBucketKey is the shared bucket key of an UNSCOPED rate-limited entry.
+func rateBucketKey(pattern string, port int) string {
+	return fmt.Sprintf("%s:%d", rateLimitPattern(pattern), port)
 }
 
 // rateLimitPattern returns the pattern that names an allowlist entry's
