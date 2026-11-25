@@ -16,8 +16,7 @@ import (
 const ConsoleEditorGroup = "console-editors"
 
 // WithApprovals boots the control plane with console.approvals.enabled: true.
-// In-process only. Until W-P2-APPR-06 gates every versioned write path, the
-// harness lifts the startup refusal (controlplane.Params.ApprovalsEnforcementShipped).
+// In-process only.
 func WithApprovals() Option {
 	return func(h *H) {
 		h.wantApprovals = true
@@ -39,5 +38,4 @@ func (h *H) applyApprovals(p *controlplane.Params) {
 		return
 	}
 	p.StateDir = filepath.Join(h.root, "cp-state")
-	p.ApprovalsEnforcementShipped = true
 }

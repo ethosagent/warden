@@ -116,7 +116,7 @@ func newDraftEnvOpts(t *testing.T, mutate func(*config.ConsoleApprovals), clk *c
 	e.h = srv.Handler()
 	for _, s := range []struct{ name, group, method string }{
 		{"u1", groupEditor, "oidc"}, {"u2", groupEditor, "oidc"}, {"u3", groupEditor, "oidc"},
-		{"viewer", groupViewer, "oidc"}, {"admin", groupAdmin, "oidc"}, {"breakglass", "", AuthMethodBreakglass},
+		{"viewer", groupViewer, "oidc"}, {"admin", groupAdmin, "oidc"}, {"admin2", groupAdmin, "oidc"}, {"breakglass", "", AuthMethodBreakglass},
 	} {
 		in := testSessionInput()
 		in.Sub, in.Email, in.AuthMethod = s.name, s.name+"@example.com", s.method
@@ -706,7 +706,7 @@ func TestChangeDraftRebase(t *testing.T) {
 	if rec := e.do("u2", http.MethodPost, path+"/approve", approveBody(d.ChangeDraftView, "", "")); rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d %s", rec.Code, rec.Body.String())
 	}
-	if err := e.srv.WritePolicy(ctx, plusAllow(t, e.srv, "theirs.example.com"), dashboard.WriteMeta{}); err != nil {
+	if err := writePolicyUngated(ctx, e.srv, plusAllow(t, e.srv, "theirs.example.com")); err != nil {
 		t.Fatal(err)
 	}
 	b := e.wantErr(t, e.do("u3", http.MethodPost, path+"/approve", approveBody(d.ChangeDraftView, "", "")), http.StatusConflict, "rebase_required")
@@ -749,10 +749,10 @@ func TestChangeDraftRebase(t *testing.T) {
 	// A conflict: head and the draft both change the entry for one domain.
 	c := e.create2(t, "u1", `{"domain":"clash.example.com","methods":["GET"]}`)
 	e.submit(t, "u1", c.ID)
-	if err := e.srv.WritePolicy(ctx, config.Policy{
+	if err := writePolicyUngated(ctx, e.srv, config.Policy{
 		Allowlist: append(plusAllow(t, e.srv, "x").Allowlist[:len(plusAllow(t, e.srv, "x").Allowlist)-1], config.AllowlistEntry{Domain: "clash.example.com", Methods: []string{"POST"}}),
 		Denylist:  plusAllow(t, e.srv, "x").Denylist,
-	}, dashboard.WriteMeta{}); err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 	e.settledReplay(t, c.ID)

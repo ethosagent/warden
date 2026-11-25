@@ -24,12 +24,6 @@ import (
 // is measured in hours, so a minute is precise enough and cheap.
 const approvalsSweepInterval = time.Minute
 
-// errApprovalsEnforcementUnavailable is the temporary startup guard: until
-// W-P2-APPR-06 gates every versioned write path with one clearance check, an
-// enabled gate would still let a direct write skip it, so a control plane
-// refuses to start with it rather than pretend to enforce.
-var errApprovalsEnforcementUnavailable = errors.New("control-plane: console.approvals.enabled: approvals enforcement is not available in this build")
-
 // stateMigrationsWithApprovals applies approvals/0001 and 0002 when the gate is on, so a
 // control plane without approvals creates no table (the migration is Optional
 // and always registered for the downgrade guard).
@@ -41,9 +35,8 @@ func stateMigrationsWithApprovals(migs []cpstate.Migration, ac config.ConsoleApp
 }
 
 // checkApprovalsStartup validates what console.approvals.enabled needs, naming
-// the first missing item, then applies the temporary enforcement guard. A
-// disabled block always passes.
-func checkApprovalsStartup(cc config.ConsoleConfig, policyStore, stateDir string, enforcementShipped bool) error {
+// the first missing item. A disabled block always passes.
+func checkApprovalsStartup(cc config.ConsoleConfig, policyStore, stateDir string) error {
 	if !cc.Approvals.Enabled {
 		return nil
 	}
@@ -57,14 +50,11 @@ func checkApprovalsStartup(cc config.ConsoleConfig, policyStore, stateDir string
 	case !cc.AdminAudit.Enabled:
 		return errors.New("control-plane: console.approvals.enabled needs console.adminAudit.enabled: true (every transition is an audited change)")
 	}
-	if !enforcementShipped {
-		return errApprovalsEnforcementUnavailable
-	}
 	return nil
 }
 
 // policyApplier publishes an approved policy draft through Server.publish's
-// path (publishVersionAs) with expectedHead=base_version, source `approval`
+// path (publish) with expectedHead=base_version, source `approval`
 // and the draft author as the version author. Validation, credential
 // redaction and the policy audit row are the publish path's, so approving a
 // draft can never skip them.
@@ -97,6 +87,12 @@ func (a policyApplier) Apply(ctx context.Context, d approvals.Draft) (int64, err
 	if err != nil {
 		return 0, fmt.Errorf("controlplane: decode draft %s doc: %w", d.ID, err)
 	}
+	// The Gate mints the clearance of a draft the Service is applying (state
+	// applying, classified); nothing else reaches publish through this path.
+	clr, err := a.s.gate.ClearApplied(ctx, d)
+	if err != nil {
+		return 0, err
+	}
 	author := PolicyAuthor{Sub: d.Author.Sub, Email: d.Author.Email, Kind: d.Author.Kind}
 	mutate := func(w *policyWire) error {
 		// publish treats ExpectedHead 0 as "the head I read", which would let a
@@ -121,7 +117,7 @@ func (a policyApplier) Apply(ctx context.Context, d approvals.Draft) (int64, err
 		return nil
 	}
 	msg := draftVersionPrefix(d.ID, d.Revision) + d.Message
-	version, _, err := a.s.publishVersionAs(ctx, author, mutate, dashboard.WriteMeta{ExpectedHead: d.BaseVersion, Message: msg}, SourceApproval)
+	version, _, err := a.s.publish(ctx, clr, author, mutate, dashboard.WriteMeta{ExpectedHead: d.BaseVersion, Message: msg}, SourceApproval)
 	switch {
 	case err == nil:
 		return version, nil
@@ -168,6 +164,13 @@ func redactDraftDoc(d approvals.Doc) approvals.Doc {
 func (s *Server) initApprovals() {
 	ac := s.cfg.Console.Approvals
 	if !ac.Enabled {
+		// A state database that once ran with approvals records that it no
+		// longer does, so the offline CLI imports directly again.
+		if s.cfg.State != nil {
+			if err := sqlstore.WriteMeta(context.Background(), s.cfg.State.SQL(), sqlstore.Meta{}, s.cfg.Clock.Now()); err != nil {
+				s.cfg.Logger.Warn("control plane: cannot record that approvals are disabled", "error", err)
+			}
+		}
 		return
 	}
 	if s.versions == nil || s.cfg.State == nil {
@@ -214,6 +217,14 @@ func (s *Server) initApprovals() {
 		s.approvalsErr = err
 		return
 	}
+	// The offline CLI reads this row to hold its imports as drafts. A control
+	// plane that cannot write it must not start: the CLI would publish past the
+	// gate.
+	meta := sqlstore.Meta{Enabled: true, DraftTTL: ac.DraftTTL, MaxOpenDrafts: ac.MaxOpenDrafts}
+	if err := sqlstore.WriteMeta(context.Background(), s.cfg.State.SQL(), meta, s.cfg.Clock.Now()); err != nil {
+		s.approvalsErr = fmt.Errorf("control-plane: %w", err)
+		return
+	}
 	s.approvals = svc
 }
 
@@ -225,6 +236,15 @@ func (s *Server) Approvals() *approvals.Service { return s.approvals }
 // CP clock only, so expiry never depends on a worker's or a client's time.
 func (s *Server) sweepApprovals(ctx context.Context) {
 	for {
+		// Drafts the offline CLI created have no replay yet: queue them.
+		if n, err := s.approvals.QueueMissingReplays(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			s.cfg.Logger.Warn("control plane: cannot queue replays of pending drafts", "error", err)
+		} else if n > 0 {
+			s.cfg.Logger.Info("control plane: queued replays of pending change drafts", "count", n)
+		}
 		if n, err := s.approvals.Sweep(ctx); err != nil {
 			if ctx.Err() != nil {
 				return

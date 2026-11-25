@@ -323,7 +323,7 @@ needs a restart. It holds the *name* of the client-secret env var, never the sec
 | `session.idle`, `session.absolute` | `1h`, `12h` | `0 < idle <= absolute <= 168h`. |
 | `adminAudit.enabled` | `false` | Turns on the signed admin audit log; needs `--state-dir`. See [Admin audit log](#admin-audit-log). |
 | `trustedProxies` | none | CIDRs of reverse proxies in front of the control plane. Only a peer inside one may set the client address the admin audit log records, through `X-Forwarded-For`. A bare address or anything that is not a CIDR is a startup error. |
-| `approvals.enabled` | `false` | Change approvals (W-P2-APPR-01). **Not available yet:** this build refuses `true` at startup (`approvals enforcement is not available in this build`) until every versioned write path is gated. Off, no table, migration or goroutine exists and `/policy` is unchanged. When on it will need `console.auth: oidc`, `--policy-store=versioned`, `--state-dir` and `adminAudit.enabled: true`; startup names the first one missing. Read from `--config` only and never sent to workers. |
+| `approvals.enabled` | `false` | Change approvals (W-P2-APPR-01). Every versioned write path is gated (see "Which writes are gated"). Off, no table, migration or goroutine exists and `/policy` is unchanged. When on it needs `console.auth: oidc`, `--policy-store=versioned`, `--state-dir` and `adminAudit.enabled: true`; startup names the first one missing. Read from `--config` only and never sent to workers. |
 | `approvals.minApprovals` | `1` | Distinct approvers a held change needs, `1..3`. |
 | `approvals.allowSelfApproveNarrowing` | `true` | A narrowing change applies at submit with no second person. |
 | `approvals.allowEmergencyApply` | `false` | Allows the audited break-glass apply. |
@@ -1127,8 +1127,52 @@ versioned policy store and the admin audit log) the control plane serves the cha
 draft API under `/dashboard/api/changes`. A draft is a proposed policy doc based on a
 policy version. A change that widens what agents can reach, or where credentials go, is
 published only after a second person approves it. Workers never serve these routes
-(`404`). The startup refusal of `console.approvals.enabled` stays until
-W-P2-APPR-06 routes every existing write path through the same check.
+(`404`).
+
+### Which writes are gated
+
+With approvals enabled, one clearance check (`approvals.Gate`) guards every write that
+creates a policy version; the version funnel (`Server.publish`) refuses a write that
+holds no clearance. A write that widens access (or, with `allowSelfApproveNarrowing`
+off, any change) is stored as a pending draft and answered `202`
+`{draft_id, revision, state, widening, reasons}` with a `Location` header naming the
+draft; head is unchanged. A narrowing write applies at once (`200`). A stale `If-Match`
+is still `409 policy_conflict` and a missing one `428`. Field-level role checks run at
+save time and the draft's required role is checked again at approve time.
+
+| Gated | Not gated |
+|---|---|
+| `POST`/`PUT /dashboard/api/policy`, `POST`/`PUT /dashboard/api/settings`, `POST`/`PUT /dashboard/api/llmproviders`, `POST /dashboard/api/policy/versions/{v}/rollback` (the draft's doc is version `v`, source `rollback`), and `warden policy import` | integrations, detection, the secret store (`/dashboard/api/secretstore`, `/central/secrets`; they write secret values, not a version), the block list, worker tokens, signing keys, sessions, backups, and the offline commands below |
+
+Not gated, stated plainly for production use:
+
+- The offline `warden control-plane block remove` removes a block entry with one
+  admin's host access and no second person. Holding block-list removals for approval
+  is W-P2-APPR-08; until it lands, treat unblocking as a single-admin action.
+- The offline `warden control-plane restore` can move the policy head back without
+  approval.
+- The first-start import of the served YAML as version 1 is not gated: it is proven
+  safe by checking that the served `/policy` ETag is unchanged, and it runs only on an
+  empty store.
+- `/central/secrets` and `/dashboard/api/secretstore` write secret values into the
+  managed secret store, not into a policy version.
+
+A draft created by `warden policy import` is authored `cli:<os user>` and carries no
+issuer. Anyone with host access to the state database already has full trust over the
+control plane, so this is a limitation of what the offline CLI can prove, not a bypass
+of the gate.
+
+A settings save that carries a new raw `secretAccessKey` is refused (`422`/`400`
+naming the credential) instead of becoming a draft: a draft holds only the
+fingerprint. Change the credential in the served config first. If approvals are
+enabled but the approvals service is missing, every gated write is refused with
+`503 approvals_unavailable`.
+
+`warden policy import` with approvals enabled (the control plane records this in the
+single-row `approvals_meta` table at every start) creates a pending draft authored
+`cli:<os user>` (source `cli`), prints its id, appends a `policy.import` admin audit
+row and leaves head alone. The CLI cannot approve or apply; the control plane queues
+the draft's replay on its next sweep (within a minute).
 
 | Route | Who |
 |---|---|

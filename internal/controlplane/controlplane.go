@@ -283,6 +283,10 @@ type Server struct {
 	// approvalsErr is why an enabled approvals gate was not built; Run refuses
 	// to start on it.
 	approvalsErr error
+	// gate is the one clearance check every versioned write goes through
+	// (W-P2-APPR-06). Built in New from console.approvals.enabled, so it exists
+	// on every Server; with approvals enabled and no service it refuses writes.
+	gate *approvals.Gate
 
 	// blocks is the user block list store; nil without State (and then no
 	// blocked_users overlay is registered).
@@ -458,6 +462,7 @@ func New(cfg Config) *Server {
 	s.initAgentStore()
 	s.registerAgentOverlay()
 	s.initApprovals()
+	s.gate = approvals.NewGate(s.cfg.Console.Approvals.Enabled, s.approvals)
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()

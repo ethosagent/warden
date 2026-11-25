@@ -153,7 +153,7 @@ func TestDraftApplyPublishStaleBase(t *testing.T) {
 	d := pendingDraft(t, srv, 1, "late.example.com")
 
 	// Someone else publishes first: head moves to 2.
-	if err := srv.WritePolicy(sessionCtx("eve", "eve@example.com"), plusAllow(t, srv, "other.example.com"), dashboard.WriteMeta{}); err != nil {
+	if err := writePolicyUngated(sessionCtx("eve", "eve@example.com"), srv, plusAllow(t, srv, "other.example.com")); err != nil {
 		t.Fatal(err)
 	}
 	if h := mustHead(t, srv.versions); h != 2 {
@@ -309,10 +309,11 @@ func TestDraftApplyReconcile(t *testing.T) {
 
 	// The publish happened, the outcome write did not.
 	published := pendingDraft(t, srv, 1, "pub.example.com")
-	if _, err := st.BeginApply(ctx, published.ID, published.Revision, "bob"); err != nil {
+	applying, err := st.BeginApply(ctx, published.ID, published.Revision, "bob")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (policyApplier{s: srv}).Apply(ctx, published); err != nil {
+	if _, err := (policyApplier{s: srv}).Apply(ctx, applying); err != nil {
 		t.Fatal(err)
 	}
 	if v := headVersion(t, srv); v.Message != draftVersionPrefix(published.ID, published.Revision)+"allow pub.example.com" {
@@ -434,17 +435,16 @@ func TestApprovalsStartupChecks(t *testing.T) {
 		{"file store", enabled(nil), PolicyStoreFile, "/s", "--policy-store=versioned"},
 		{"no state dir", enabled(nil), PolicyStoreVersioned, "", "--state-dir"},
 		{"no admin audit", enabled(func(c *config.ConsoleConfig) { c.AdminAudit.Enabled = false }), PolicyStoreVersioned, "/s", "console.adminAudit.enabled"},
-		{"everything set hits the temporary guard", enabled(nil), PolicyStoreVersioned, "/s", "approvals enforcement is not available in this build"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkApprovalsStartup(tc.cc, tc.store, tc.dir, false)
+			err := checkApprovalsStartup(tc.cc, tc.store, tc.dir)
 			if err == nil || !strings.Contains(err.Error(), tc.wantContain) {
 				t.Fatalf("error = %v, want one containing %q", err, tc.wantContain)
 			}
 		})
 	}
-	if err := checkApprovalsStartup(config.ConsoleConfig{Approvals: config.DefaultConsoleApprovals()}, PolicyStoreFile, "", false); err != nil {
+	if err := checkApprovalsStartup(config.ConsoleConfig{Approvals: config.DefaultConsoleApprovals()}, PolicyStoreFile, ""); err != nil {
 		t.Errorf("disabled approvals = %v, want nil", err)
 	}
 }
@@ -467,35 +467,6 @@ func TestApprovalsRunRefusesAuthNone(t *testing.T) {
 	err := bootErr(t, Params{ConfigPath: cfg, StateDir: filepath.Join(t.TempDir(), "state"), PolicyStore: PolicyStoreVersioned})
 	if !strings.Contains(err.Error(), "console.auth") {
 		t.Fatalf("Run err = %v, want one naming console.auth", err)
-	}
-}
-
-// TestApprovalsRunTemporaryGuard: with every prerequisite met the build still
-// refuses enabled (until W-P2-APPR-06), and creates no approvals table.
-func TestApprovalsRunTemporaryGuard(t *testing.T) {
-	t.Setenv("WARDEN_TEST_CONSOLE_SECRET", "s3cret-value")
-	cfg := writeApprovalsConfig(t, `  auth: oidc
-  oidc:
-    issuer: https://idp.example.com
-    clientSecretEnv: WARDEN_TEST_CONSOLE_SECRET
-    redirectURL: https://warden.example.com/auth/callback
-  roles:
-    admin: [admins]
-  adminAudit:
-    enabled: true
-  approvals:
-    enabled: true
-`)
-	stateDir := filepath.Join(t.TempDir(), "state")
-	err := bootErr(t, Params{ConfigPath: cfg, StateDir: stateDir, PolicyStore: PolicyStoreVersioned})
-	if !strings.Contains(err.Error(), "approvals enforcement is not available in this build") {
-		t.Fatalf("Run err = %v, want the temporary guard", err)
-	}
-	if strings.Contains(err.Error(), "s3cret-value") {
-		t.Error("the error leaks the client secret")
-	}
-	if _, serr := os.Stat(filepath.Join(stateDir, "warden-cp.db")); serr == nil {
-		t.Error("the refused start opened the state database")
 	}
 }
 
@@ -534,4 +505,14 @@ func TestDraftApplySameCredential(t *testing.T) {
 	if applied.State != approvals.StateApplied || applied.AppliedVersion != head+1 {
 		t.Errorf("draft = %s v%d, want applied v%d", applied.State, applied.AppliedVersion, head+1)
 	}
+}
+
+// writePolicyUngated saves p as a version with the gate off, standing in for
+// "someone else published first" in tests of the stale-base paths. The gate is
+// put back before it returns.
+func writePolicyUngated(ctx context.Context, srv *Server, p config.Policy) error {
+	gate := srv.gate
+	srv.gate = approvals.NewGate(false, nil)
+	defer func() { srv.gate = gate }()
+	return srv.WritePolicy(ctx, p, dashboard.WriteMeta{})
 }

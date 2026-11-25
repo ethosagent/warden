@@ -164,6 +164,7 @@ var All = slices.Concat(
 		// applied by a second editor's approval; workers enforce the new
 		// version. In-process only (console, admin audit and state dir).
 		{Name: "approvals_two_person_rule", Opts: approvalsTwoPersonOpts(), Run: approvalsTwoPerson},
+		{Name: "approvals_held_save", Opts: approvalsTwoPersonOpts(), Run: approvalsHeldSave},
 		// Scoped policy (W-P1-GPOL-10): with identity off a scoped entry loads
 		// but allows nobody (identity_required); an unscoped entry still applies.
 		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},

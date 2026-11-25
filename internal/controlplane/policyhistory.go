@@ -4,7 +4,7 @@ package controlplane
 // the history, diff and rollback routes over the versioned PolicyVersionStore.
 // It is wired only in --policy-store=versioned. Rollback never rewrites
 // history: it publishes the target's doc as a new head version through
-// Server.publishVersion, so authorship, validation, the conflict check and the
+// Server.writeVersioned, so authorship, validation, the conflict check and the
 // policy server refresh are the ones every versioned write uses.
 
 import (
@@ -13,6 +13,7 @@ import (
 	"fmt"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/approvals"
 	"github.com/ethosagent/warden/internal/dashboard"
 )
 
@@ -110,11 +111,13 @@ func (h policyHistory) Rollback(ctx context.Context, version int64, note string,
 		*w = doc
 		return nil
 	}
-	newHead, changed, err := h.s.publishVersion(ctx, mutate, meta, SourceRollback)
+	newHead, changed, err := h.s.writeVersioned(ctx, versionedWrite{
+		mutate: mutate, meta: meta, source: SourceRollback, via: approvals.SourceRollback, rollbackTo: version,
+	})
 	if err != nil {
 		return dashboard.RollbackResult{}, err
 	}
-	actor, _ := h.s.writeAuthor(ctx) // publishVersion already resolved it
+	actor, _ := h.s.writeAuthor(ctx) // writeVersioned already resolved it
 	h.s.cfg.Logger.Info("policy rollback",
 		"from_head", fromHead, "to_version", version, "new_head", newHead,
 		"changed", changed, "actor_sub", actor.Sub)

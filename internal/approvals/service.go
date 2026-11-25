@@ -135,6 +135,39 @@ func (s *Service) Submit(ctx context.Context, id string, revision int, actorSub 
 	return d, nil
 }
 
+// QueueMissingReplays queues a replay for each pending policy draft whose
+// current revision has none: a draft the offline CLI created (it cannot run a
+// replay) or one whose queue failed at submit. It stops at the first draft the
+// replayer cannot take (a full queue or a busy slot) and retries on the next
+// sweep. It returns how many it queued.
+func (s *Service) QueueMissingReplays(ctx context.Context) (int, error) {
+	if s.replayer == nil {
+		return 0, nil
+	}
+	n, cursor := 0, ""
+	for {
+		ds, next, err := s.cfg.Store.List(ctx, Filter{Target: TargetPolicy, State: StatePending}, cursor, 100)
+		if err != nil {
+			return n, err
+		}
+		for _, d := range ds {
+			if _, has, err := s.LatestReplay(ctx, d.ID, d.Revision); err != nil {
+				return n, err
+			} else if has {
+				continue
+			}
+			if _, err := s.replayer.Queue(context.WithoutCancel(ctx), d); err != nil {
+				return n, nil
+			}
+			n++
+		}
+		if next == "" {
+			return n, nil
+		}
+		cursor = next
+	}
+}
+
 // Replay re-runs the replay of a draft's current revision, at most once a
 // minute per draft. It returns ErrReplayBusy while the one replay slot is in
 // use and ErrReplayRateLimited inside the minute; the replay then runs in the
