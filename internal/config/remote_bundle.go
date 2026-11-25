@@ -264,13 +264,23 @@ func (r *RemoteProvider) applyBundleBody(t *BundleTrust, resp *http.Response) (b
 	defer r.applyMu.Unlock()
 	r.mu.RLock()
 	var applied bundle.State
+	usingFloor := false
 	if b := r.bundle; b != nil {
 		applied = bundle.State{Seq: b.Seq, ContentSHA256: b.ID, IssuedAt: b.IssuedAt}
+	} else if r.cache != nil && r.cache.floor != nil {
+		// Nothing applied yet: the cached bundle is the rollback floor.
+		applied, usingFloor = *r.cache.floor, true
 	}
 	r.mu.RUnlock()
 
 	opt := bundle.Options{Now: t.Now(), Skew: t.Skew, Issuer: t.Issuer}
 	v, err := bundle.Verify(body, t.Pins, applied, opt)
+	if usingFloor && (errors.Is(err, bundle.ErrUnchanged) || (err == nil && v.Refresh)) {
+		// The control plane serves the cached bundle itself. The floor is not
+		// an applied snapshot, so apply the live body (its credentials
+		// sidecar included) as a first apply.
+		v, err = bundle.Verify(body, t.Pins, bundle.State{}, opt)
+	}
 	switch {
 	case errors.Is(err, bundle.ErrUnchanged):
 		r.mu.Lock()

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -18,10 +19,21 @@ import (
 
 const cacheMaxAge = 12 * time.Hour
 
+// privateDir is a fresh state directory with mode 0700 (t.TempDir follows the
+// umask, which the cache refuses when group-writable).
+func privateDir(t *testing.T) string {
+	t.Helper()
+	d := t.TempDir()
+	if err := os.Chmod(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 // withCache turns the cache on for e's provider in a fresh state dir.
 func (e *bundleEnv) withCache() string {
 	e.t.Helper()
-	dir := e.t.TempDir()
+	dir := privateDir(e.t)
 	if err := e.rp.SetBundleCache(dir, cacheMaxAge); err != nil {
 		e.t.Fatal(err)
 	}
@@ -229,7 +241,7 @@ func TestBundleCacheLoadPreconditions(t *testing.T) {
 		t.Fatal("SetBundleCache with max age 0 succeeded")
 	}
 	// An oversized file is refused, not read whole.
-	rp2, _ := e.restarted(t.TempDir(), nil)
+	rp2, _ := e.restarted(privateDir(t), nil)
 	big := BundleCachePath(rp2.cache.path[:len(rp2.cache.path)-len("/bundle/bundle.json")])
 	if err := os.WriteFile(big, bytes.Repeat([]byte("x"), bundle.MaxEnvelopeBytes+10), 0o600); err != nil {
 		t.Fatal(err)
@@ -312,7 +324,7 @@ func TestBundleCacheWriteFailureLogsOnceAndKeepsPolicy(t *testing.T) {
 
 func TestBundleCacheOffWritesNothing(t *testing.T) {
 	e := newBundleEnv(t) // no SetBundleCache
-	dir := t.TempDir()
+	dir := privateDir(t)
 	if err := e.pullSeq(1, bundlePolicyA, "e1"); err != nil {
 		t.Fatal(err)
 	}
@@ -329,5 +341,162 @@ func TestBundleCacheOffWritesNothing(t *testing.T) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil || m["payload"] == nil || m["signatures"] == nil {
 		t.Fatalf("cache is not an envelope: %v %s", err, raw)
+	}
+}
+
+func TestBundleCacheRefusesUnsafeFiles(t *testing.T) {
+	prime := func(t *testing.T) (*bundleEnv, string) {
+		e := newBundleEnv(t)
+		dir := e.withCache()
+		if err := e.pullSeq(5, bundlePolicyA, "e5"); err != nil {
+			t.Fatal(err)
+		}
+		return e, dir
+	}
+	t.Run("fifo", func(t *testing.T) {
+		e, dir := prime(t)
+		path := BundleCachePath(dir)
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rp, _ := e.restarted(dir, nil)
+		done := make(chan error, 1)
+		go func() { _, err := rp.LoadCache(); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+				t.Fatalf("LoadCache on a FIFO = %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("LoadCache blocked on a FIFO")
+		}
+	})
+	t.Run("symlink", func(t *testing.T) {
+		e, dir := prime(t)
+		path := BundleCachePath(dir)
+		real := filepath.Join(t.TempDir(), "real.json")
+		if err := os.Rename(path, real); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(real, path); err != nil {
+			t.Fatal(err)
+		}
+		rp, _ := e.restarted(dir, nil)
+		if _, err := rp.LoadCache(); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("LoadCache on a symlink = %v", err)
+		}
+	})
+	t.Run("mode 0644", func(t *testing.T) {
+		e, dir := prime(t)
+		if err := os.Chmod(BundleCachePath(dir), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rp, _ := e.restarted(dir, nil)
+		if _, err := rp.LoadCache(); err == nil || !strings.Contains(err.Error(), "accessible by group or others") {
+			t.Fatalf("LoadCache on a 0644 file = %v", err)
+		}
+	})
+	t.Run("stateDir 0777", func(t *testing.T) {
+		e := newBundleEnv(t)
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.rp.SetBundleCache(dir, time.Hour); err == nil || !strings.Contains(err.Error(), "writable by group or others") {
+			t.Fatalf("SetBundleCache on a 0777 dir = %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, BundleCacheDirName)); err == nil {
+			t.Fatal("a bundle dir was created under an unsafe state dir")
+		}
+	})
+	t.Run("bundle dir 0775", func(t *testing.T) {
+		e := newBundleEnv(t)
+		dir := privateDir(t)
+		if err := os.Mkdir(filepath.Join(dir, BundleCacheDirName), 0o775); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chmod(filepath.Join(dir, BundleCacheDirName), 0o775)
+		if err := e.rp.SetBundleCache(dir, time.Hour); err == nil {
+			t.Fatal("SetBundleCache accepted a group-writable bundle dir")
+		}
+	})
+	t.Run("symlinked stateDir", func(t *testing.T) {
+		e := newBundleEnv(t)
+		real := privateDir(t)
+		link := filepath.Join(t.TempDir(), "link")
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.rp.SetBundleCache(link, time.Hour); err == nil || !strings.Contains(err.Error(), "not a real directory") {
+			t.Fatalf("SetBundleCache through a symlink = %v", err)
+		}
+	})
+}
+
+func TestBundleCacheFloorRejectsRollbackAndEquivocation(t *testing.T) {
+	e := newBundleEnv(t)
+	dir := e.withCache()
+	if err := e.pullSeq(5, bundlePolicyA, "e5"); err != nil {
+		t.Fatal(err)
+	}
+	rp, _ := e.restarted(dir, nil)
+	rp.SeedCacheFloor()
+
+	e.cp.serve(e.sign(e.bundle(3, bundlePolicyB), nil), "e3")
+	if err := rp.Pull(); !errors.Is(err, bundle.ErrRollback) {
+		t.Fatalf("seq 3 against a seq 5 cache floor: %v, want rollback", err)
+	}
+	e.cp.serve(e.sign(e.bundle(5, bundlePolicyB), nil), "e5b")
+	if err := rp.Pull(); !errors.Is(err, bundle.ErrEquivocation) {
+		t.Fatalf("seq 5 with other content: %v, want equivocation", err)
+	}
+	if _, err := rp.GetPolicy(); err == nil {
+		t.Fatal("a rejected boot pull installed a policy")
+	}
+	// The worker then falls back to the cache, and a newer bundle applies.
+	if _, err := rp.LoadCache(); err != nil {
+		t.Fatal(err)
+	}
+	e.cp.serve(e.sign(e.bundle(6, bundlePolicyB), nil), "e6")
+	if changed, err := rp.PollLong(t.Context(), time.Millisecond); err != nil || !changed {
+		t.Fatalf("seq 6 = %v, %v", changed, err)
+	}
+	// Boot-only: no cache load once the long-poll has started.
+	if _, err := rp.LoadCache(); err == nil {
+		t.Fatal("LoadCache succeeded after the long-poll started")
+	}
+}
+
+// The control plane serving the cached bundle itself is applied (not
+// "unchanged"), credentials sidecar included.
+func TestBundleCacheFloorAppliesLiveBodyWithCredentials(t *testing.T) {
+	e := newBundleEnv(t)
+	dir := e.withCache()
+	creds := &bundle.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "s3cr3t-value"}
+	pol := `{"allowlist":[{"domain":"a.example.com"}],"settings":{"secrets":{"backend":"aws","region":"us-east-1"}}}`
+	live := e.sign(e.bundle(5, pol), creds)
+	e.cp.serve(live, "e5")
+	if err := e.rp.Pull(); err != nil {
+		t.Fatal(err)
+	}
+	rp, _ := e.restarted(dir, nil)
+	rp.SeedCacheFloor()
+	if err := rp.Pull(); err != nil {
+		t.Fatalf("boot pull of the cached bundle itself: %v", err)
+	}
+	if s := rp.Settings(); s == nil || s.Secrets == nil || s.Secrets.SecretAccessKey != "s3cr3t-value" {
+		t.Fatalf("settings = %+v, want the sidecar merged from the live body", s)
+	}
+	if b, ok := rp.Bundle(); !ok || b.Seq != 5 {
+		t.Fatalf("bundle = %+v, %v", b, ok)
+	}
+}
+
+func TestBundleCacheDirFsyncErrorIsAWriteFailure(t *testing.T) {
+	if err := writeCacheFile(filepath.Join(t.TempDir(), "nodir", "bundle.json"), []byte(`{}`)); err == nil {
+		t.Fatal("writing into a missing directory succeeded")
 	}
 }

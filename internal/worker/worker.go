@@ -352,6 +352,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		controlPlane *config.RemoteProvider
 		wcert        *workerCert    // nil unless controlPlane.enrollment or clientCert is set
 		remotePolicy *config.Policy // last-known-good remote allow/deny, applied to the evaluator below
+		// bootedFromCache is true when the policy came from the bundle cache
+		// (no credentials sidecar).
+		bootedFromCache bool
 	)
 	if managed {
 		token := os.Getenv(pol.ControlPlane.TokenEnv)
@@ -408,6 +411,10 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 				cacheOn = false
 			}
 		}
+		if cacheOn {
+			// A verifiable cache is the rollback floor of the boot pull too.
+			rp.SeedCacheFloor()
+		}
 		if pullErr := rp.Pull(); pullErr != nil {
 			fromCache := false
 			cacheNote := "off"
@@ -423,7 +430,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 				}
 			}
 			if fromCache {
-				logger.Warn("control plane unreachable at boot; enforcing the cached last-known-good signed bundle (the credential sidecar is not cached: the aws secret backend uses worker env or IAM credentials)", "error", pullErr)
+				bootedFromCache = true
+				logger.Warn("control plane unreachable or refused at boot; enforcing the cached last-known-good signed bundle (the credential sidecar is not cached: the aws secret backend uses worker env or IAM credentials)", "error", pullErr)
 				if remote, gErr := rp.GetPolicy(); gErr == nil {
 					remotePolicy = &remote
 				}
@@ -478,6 +486,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	effectivePol := pol
 	effectivePol.SecretStore = secretStoreCfg
 	secretFetcher, secretStore, err := newSecretFetcher(effectivePol, mapping)
+	if err != nil && bootedFromCache && secretStoreCfg.ResolvedBackend() == config.SecretBackendAWS {
+		// The cached bundle has no credentials sidecar and the worker has no
+		// env or IAM credentials either. Crash-looping would not enforce the
+		// cached policy, so keep it: secrets stay unresolvable (every Fetch
+		// fails) until a restart with the control plane reachable.
+		logger.Error("running from the bundle cache without AWS credentials: secret resolution fails closed until a restart with the control plane reachable", "error", err)
+		secretFetcher, secretStore, err = noCredentialsFetcher{}, nil, nil
+	}
 	if err != nil {
 		return err
 	}
@@ -1189,6 +1205,14 @@ func resolveSecretStore(distributed *config.SettingsWire, local config.Policy) c
 		return config.SecretStoreConfigFromSettings(distributed.Secrets)
 	}
 	return local.SecretStore
+}
+
+// noCredentialsFetcher fails every fetch: the aws secret backend of a worker
+// running from the bundle cache that has no AWS credentials of its own.
+type noCredentialsFetcher struct{}
+
+func (noCredentialsFetcher) Fetch(string) (string, error) {
+	return "", errors.New("secrets: no AWS credentials while running from the bundle cache")
 }
 
 // newProxy is a test seam so tests can inspect the proxy.Config the worker

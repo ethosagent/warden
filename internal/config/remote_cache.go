@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/ethosagent/warden/internal/bundle"
@@ -51,6 +52,11 @@ type bundleCache struct {
 	// failed is true after a write failure was logged, so a broken disk logs
 	// one ERROR until a write succeeds again.
 	failed bool
+	// floor is the applied State the boot pull verifies against: the cached
+	// bundle's seq, content and issuedAt (SeedCacheFloor). Zero without one.
+	floor *bundle.State
+	// started is set when the long-poll begins; LoadCache is refused after.
+	started bool
 }
 
 // SetBundleCache turns the cache on: verified bundles are written under
@@ -62,11 +68,15 @@ func (r *RemoteProvider) SetBundleCache(stateDir string, maxAge time.Duration) e
 		return errors.New("config: remote: bundle cache needs a state directory and a positive max age")
 	}
 	dir := filepath.Join(stateDir, BundleCacheDirName)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("config: remote: create bundle cache dir: %w", err)
+	// stateDir and bundle/ must be real directories (never symlinks) owned by
+	// this user and not writable by group or others, or another local user
+	// could swap the cache for an older valid bundle. Ones that are missing
+	// are created 0700.
+	if err := ensureOwnDir(stateDir); err != nil {
+		return err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("config: remote: secure bundle cache dir: %w", err)
+	if err := ensureOwnDir(dir); err != nil {
+		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -74,6 +84,35 @@ func (r *RemoteProvider) SetBundleCache(stateDir string, maxAge time.Duration) e
 		return errors.New("config: remote: bundle cache needs bundle trust (SetBundleTrust first)")
 	}
 	r.cache = &bundleCache{path: filepath.Join(dir, BundleCacheFileName), maxAge: maxAge}
+	return nil
+}
+
+// ensureOwnDir creates dir 0700 when it is missing, and requires an existing
+// one to be a real directory (Lstat: a symlink is refused) owned by the current
+// user and not writable by group or others.
+func ensureOwnDir(dir string) error {
+	st, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("config: remote: create bundle cache dir: %w", err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("config: remote: secure bundle cache dir: %w", err)
+		}
+		st, err = os.Lstat(dir)
+	}
+	if err != nil {
+		return fmt.Errorf("config: remote: check bundle cache dir: %w", err)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("config: remote: bundle cache path %s is not a real directory (a symlink or file is refused)", dir)
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) != os.Getuid() {
+		return fmt.Errorf("config: remote: bundle cache directory %s is not owned by the worker user", dir)
+	}
+	if st.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("config: remote: bundle cache directory %s is writable by group or others (mode %04o); chmod 700 it", dir, st.Mode().Perm())
+	}
 	return nil
 }
 
@@ -140,12 +179,16 @@ func writeCacheFile(path string, body []byte) error {
 	if err := os.Rename(name, path); err != nil {
 		return err
 	}
-	ok = true
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+	ok = true // the rename happened: the file is in place whatever the fsync says
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
 	}
-	return nil
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
 }
 
 // LoadCache installs the cached bundle as the provider's snapshot, as if it had
@@ -168,32 +211,19 @@ func (r *RemoteProvider) LoadCache() (VerifiedBundle, error) {
 	defer r.applyMu.Unlock()
 	r.mu.RLock()
 	t, c, applied := r.trust, r.cache, r.bundle != nil
+	started := c != nil && c.started
 	r.mu.RUnlock()
 	if t == nil || c == nil {
 		return VerifiedBundle{}, errors.New("config: remote: bundle cache is not enabled")
 	}
-	if applied {
-		return VerifiedBundle{}, errors.New("config: remote: bundle cache can only be loaded before a bundle is applied")
-	}
-
-	f, err := os.Open(c.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return VerifiedBundle{}, ErrNoBundleCache
-	}
-	if err != nil {
-		return VerifiedBundle{}, fmt.Errorf("config: remote: open bundle cache: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(f, bundle.MaxEnvelopeBytes+1))
-	if err != nil {
-		return VerifiedBundle{}, fmt.Errorf("config: remote: read bundle cache: %w", err)
+	if applied || started {
+		return VerifiedBundle{}, errors.New("config: remote: bundle cache can only be loaded at boot, before a bundle is applied or the long-poll has started")
 	}
 
 	now := t.Now()
-	opt := bundle.Options{Now: now, Skew: t.Skew, Issuer: t.Issuer, AllowMissingCredentials: true}
-	v, err := bundle.Verify(raw, t.Pins, bundle.State{}, opt)
+	v, err := readCachedBundle(c.path, t, now)
 	if err != nil {
-		return VerifiedBundle{}, fmt.Errorf("config: remote: cached bundle rejected (%s)", bundle.Reason(err))
+		return VerifiedBundle{}, err
 	}
 	if now.Sub(v.Bundle.IssuedAt) > c.maxAge {
 		return VerifiedBundle{}, ErrBundleCacheTooOld
@@ -213,4 +243,67 @@ func (r *RemoteProvider) LoadCache() (VerifiedBundle, error) {
 		t.Logger.Info("bundle loaded from cache", "seq", v.Seq, "kid", v.KID)
 	}
 	return vb.clone(), nil
+}
+
+// readCachedBundle reads the cache file safely and verifies it against the
+// pins at now (credentials sidecar allowed to be absent). The open refuses
+// symlinks and never blocks on a FIFO; the handle must be a regular file that
+// group and others cannot access. A missing file is ErrNoBundleCache. Errors
+// carry a reason only, never content.
+func readCachedBundle(path string, t *BundleTrust, now time.Time) (bundle.Verified, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return bundle.Verified{}, ErrNoBundleCache
+	}
+	if err != nil {
+		return bundle.Verified{}, errors.New("config: remote: bundle cache cannot be opened (a symlink is refused)")
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return bundle.Verified{}, fmt.Errorf("config: remote: stat bundle cache: %w", err)
+	}
+	if !st.Mode().IsRegular() {
+		return bundle.Verified{}, errors.New("config: remote: bundle cache is not a regular file")
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		return bundle.Verified{}, fmt.Errorf("config: remote: bundle cache is accessible by group or others (mode %04o)", st.Mode().Perm())
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, bundle.MaxEnvelopeBytes+1))
+	if err != nil {
+		return bundle.Verified{}, fmt.Errorf("config: remote: read bundle cache: %w", err)
+	}
+	opt := bundle.Options{Now: now, Skew: t.Skew, Issuer: t.Issuer, AllowMissingCredentials: true}
+	v, err := bundle.Verify(raw, t.Pins, bundle.State{}, opt)
+	if err != nil {
+		return bundle.Verified{}, fmt.Errorf("config: remote: cached bundle rejected (%s)", bundle.Reason(err))
+	}
+	return v, nil
+}
+
+// SeedCacheFloor makes a verifiable cached bundle the rollback floor of the
+// boot pull: with it, a control plane that is up at boot but serves a lower
+// seq is rejected as a rollback (and an equal seq with different content as
+// equivocation) instead of being applied on an empty state, and the worker then
+// falls back to LoadCache. Call it after SetBundleCache and before Pull. Only a
+// cache that passes bundle.Verify (pins, issuer, not expired) is used; any
+// failure means no floor, and the max age is not applied (an old but valid
+// bundle is still proof of a seq the control plane once served). The floor
+// applies only until the first bundle is applied.
+func (r *RemoteProvider) SeedCacheFloor() {
+	r.applyMu.Lock()
+	defer r.applyMu.Unlock()
+	r.mu.RLock()
+	t, c := r.trust, r.cache
+	r.mu.RUnlock()
+	if t == nil || c == nil {
+		return
+	}
+	v, err := readCachedBundle(c.path, t, t.Now())
+	if err != nil {
+		return
+	}
+	r.mu.Lock()
+	c.floor = &bundle.State{Seq: v.Seq, ContentSHA256: v.ContentSHA256, IssuedAt: v.Bundle.IssuedAt}
+	r.mu.Unlock()
 }

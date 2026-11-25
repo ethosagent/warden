@@ -167,10 +167,31 @@ is deliberately not cached. A worker running from the cache therefore has the
 `aws` selector (backend, region, name prefix) from the signed policy but no
 explicit key pair, so the secret backend resolves credentials from the worker's
 own environment (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) or the instance
-IAM role. The worker does not fail at boot because of that; if neither exists the
-`aws` backend fails to start, as it would for any worker without credentials.
-Apply-on-restart applies: credentials from the control plane are used again after
-the next restart with the control plane reachable.
+IAM role. If neither exists the worker still starts and enforces the cached
+allow/deny policy: it logs one ERROR, and every secret fetch fails (so requests
+that need a secret are not served) until a restart with the control plane
+reachable, when the credentials arrive again.
+
+Rollback floor. A control plane that is up at boot is not trusted blindly either:
+when the cache verifies (pins, issuer, not expired), its seq is the floor of the
+boot pull. A bundle with a lower seq is rejected as a rollback, and the same seq
+with different content as equivocation; the pull then fails and the worker
+enforces the cached bundle. The control plane serving the cached bundle itself is
+applied normally (credentials included). This goes beyond the "cache is read only
+when the boot pull fails" wording of the original ticket and is bounded: a control
+plane restored from an old backup that serves a lower seq is refused only until
+the cached bundle expires (about 24h by default; the bundle lifetime, not
+`bundleCacheMaxAge`), after which the cache stops being a floor and the worker
+accepts the control plane's bundles again. Use `--bundle-seq-floor` on the control
+plane to recover sooner.
+
+File safety. `stateDir` and `bundle/` must be real directories (a symlink is
+refused), owned by the worker user and not writable by group or others; a worse
+directory disables the cache with one ERROR. The cache file is opened without
+following symlinks and without blocking, must be a regular file, and must not be
+accessible by group or others (mode `0600`), otherwise it is refused and the
+worker boots fail-closed. The cache can only be loaded at boot, before the first
+long-poll.
 
 Operations. The state directory must not be readable or writable by the agent it
 guards: a writable cache cannot make the worker enforce a forged policy

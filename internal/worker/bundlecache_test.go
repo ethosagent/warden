@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -50,7 +51,11 @@ func newCacheWorkerEnv(t *testing.T, maxAge string) *cacheWorkerEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &cacheWorkerEnv{t: t, sg: sg, clk: clocktest.NewFake(bundleStart.Add(time.Minute)), state: t.TempDir(), cp: &bundleCP{}}
+	state := t.TempDir()
+	if err := os.Chmod(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	e := &cacheWorkerEnv{t: t, sg: sg, clk: clocktest.NewFake(bundleStart.Add(time.Minute)), state: state, cp: &bundleCP{}}
 	e.srv = httptest.NewTLSServer(e.cp)
 	t.Cleanup(e.srv.Close)
 	caPath := filepath.Join(t.TempDir(), "ca.pem")
@@ -85,9 +90,14 @@ controlPlane:
 
 func (e *cacheWorkerEnv) serve(seq int64, domain string) {
 	e.t.Helper()
+	e.servePolicy(seq, `{"allowlist":[{"domain":"`+domain+`"}]}`)
+}
+
+func (e *cacheWorkerEnv) servePolicy(seq int64, policy string) {
+	e.t.Helper()
 	b := e.base
 	b.Seq, b.PolicyVersion = seq, seq
-	b.Policy = json.RawMessage(`{"allowlist":[{"domain":"` + domain + `"}]}`)
+	b.Policy = json.RawMessage(policy)
 	raw, err := bundle.Sign(context.Background(), b, nil, e.sg)
 	if err != nil {
 		e.t.Fatal(err)
@@ -156,6 +166,11 @@ func (e *cacheWorkerEnv) cacheFile() string { return config.BundleCachePath(e.st
 func (e *cacheWorkerEnv) primeCache() {
 	e.t.Helper()
 	e.serve(5, "cached.test")
+	e.primeServed()
+}
+
+func (e *cacheWorkerEnv) primeServed() {
+	e.t.Helper()
 	addr, _, stop := e.run()
 	await(e.t, 10*time.Second, "the worker to enforce and cache seq 5", func() bool {
 		_, err := os.Stat(e.cacheFile())
@@ -351,5 +366,56 @@ func TestWorkerBundleCacheOffWritesNothing(t *testing.T) {
 				t.Fatalf("no fail-closed log:\n%s", logs)
 			}
 		})
+	}
+}
+
+// With the control plane UP at boot but serving a valid, older seq 3, the seq 5
+// cache is the rollback floor: the pull is rejected and the worker enforces the
+// cache.
+func TestWorkerBootCacheIsRollbackFloorWhenCPUp(t *testing.T) {
+	e := newCacheWorkerEnv(t, "")
+	e.primeCache()
+
+	cp := &bundleCP{}
+	srv := httptest.NewTLSServer(cp)
+	t.Cleanup(srv.Close)
+	e.cp, e.srv = cp, srv
+	e.cfg = rewriteEndpoint(t, e.cfg, srv)
+	e.serve(3, "rolledback.test")
+
+	addr, logs, stop := e.run()
+	defer stop()
+	if got := connectTo(t, addr, "rolledback.test"); got != http.StatusForbidden {
+		t.Fatalf("a rolled-back bundle was enforced at boot: %d", got)
+	}
+	if got := connectTo(t, addr, "cached.test"); got == http.StatusForbidden {
+		t.Fatal("the cached seq 5 policy was not enforced")
+	}
+	if !strings.Contains(logs.String(), "enforcing the cached last-known-good signed bundle") {
+		t.Errorf("no cache boot log:\n%s", logs)
+	}
+}
+
+// A worker booted from the cache whose aws secret backend cannot get
+// credentials (the sidecar is not cached) still starts and enforces the cached
+// policy; secret resolution fails closed.
+func TestWorkerBootFromBundleCacheWithoutAWSCredentials(t *testing.T) {
+	e := newCacheWorkerEnv(t, "")
+	e.servePolicy(5, `{"allowlist":[{"domain":"cached.test"}],"settings":{"secrets":{"backend":"aws","region":"us-east-1"}}}`)
+	// The priming run has a working aws client; the restarted one does not.
+	withFakeAWSClient(t, newFakeAWSClient(), nil)
+	e.primeServed()
+	withFakeAWSClient(t, nil, errors.New("no credentials"))
+
+	addr, logs, stop := e.run()
+	defer stop()
+	if got := connectTo(t, addr, "cached.test"); got == http.StatusForbidden {
+		t.Fatal("the cached policy was not enforced")
+	}
+	if got := connectTo(t, addr, "other.test"); got != http.StatusForbidden {
+		t.Fatalf("other.test = %d, want 403", got)
+	}
+	if !strings.Contains(logs.String(), "running from the bundle cache without AWS credentials") {
+		t.Errorf("no ERROR about the missing credentials:\n%s", logs)
 	}
 }
