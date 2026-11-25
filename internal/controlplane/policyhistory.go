@@ -14,6 +14,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/approvals"
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
 )
 
@@ -107,6 +108,11 @@ func (h policyHistory) Rollback(ctx context.Context, version int64, note string,
 			return h.storeError("rollback", version, err)
 		}
 		doc := target.Doc
+		// The rollback route is editor level, so it must not change a field the
+		// settings write reserves for admin (the identity modes among them).
+		if err := h.s.rollbackRoleCheck(ctx, w.Settings, doc.Settings); err != nil {
+			return err
+		}
 		keepCredential(&doc, credentialOf(*w))
 		*w = doc
 		return nil
@@ -169,4 +175,26 @@ func versionMeta(v PolicyVersion) dashboard.PolicyVersionMeta {
 		AuthorSub: v.Author.Sub, AuthorEmail: v.Author.Email, AuthorKind: v.Author.Kind,
 		Message: v.Message, Source: v.Source, DocSHA256: v.DocSHA256,
 	}
+}
+
+// rollbackRoleCheck applies the per-field settings authorization to a rollback
+// from head's settings to the target's, as writeSettingsAs does for an edit.
+// console.auth none has no roles, and an admin may change anything.
+func (s *Server) rollbackRoleCheck(ctx context.Context, head, target *config.SettingsWire) error {
+	if s.cfg.Console.Auth != config.ConsoleAuthOIDC {
+		return nil
+	}
+	var role config.Role
+	p, ok := PrincipalFrom(ctx)
+	if ok {
+		role = principalRole(s.cfg.Console, p)
+	}
+	if role >= config.RoleAdmin {
+		return nil
+	}
+	var in config.SettingsWire
+	if target != nil {
+		in = *target
+	}
+	return s.settingsRoleCheck(role, p.Sub, head, in)
 }

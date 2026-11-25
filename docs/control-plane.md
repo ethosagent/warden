@@ -2586,14 +2586,33 @@ enforced. So the control plane guards the switch.
    while `require` is already in force is never refused for this reason.
 4. **Force, if you must.** `?force=true` on the same request overrides the refusal.
    Only an admin may force; the admin audit row of the write records
-   `force=true` and the refused worker ids (`workersLacking`, with
-   `workersLackingCount`). Applying a held draft takes the same `?force=true` on
-   the approve request.
+   `force=true` and the refused worker ids (`workersLacking`, with the full
+   `workersLackingCount`; the id list is cut at 100). The same parameter works on a
+   policy rollback, on change draft submit and approve, and on a break-glass
+   emergency apply, because each of them can newly set `require`. Applying a held
+   draft re-runs the check, so force it on the approve (or emergency-apply) request.
 5. **Roll back.** Set the agent's identity back to `attribute` (or `off`) in the same
-   settings form; leaving require is never refused.
+   settings form; leaving require is never refused. If `identity.defaultMode` is
+   `require`, clearing an agent's override does **not** leave require: the agent then
+   inherits the default (and clearing it is guarded like any switch to require). Set
+   the override to `attribute`, or change the default.
+
+The guard decides per worker from the mode that worker would resolve (the agent's own
+`identity`, else `identity.defaultMode`), so a new `require` default does not count a
+worker whose agent keeps its own override, and clearing or removing an override under a
+`require` default counts the workers of that agent.
+
+**What the guard cannot see.** A worker's agent id and capabilities are what the worker
+says in its heartbeat. With legacy shared-token or no worker authentication they are
+unauthenticated claims, so the guard is advisory; it is binding only when workers
+authenticate with worker tokens or mTLS certificates. The guard also lives only on the
+control plane's write paths. Editing the served policy file directly and the offline
+`warden policy import` bypass it; both are only caught afterwards, by the fleet view
+flag and the `worker_lacks_identity_require` log line.
 
 `agents[].identity` and `identity.defaultMode` are admin-only settings fields, so an
-editor gets `403 role_required` for them.
+editor gets `403 role_required` for them, including through a policy rollback that
+would change them.
 
 ### Where the token travels
 

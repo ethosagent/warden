@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"sort"
+	"strconv"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/config"
@@ -23,52 +24,25 @@ import (
 // noteIdentityRequire).
 
 // WorkersLackingCap returns the ids of connected (online) workers that do not
-// advertise cap and serve one of agentIDs, or, when anyAgent is true, any
-// worker (the identity default applies to every agent). A worker that reports
-// no agent id never matches agentIDs. Sorted and capped at 100.
-func (r *WorkerRegistry) WorkersLackingCap(cap string, agentIDs []string, anyAgent bool) []string {
+// advertise cap and for which affected(agentID) is true, sorted, with the id
+// list capped at 100, and the uncapped total. affected gets the agent id the
+// worker reports ("" when it reports none).
+func (r *WorkerRegistry) WorkersLackingCap(cap string, affected func(agentID string) bool) (ids []string, total int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
-	var out []string
 	for id, w := range r.workers {
-		if now.Sub(w.lastSeen) >= staleAfter || slices.Contains(w.caps, cap) {
+		if now.Sub(w.lastSeen) >= staleAfter || slices.Contains(w.caps, cap) || !affected(w.agentID) {
 			continue
 		}
-		if anyAgent || (w.agentID != "" && slices.Contains(agentIDs, w.agentID)) {
-			out = append(out, id)
-		}
+		ids = append(ids, id)
 	}
-	sort.Strings(out)
-	if len(out) > maxWorkersWithoutCap {
-		out = out[:maxWorkersWithoutCap]
+	sort.Strings(ids)
+	total = len(ids)
+	if len(ids) > maxWorkersWithoutCap {
+		ids = ids[:maxWorkersWithoutCap]
 	}
-	return out
-}
-
-// newRequire reports what in switches to require relative to live: the ids of
-// the agents whose own identity mode becomes require, and whether the identity
-// default does. A document that leaves an existing require setting alone
-// reports nothing, so saving an unrelated field is never refused because an
-// old worker connected after require was set.
-func newRequire(live *config.SettingsWire, in config.SettingsWire) (agents []string, def bool) {
-	liveAgent := map[string]string{}
-	liveDefault := ""
-	if live != nil {
-		for _, a := range live.Agents {
-			liveAgent[a.ID] = a.Identity
-		}
-		if live.Identity != nil {
-			liveDefault = live.Identity.DefaultMode
-		}
-	}
-	for _, a := range in.Agents {
-		if a.Identity == config.IdentityModeRequire && liveAgent[a.ID] != config.IdentityModeRequire && !slices.Contains(agents, a.ID) {
-			agents = append(agents, a.ID)
-		}
-	}
-	def = in.Identity != nil && in.Identity.DefaultMode == config.IdentityModeRequire && liveDefault != config.IdentityModeRequire
-	return agents, def
+	return ids, total
 }
 
 // requireGuard refuses a settings document that newly sets require mode while a
@@ -77,11 +51,12 @@ func newRequire(live *config.SettingsWire, in config.SettingsWire) (agents []str
 // workers. ?force=true by an admin lets it through and records force and the
 // worker ids on the request's admin audit row. live is the settings in force.
 func (s *Server) requireGuard(ctx context.Context, live *config.SettingsWire, in config.SettingsWire) error {
-	agents, def := newRequire(live, in)
-	if len(agents) == 0 && !def {
-		return nil
-	}
-	lacking := s.registry.WorkersLackingCap(config.CapIdentityRequireV1, agents, def)
+	// A worker is affected when its effective mode (its agent's own identity,
+	// else the default) becomes require: clearing an override under a require
+	// default counts, a new default does not reach an agent with an override.
+	lacking, total := s.registry.WorkersLackingCap(config.CapIdentityRequireV1, func(agentID string) bool {
+		return requireModeFor(&in, agentID) && !requireModeFor(live, agentID)
+	})
 	if len(lacking) == 0 {
 		return nil
 	}
@@ -101,25 +76,25 @@ func (s *Server) requireGuard(ctx context.Context, live *config.SettingsWire, in
 	}
 	d := map[string]string{adminaudit.DetailForce: "true"}
 	putList(d, adminaudit.DetailWorkersLacking, lacking)
+	d[adminaudit.DetailWorkersLacking+adminaudit.DetailCountSuffix] = strconv.Itoa(total)
 	adminaudit.Annotate(ctx, "", d)
 	s.cfg.Logger.Warn("require_mode_forced", "workers", lacking)
 	return nil
 }
 
-// requireModeFor is the identity mode in force for a worker serving agentID
-// under w: the agent's own override, else the identity default.
+// requireModeFor reports whether the identity mode in force for a worker
+// serving agentID under w is require, resolved as the worker resolves it
+// (config.EffectiveIdentityMode): the agent's own override, else the default.
 func requireModeFor(w *config.SettingsWire, agentID string) bool {
 	if w == nil {
 		return false
 	}
-	if agentID != "" {
-		for _, a := range w.Agents {
-			if a.ID == agentID && a.Identity != "" {
-				return a.Identity == config.IdentityModeRequire
-			}
-		}
+	var id config.IdentitySettings
+	if w.Identity != nil {
+		id = *w.Identity
 	}
-	return w.Identity != nil && w.Identity.DefaultMode == config.IdentityModeRequire
+	mode, _ := config.EffectiveIdentityMode(agentID, config.AgentsFromSettings(w.Agents), id)
+	return mode == config.IdentityModeRequire
 }
 
 // FlagNoIdentityRequire sets NoIdentityRequire on every online view whose caps

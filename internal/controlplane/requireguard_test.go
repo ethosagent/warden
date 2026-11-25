@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -288,5 +290,131 @@ func TestHeartbeatLogsWorkerWithoutIdentityRequire(t *testing.T) {
 	}
 	if served := srv.servedSettings(); !requireModeFor(served, "a") || requireModeFor(served, "b") {
 		t.Errorf("served require: a=%v b=%v, want true false", requireModeFor(served, "a"), requireModeFor(served, "b"))
+	}
+}
+
+const guardIdentityBlock = `"identity":{"defaultMode":%q,"issuer":"https://idp.example","audience":"warden"}`
+
+// TestRequireEffectiveMode: the guard compares the mode each worker resolves
+// (the agent's own identity, else the default). Clearing or removing an
+// attribute override under a require default switches the agent to require and
+// is refused; a new require default does not count a worker whose agent keeps
+// an override.
+func TestRequireEffectiveMode(t *testing.T) {
+	e := newAuthzEnvOn(t, openSessionDB(t), writePolicyFileForFieldAuthz(t), defaultRoles())
+	admin := e.session(t, groupAdmin)
+	save := func(doc map[string]any) *httptest.ResponseRecorder {
+		return e.do(admin, http.MethodPost, "/dashboard/api/settings", mustJSON(t, doc))
+	}
+
+	// default=off, agent-a=attribute, an old worker on agent-a: a require default
+	// does not reach agent-a (its override wins), so nothing is refused.
+	beat(e.srv, "old", "agent-a", config.CapBlocklistV1)
+	doc := e.liveSettingsDoc(t, admin)
+	doc["identity"].(map[string]any)["defaultMode"] = "require"
+	if rec := save(doc); rec.Code/100 != 2 {
+		t.Fatalf("default=require with an overridden agent's old worker = %d %s, want 2xx", rec.Code, rec.Body.String())
+	}
+	// Clearing the override now puts agent-a in require.
+	doc = e.liveSettingsDoc(t, admin)
+	setAgentIdentity(doc, "")
+	rec := save(doc)
+	if b := decodeLack(t, rec.Body.String()); rec.Code != http.StatusConflict || !slices.Equal(b.Workers, []string{"old"}) {
+		t.Fatalf("clearing the override under default=require = %d %s, want 409 [old]", rec.Code, rec.Body.String())
+	}
+	// So does removing the agent's entry.
+	doc = e.liveSettingsDoc(t, admin)
+	delete(doc, "agents")
+	if rec := save(doc); rec.Code != http.StatusConflict {
+		t.Fatalf("removing the entry under default=require = %d %s, want 409", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRequireRollbackGuarded: a rollback to a version that serves require is
+// refused while an old worker serves the agent, an admin's force goes through
+// and is audited, and an editor cannot roll an agent back out of require.
+func TestRequireRollbackGuarded(t *testing.T) {
+	e := newHistoryEnv(t, historyEnvOpts{oidc: true, audit: true})
+	admin, editor := sessionAs(t, e, "ad1", groupAdmin), sessionAs(t, e, "ed1", groupEditor)
+	settings := func(mode string) string {
+		return `{"agents":[{"id":"agent-a","identity":"` + mode + `"}],` + fmt.Sprintf(guardIdentityBlock, "off") + `}`
+	}
+	for i, mode := range []string{"require", "attribute"} { // v2 require, v3 attribute
+		if rec := e.send(admin, http.MethodPost, "/dashboard/api/settings", settings(mode), ifMatch(int64(i+1))); rec.Code != http.StatusOK {
+			t.Fatalf("save %s = %d %s", mode, rec.Code, rec.Body.String())
+		}
+	}
+	beat(e.srv, "old", "agent-a", config.CapBlocklistV1)
+
+	rec := e.send(admin, http.MethodPost, rollbackPath(2), "", ifMatch(3))
+	if b := decodeLack(t, rec.Body.String()); rec.Code != http.StatusConflict || b.Error != "workers_lack_capability" || !slices.Equal(b.Workers, []string{"old"}) {
+		t.Fatalf("rollback to require with an old worker = %d %s, want 409 [old]", rec.Code, rec.Body.String())
+	}
+	if head := mustHead(t, e.srv.versions); head != 3 {
+		t.Fatalf("head = %d after a refused rollback, want 3", head)
+	}
+	before := len(e.rec.inputs())
+	if rec := e.send(admin, http.MethodPost, rollbackPath(2)+"?force=true", "", ifMatch(3)); rec.Code != http.StatusOK {
+		t.Fatalf("forced rollback = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	var forced *adminaudit.Input
+	for _, in := range e.rec.inputs()[before:] {
+		if in.Details[adminaudit.DetailForce] == "true" {
+			in := in
+			forced = &in
+		}
+	}
+	if forced == nil || forced.Action != "policy.rollback" || forced.Details[adminaudit.DetailWorkersLacking] != "old" {
+		t.Fatalf("forced rollback audit row = %+v, want policy.rollback with force and workersLacking=old", forced)
+	}
+
+	// Head is v4 (require). An editor rolling back to v3 (attribute) changes the
+	// admin-only agents[0].identity, so it is a 403 with the SSO-10 shape.
+	rec = e.send(editor, http.MethodPost, rollbackPath(3), "", ifMatch(4))
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"role_required"`) || !strings.Contains(rec.Body.String(), "agents[0].identity") {
+		t.Fatalf("editor rollback out of require = %d %s, want 403 role_required agents[0].identity", rec.Code, rec.Body.String())
+	}
+	if head := mustHead(t, e.srv.versions); head != 4 {
+		t.Fatalf("head = %d after the refused editor rollback, want 4", head)
+	}
+	// An editor rollback that changes no admin field still works.
+	if rec := e.send(editor, http.MethodPost, rollbackPath(4), "", ifMatch(4)); rec.Code != http.StatusOK {
+		t.Fatalf("editor no-op rollback = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+}
+
+// TestEmergencyApplyRequireGuard: a break-glass emergency apply of a draft that
+// newly sets require meets the capability guard, and ?force=true on the
+// emergency-apply request overrides it.
+func TestEmergencyApplyRequireGuard(t *testing.T) {
+	e := emergencyEnv(t)
+	doc := `{"allowlist":[{"domain":"api.openai.com"}],"denylist":[],"settings":{"agents":[{"id":"agent-a","identity":"require"}],` +
+		fmt.Sprintf(guardIdentityBlock, "off") + `}}`
+	d := e.create(t, "u1", doc)
+	if rec := e.submit(t, "u1", d.ID); rec.Code != http.StatusOK {
+		t.Fatalf("submit = %d %s", rec.Code, rec.Body.String())
+	}
+	beat(e.srv, "old", "agent-a", config.CapBlocklistV1)
+	path := draftsPath + "/" + d.ID + "/emergency-apply"
+
+	e.wantErr(t, e.do("breakglass", http.MethodPost, path, emergencyBody(emergencyReason)), http.StatusConflict, "workers_lack_capability")
+	e.wantHead(t, 1)
+	rec := e.do("breakglass", http.MethodPost, path+"?force=true", emergencyBody(emergencyReason))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("forced emergency apply = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	e.wantHead(t, 2)
+}
+
+// TestWorkersLackingCapTotal: the id list is capped at 100 but the total is not.
+func TestWorkersLackingCapTotal(t *testing.T) {
+	r := NewWorkerRegistry()
+	for i := 0; i < 130; i++ {
+		r.SeenHeartbeat(fmt.Sprintf("w%03d", i), "", nil, "a", "", WorkerBundle{})
+	}
+	r.SeenHeartbeat("capable", "", []string{config.CapIdentityRequireV1}, "a", "", WorkerBundle{})
+	ids, total := r.WorkersLackingCap(config.CapIdentityRequireV1, func(string) bool { return true })
+	if len(ids) != 100 || total != 130 || ids[0] != "w000" {
+		t.Fatalf("got %d ids, total %d, first %q; want 100 ids, total 130, first w000", len(ids), total, ids[0])
 	}
 }

@@ -249,11 +249,21 @@ func (s *Server) writeVersioned(ctx context.Context, w versionedWrite) (int64, b
 	}
 	headKey := credentialOf(doc)
 	baseDoc := draftDoc(RedactCredentials(doc))
+	headSettings := doc.Settings.DeepCopy()
 	if err := w.mutate(&doc); err != nil {
 		return 0, false, err
 	}
 	if err := s.validateDoc(doc); err != nil {
 		return 0, false, &dashboard.InvalidPolicyError{Err: err}
+	}
+	// The require-mode rollout guard covers every versioned writer (settings,
+	// rollback): the new doc's effective modes against head's.
+	var newSettings config.SettingsWire
+	if doc.Settings != nil {
+		newSettings = *doc.Settings
+	}
+	if err := s.requireGuard(ctx, headSettings, newSettings); err != nil {
+		return 0, false, err
 	}
 	if doc.Settings != nil {
 		if err := s.checkIssuerCollision(doc.Settings.Identity); err != nil {

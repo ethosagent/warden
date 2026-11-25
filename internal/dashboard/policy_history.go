@@ -232,7 +232,7 @@ func (s *Server) rollbackPolicyVersion(w http.ResponseWriter, r *http.Request, v
 		writeError(w, http.StatusBadRequest, "note is longer than 512 characters")
 		return
 	}
-	res, err := s.policyHistory.Rollback(r.Context(), v, note, WriteMeta{ExpectedHead: expected})
+	res, err := s.policyHistory.Rollback(withForce(r.Context(), r), v, note, WriteMeta{ExpectedHead: expected})
 	if err != nil {
 		writeHistoryError(w, err)
 		return
@@ -251,12 +251,13 @@ func writeHistoryError(w http.ResponseWriter, err error) {
 	var re *RoleRequiredError
 	var held *HeldForApproval
 	var cerr *ChangeError
+	var wl *WorkersLackCapabilityError
 	switch {
 	case errors.Is(err, ErrPolicyVersionNotFound):
 		writeError(w, http.StatusNotFound, "policy version not found")
 	case errors.As(err, &ie):
 		writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]string{"error": "invalid_policy", "detail": ie.Error()})
-	case errors.As(err, &ce), errors.As(err, &re), errors.As(err, &held), errors.As(err, &cerr):
+	case errors.As(err, &ce), errors.As(err, &re), errors.As(err, &wl), errors.As(err, &held), errors.As(err, &cerr):
 		writeWriterError(w, err)
 	default:
 		writeError(w, http.StatusInternalServerError, "policy history error")

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/test/harness"
@@ -58,6 +59,25 @@ func identityRequireRolloutGuard(t *testing.T, h *harness.H) {
 	if r := requireConnect(t, h, ""); r.status == http.StatusProxyAuthRequired {
 		t.Fatal("the refused save still put the worker in require mode")
 	}
+	// Nothing was persisted: the settings read back without the require entry.
+	after, err := cp.SendBearer(admin, http.MethodGet, "/dashboard/api/settings", nil, nil)
+	if err != nil || after.Status != http.StatusOK {
+		t.Fatalf("read settings after the refusal: %d %s %v", after.Status, after.Body, err)
+	}
+	var back struct {
+		Settings *config.SettingsWire `json:"settings"`
+	}
+	if err := json.Unmarshal(after.Body, &back); err != nil || back.Settings == nil {
+		t.Fatalf("decode settings after the refusal: %v", err)
+	}
+	for _, a := range back.Settings.Agents {
+		if a.ID == bootAgentID && a.Identity == config.IdentityModeRequire {
+			t.Fatalf("the refused save was persisted: %+v", back.Settings.Agents)
+		}
+	}
+	if v := after.Header.Get(dashboard.PolicyVersionHeader); v != got.Header.Get(dashboard.PolicyVersionHeader) {
+		t.Fatalf("policy version moved from %q to %q across a refused save", got.Header.Get(dashboard.PolicyVersionHeader), v)
+	}
 
 	forced, err := cp.SendBearer(admin, http.MethodPost, "/dashboard/api/settings?force=true", hdr, body)
 	if err != nil || forced.Status != http.StatusOK {
@@ -66,4 +86,19 @@ func identityRequireRolloutGuard(t *testing.T, h *harness.H) {
 	h.Eventually("the capable worker to apply require mode", func() bool {
 		return requireConnect(t, h, "").status == http.StatusProxyAuthRequired
 	})
+	// The forced write's admin audit row records force and the refused worker.
+	var found bool
+	for _, row := range h.AdminAuditRows() {
+		if row.Action != "settings.write" || row.Outcome != adminaudit.OutcomeOK {
+			continue
+		}
+		var d map[string]string
+		_ = json.Unmarshal([]byte(row.Details), &d)
+		if d[adminaudit.DetailForce] == "true" && d[adminaudit.DetailWorkersLacking] == "old-worker" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no settings.write audit row with force=true and workersLacking=old-worker: %+v", h.AdminAuditRows())
+	}
 }

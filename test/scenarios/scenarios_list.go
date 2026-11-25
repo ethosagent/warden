@@ -467,7 +467,7 @@ var All = slices.Concat(
 		// Rollout guard (W-P2-WBND-07): a connected worker bound to the agent that
 		// lacks identity/require-v1 makes the require save a 409 naming it; an
 		// admin force goes through and the capable worker enforces.
-		{Name: "identity_require_rollout_guard", Opts: identityBootOpts(), Run: identityRequireRolloutGuard},
+		{Name: "identity_require_rollout_guard", Opts: append(identityBootOpts(), harness.WithAdminAudit()), Run: identityRequireRolloutGuard},
 		// Bundle state in the fleet view and the worker's metrics (W-P2-SBND-05):
 		// a pinned worker shows its bundle seq and pins and is not behind; a
 		// tampered bundle shows as a rejection reason with the seq unchanged.
