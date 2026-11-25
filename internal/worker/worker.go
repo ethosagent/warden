@@ -293,6 +293,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// --local-only is not set: the worker's allow/deny policy comes ONLY from the
 	// control plane and it boots fail-closed (deny all) until the first pull.
 	// Otherwise the worker enforces its local policy (standalone).
+	// clk is the worker's time port (Overrides.Clock, assembly-only; production is
+	// always clock.Real()). The control-plane loops and the worker certificate
+	// renewer run on it, so a test advances a fake clock instead of sleeping.
+	clk := clock.Real()
+	if p.Overrides != nil && p.Overrides.Clock != nil {
+		clk = p.Overrides.Clock
+	}
 	localOnly := localOnlyFlag || pol.ControlPlane.LocalOnly
 	managed := pol.ControlPlane.Endpoint != "" && !localOnly
 	logBundleVerification(logger, pol.ControlPlane, managed, localOnly)
@@ -316,6 +323,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// Secrets/judge/audit-signing stay local.
 	var (
 		controlPlane *config.RemoteProvider
+		wcert        *workerCert    // nil unless controlPlane.enrollment or clientCert is set
 		remotePolicy *config.Policy // last-known-good remote allow/deny, applied to the evaluator below
 	)
 	if managed {
@@ -324,9 +332,20 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if cpErr != nil {
 			return cpErr
 		}
+		// Worker certificate (W-P2-WCA-03): enroll or load it BEFORE the first pull.
+		// With one, every control-plane call presents it and no bearer is sent.
+		var certErr error
+		if wcert, certErr = newWorkerCert(ctx, pol.ControlPlane, pol.Central, clk, logger); certErr != nil {
+			return certErr
+		}
 		// Trust a privately-signed control plane via a per-connection CA, without
 		// altering this worker's upstream TLS trust.
-		if pol.ControlPlane.CACert != "" {
+		switch {
+		case wcert != nil:
+			rp.SetHTTPClient(wcert.Client(cpClientTimeout))
+			rp.SetProxyIDFunc(wcert.WorkerID)
+			rp.SetCertInfo(wcert.certInfo)
+		case pol.ControlPlane.CACert != "":
 			if caErr := rp.SetCACert(pol.ControlPlane.CACert); caErr != nil {
 				return caErr
 			}
@@ -703,18 +722,25 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// endpoint (often on a private network), so forwarding does NOT go through
 		// the SafeDialer — SSRF protection is for agent-driven egress only.
 		centralClient, ccErr := newControlPlaneHTTPClient(10*time.Second, pol.Central.CACert)
+		centralToken, centralID := os.Getenv(pol.Central.TokenEnv), expandEnv(pol.Central.ProxyID)
+		if wcert != nil {
+			// The worker certificate is the credential: the shared client presents it
+			// and no Authorization header is sent.
+			centralClient, ccErr = wcert.Client(10*time.Second), nil
+			centralToken, centralID = "", wcert.WorkerID()
+		}
 		if ccErr != nil {
 			return ccErr
 		}
-		remote, rErr := analytics.NewHTTPRemoteStore(pol.Central.Endpoint, os.Getenv(pol.Central.TokenEnv), expandEnv(pol.Central.ProxyID), centralClient)
+		remote, rErr := analytics.NewHTTPRemoteStore(pol.Central.Endpoint, centralToken, centralID, centralClient)
 		centralRemote = remote
 		if rErr != nil {
 			return rErr
 		}
 		// Same shutdown hygiene as the policy client above.
 		defer remote.CloseIdleConnections()
-		syncWorker = analytics.NewSyncWorker(store, remote, expandEnv(pol.Central.ProxyID), pol.Central.BatchSize, pol.Central.BufferCap, pol.Central.Interval)
-		logger.Info("central worker enabled", "endpoint", pol.Central.Endpoint, "proxyID", expandEnv(pol.Central.ProxyID))
+		syncWorker = analytics.NewSyncWorker(store, remote, centralID, pol.Central.BatchSize, pol.Central.BufferCap, pol.Central.Interval)
+		logger.Info("central worker enabled", "endpoint", pol.Central.Endpoint, "proxyID", centralID)
 	}
 
 	// Transparent-only mode has NO CONNECT listener: an injected one is unused
@@ -979,9 +1005,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// clk is the worker's time port (Overrides.Clock, assembly-only; production
 	// is always clock.Real()). The loops below tick on it, so a test advances a
 	// fake clock instead of sleeping.
-	clk := clock.Real()
-	if p.Overrides != nil && p.Overrides.Clock != nil {
-		clk = p.Overrides.Clock
+	if wcert != nil {
+		wcert.start(ctx, metrics)
 	}
 	if controlPlane != nil {
 		// warden.controlplane.clock_skew_seconds: the CP's Date header from each
