@@ -287,7 +287,7 @@ telling the workers to stop trusting it.
    worker **in place of** the compromised one (a pin file with the next key
    only), then roll the workers. A worker that no longer pins the old key rejects
    anything it signed (`unknown_kid`).
-3. `warden control-plane keys rotate --purpose bundle --activate --emergency --yes …`
+3. `warden control-plane keys rotate --purpose bundle --activate --emergency --yes --state-dir /var/lib/warden-cp`
    promotes the next key at once — no prepublish window — and **revokes** the
    old one: it leaves the exported set immediately and its material is deleted.
    The pin check still applies (a worker that does not pin the next key is cut
@@ -310,7 +310,7 @@ the first start after a restore, read the highest `bundleSeq` the fleet view
 reports and start the control plane with `--bundle-seq-floor` **above** it:
 
 ```sh
-warden control-plane … --bundles=offer --bundle-seq-floor 5000
+warden control-plane --state-dir /var/lib/warden-cp --policy-store=versioned --bundles=offer --bundle-seq-floor 5000
 ```
 
 It appends one `restore` row at that seq when the log is lower, so the next
