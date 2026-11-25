@@ -27,7 +27,6 @@ type AgentKey struct {
 	alg  string // EdDSA or ES256
 	ed   ed25519.PrivateKey
 	ec   *ecdsa.PrivateKey
-	rand func() string
 }
 
 // NewAgentKey generates an Ed25519 key with key id kid.
