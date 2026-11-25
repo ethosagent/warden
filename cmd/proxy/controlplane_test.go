@@ -102,3 +102,39 @@ func TestControlPlaneAuthFlags(t *testing.T) {
 		}
 	})
 }
+
+// TestAPIKeysRequireOIDC: console.apiKeys.enabled stops the control-plane
+// command, with an error naming the setting, unless console.auth is oidc and
+// --state-dir is set. The same block with apiKeys off, or fully configured,
+// starts.
+func TestAPIKeysRequireOIDC(t *testing.T) {
+	const oidc = "console:\n  auth: oidc\n  oidc:\n    issuer: https://127.0.0.1:1/dex\n    clientSecretEnv: WARDEN_APIKEY_TEST_SECRET\n" +
+		"    redirectURL: https://warden.example.com/auth/callback\n  roles:\n    admin: [admins]\n"
+	t.Setenv("WARDEN_APIKEY_TEST_SECRET", "client-secret")
+	state := func() string { return filepath.Join(t.TempDir(), "state") }
+	run := func(cfg string, extra ...string) error {
+		args := append([]string{"control-plane", "--config", writeTempConfig(t, minimalConfig+cfg),
+			"--listen", "127.0.0.1:0", "--analytics-provider", "memory"}, extra...)
+		return executeRoot(t, args...)
+	}
+	for name, tc := range map[string]struct {
+		cfg   string
+		extra []string
+	}{
+		"auth none":      {"console:\n  apiKeys:\n    enabled: true\n", []string{"--state-dir", state()}},
+		"auth none, set": {"console:\n  auth: none\n  apiKeys:\n    enabled: true\n", []string{"--state-dir", state()}},
+		"no state dir":   {oidc + "  apiKeys:\n    enabled: true\n", nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := run(tc.cfg, tc.extra...); err == nil || !strings.Contains(err.Error(), "console.apiKeys.enabled") {
+				t.Fatalf("control-plane = %v, want an error naming console.apiKeys.enabled", err)
+			}
+		})
+	}
+	if err := run(oidc+"  apiKeys:\n    enabled: true\n", "--state-dir", state()); err != nil {
+		t.Fatalf("control-plane with oidc, a state dir and apiKeys on = %v, want a clean start", err)
+	}
+	if err := run(oidc+"  apiKeys:\n    enabled: false\n", "--state-dir", state()); err != nil {
+		t.Fatalf("control-plane with apiKeys off = %v", err)
+	}
+}

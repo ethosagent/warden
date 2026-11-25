@@ -352,11 +352,16 @@ func challengeUnverified(t *testing.T, h *harness.H) {
 		t.Fatalf("switch to attribute: %v", err)
 	}
 	c := idToken{name: "unverified", tok: tok, status: "unverified", reason: "jwks_unavailable"}
-	n := 0
-	h.Eventually("attribute mode to let the unverified token through", func() bool {
-		n++
-		return idTransports[0].get(t, h, c, fmt.Sprintf("/attr_%d", n)) == http.StatusOK
+	// The worker applies the edit asynchronously (settings long-poll), so until
+	// it lands the CONNECT still gets the challenge 407. idTransport.get treats
+	// that as fatal, so wait for the reload with the non-fatal raw CONNECT first.
+	h.Eventually("the worker to apply attribute mode", func() bool {
+		r, err := rawConnect(h.ProxyAddr(), challengeTarget, basicAuth("session", tok))
+		return err == nil && r.status == http.StatusOK
 	})
+	if got := idTransports[0].get(t, h, c, "/attr_1"); got != http.StatusOK {
+		t.Errorf("attribute mode with the issuer down: status %d, want 200 (fail open)", got)
+	}
 	assertNoSignInSecrets(t, h, tok)
 }
 

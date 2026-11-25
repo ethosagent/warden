@@ -33,7 +33,9 @@ type workerCertAdmin struct{ s *Server }
 // Revoke implements dashboard.WorkerCertAdmin.
 func (a workerCertAdmin) Revoke(ctx context.Context, workerID, serial string) (int, int, error) {
 	p, ok := PrincipalFrom(ctx)
-	if !ok || p.Sub == "" {
+	// ActorSub: a revoke made with an API key (workers:admin) is the owner's.
+	actor := p.ActorSub()
+	if !ok || actor == "" {
 		return 0, 0, dashboard.ErrWorkerCertNoActor
 	}
 	serial = strings.ToLower(serial)
@@ -41,7 +43,7 @@ func (a workerCertAdmin) Revoke(ctx context.Context, workerID, serial string) (i
 		return 0, 0, fmt.Errorf("%w: serial must be lowercase hex", dashboard.ErrWorkerCertInvalid)
 	}
 	adminaudit.Annotate(ctx, workerRef(workerID), map[string]string{adminaudit.DetailWorkerID: workerID, adminaudit.DetailCount: "0", adminaudit.DetailEnrollTokens: "0"})
-	n, tokens, err := a.s.revokeWorkerCerts(ctx, workerID, serial, p.Sub)
+	n, tokens, err := a.s.revokeWorkerCerts(ctx, workerID, serial, actor)
 	switch {
 	case errors.Is(err, ErrCertNotFound):
 		return 0, 0, dashboard.ErrWorkerCertNotFound

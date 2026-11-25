@@ -130,6 +130,7 @@ classes:
       - internal/policyeval
       - internal/keys             # the Signer port, JWK/JWKS and JWS verification: pure, no private-key signing (#76)
       - internal/workerca         # worker CA issue/verify, SPIFFE worker ids: pure, x509 creation injected (#88)
+      - internal/apikeys   # scoped CP API keys: wak_ format, scope registry, Store port, Index (APIK-01)
 
   # DEVTOOL — developer tooling; no Warden package may import it. Exempt from
   # layering but not from the global X rules.
@@ -185,6 +186,7 @@ zones:
     - internal/policyeval
     - internal/keys/adapters/**   # the local signer adapter: control plane signs, workers only verify (#76)
     - internal/workerca/adapters/**  # x509.CreateCertificate lives here: only the control plane issues worker certs (#88)
+    - internal/apikeys/**   # CP-only API keys: domain and its SQLite adapter (APIK-01)
   shared:
     - internal/config
     - internal/denyreason

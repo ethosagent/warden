@@ -30,6 +30,7 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/alertpipeline"
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/apikeys"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -175,6 +176,16 @@ type Config struct {
 	// TLS reports that the control plane serves TLS; without it, token auth logs
 	// a clear-text warning at startup.
 	TLS bool
+	// APIKeyIndex authenticates `wak_` API keys (W-P2-APIK-02). It is set only
+	// with console.apiKeys.enabled, and the caller must run Index.Run for the
+	// control plane's whole life before serving: an Index without Run refuses
+	// every key once its staleness ceiling passes. Nil means API keys are off.
+	APIKeyIndex *apikeys.Index
+	// APIKeyStore and APIKeyRegistry are the store behind APIKeyIndex and the
+	// control plane's single scope registry; the key management API (W-P2-APIK-03)
+	// and later features that register scopes use these, never their own.
+	APIKeyStore    apikeys.Store
+	APIKeyRegistry *apikeys.Registry
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -294,6 +305,11 @@ type Server struct {
 	// breakGlass is the break-glass login (POST /auth/breakglass); nil unless
 	// console.breakGlass.enabled (W-P1-OPS1-08).
 	breakGlass *breakGlass
+	// apiKeys is the API key authenticator (apikey_auth.go); nil when
+	// console.apiKeys is disabled, in which case no route is wrapped.
+	// apiKeyCounts is its outcome counter (nil-safe).
+	apiKeys      *apiKeyAuth
+	apiKeyCounts *apiKeyCounters
 	// findings, when set, receives every Finding instead of the alert pipeline.
 	// Tests inject a fake here.
 	findings FindingPublisher
@@ -394,6 +410,7 @@ func New(cfg Config) *Server {
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
+	s.initAPIKeys()
 	s.initBreakGlass()
 	s.warnAdminToken()
 	s.failClosedWithoutAdminToken()
@@ -609,8 +626,8 @@ func (s *Server) Handler() http.Handler {
 	// With admin audit on, POST and DELETE are recorded (sessionAuditWrap).
 	if s.secretStore != nil {
 		cpRoutes := cpRouteTable()
-		mux.Handle("/central/secrets", s.sessionAuditWrap(patternRoute(cpRoutes, "/central/secrets"), http.HandlerFunc(s.handleSecrets)))
-		mux.Handle("/central/secrets/", s.sessionAuditWrap(patternRoute(cpRoutes, "/central/secrets/"), http.HandlerFunc(s.handleSecretByKey)))
+		mux.Handle("/central/secrets", s.apiKeyWrap(s.sessionAuditWrap(patternRoute(cpRoutes, "/central/secrets"), http.HandlerFunc(s.handleSecrets))))
+		mux.Handle("/central/secrets/", s.apiKeyWrap(s.sessionAuditWrap(patternRoute(cpRoutes, "/central/secrets/"), http.HandlerFunc(s.handleSecretByKey))))
 	}
 
 	// The fleet dashboard reads the aggregated central store. The control plane

@@ -1364,6 +1364,9 @@ type analyticsResponse struct {
 	// a single-node dashboard. SelectedProxy echoes the active ?proxy= filter.
 	Proxies       []proxyCount `json:"proxies"`
 	SelectedProxy string       `json:"selectedProxy"`
+	// Identity summarises the stored identity_status / identity_reason fields.
+	// Nil (omitted) when no event in the range carries either field.
+	Identity *identitySummary `json:"identity,omitempty"`
 }
 
 // proxyCount is one worker's contribution to the fleet, for the proxy selector.
@@ -1710,6 +1713,7 @@ func (s *Server) computeAnalytics(rangeParam, selectedProxy, user string, now ti
 		},
 		Proxies:       proxies,
 		SelectedProxy: selectedProxy,
+		Identity:      summarizeIdentity(events),
 	}
 	providerCosts := make(map[string]*providerCost)
 	complianceCounts := make(map[string]int)

@@ -81,6 +81,13 @@ logging:
 #                                          # (exactly one; a file is re-read so it can rotate)
 #    sessionTTL: 1h                        # default 1h, max 4h
 #    allowBehindTLSTerminator: false
+#  apiKeys:                                # scoped wak_ API keys on /dashboard/api/*; off by default;
+#                                          # needs auth: oidc and --state-dir (docs/control-plane.md)
+#    enabled: false
+#    defaultTTL: 2160h                     # default key lifetime; at most maxTTL
+#    maxTTL: 8760h                         # also the hard ceiling
+#    maxPerOwner: 25                       # active keys per owner
+#    ratePerKey: 10                        # requests per second per key (burst 2x)
 #
 # Compose dev profile (Dex): the CP runs in a container where `localhost` is
 # itself, so the browser-facing issuer stays public and internalIssuerURL names

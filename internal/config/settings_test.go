@@ -246,6 +246,7 @@ func dlpRoundTripConfig() DLPConfig {
 		Custom: []DLPCustomClass{
 			{Name: "codename", Regex: `PROJECT-[A-Z]{4}`, Severity: "high"},
 		},
+		WardenTokens: true,
 	}
 }
 

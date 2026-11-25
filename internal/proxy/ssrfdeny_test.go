@@ -80,9 +80,11 @@ type fakeMetrics struct {
 	blocked  map[string]int
 	requests map[[2]string]int
 	identity map[[2]string]int
-	scoped   map[string]int
-	signin   map[string]int
-	log      []string
+	// identityTypes counts RecordIdentityVerify calls by result, reason and token_type.
+	identityTypes map[[3]string]int
+	scoped        map[string]int
+	signin        map[string]int
+	log           []string
 	// blocklistEntries is the last RecordBlocklistEntries value (-1: never set);
 	// blocklistClosed sums RecordBlocklistSessionsClosed.
 	blocklistEntries int
@@ -121,9 +123,13 @@ func (m *fakeMetrics) RecordJudge(outcome string)    { m.record("RecordJudge(%q)
 func (m *fakeMetrics) ObserveAddedLatency(stage string, d time.Duration) {
 	m.record("ObserveAddedLatency(%q)", stage)
 }
-func (m *fakeMetrics) RecordIdentityVerify(result, reason string) {
+func (m *fakeMetrics) RecordIdentityVerify(result, reason, tokenType string) {
 	m.mu.Lock()
 	m.identity[[2]string{result, reason}]++
+	if m.identityTypes == nil {
+		m.identityTypes = map[[3]string]int{}
+	}
+	m.identityTypes[[3]string{result, reason, tokenType}]++
 	m.mu.Unlock()
 	m.record("RecordIdentityVerify(%q, %q)", result, reason)
 }
@@ -168,6 +174,14 @@ func (m *fakeMetrics) scopedCount(result string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.scoped[result]
+}
+
+// identityTypeCount returns how often RecordIdentityVerify saw the exact
+// result/reason/token_type triple.
+func (m *fakeMetrics) identityTypeCount(result, reason, tokenType string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.identityTypes[[3]string{result, reason, tokenType}]
 }
 
 // identityCount returns how often RecordIdentityVerify saw the result/reason pair.
