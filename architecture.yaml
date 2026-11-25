@@ -131,6 +131,10 @@ classes:
       - internal/keys             # the Signer port, JWK/JWKS and JWS verification: pure, no private-key signing (#76)
       - internal/agentreg   # agent registry domain: Agent, the Store port, Validate (AREG-01)
       - internal/tokensvc   # token endpoint domain: assertion verifier, errors, ReplayStore port (TOKX-01)
+      - internal/approvals   # change drafts, the approval state machine, the Store port and Service (APPR-01)
+      - internal/bundle   # signed policy bundle payload, envelope, Sign and Verify (pure; #95)
+      - internal/workerca         # worker CA issue/verify, SPIFFE worker ids: pure, x509 creation injected (#88)
+      - internal/apikeys   # scoped CP API keys: wak_ format, scope registry, Store port, Index (APIK-01)
 
   # DEVTOOL — developer tooling; no Warden package may import it. Exempt from
   # layering but not from the global X rules.
@@ -191,10 +195,15 @@ zones:
     - internal/agentreg/agentregtest
     - internal/tokensvc
     - internal/tokensvc/adapters/**   # SQLite ReplayStore (TOKX-01)
+    - internal/approvals
+    - internal/approvals/adapters/**   # the SQLite change-draft store (APPR-01)
+    - internal/workerca/adapters/**  # x509.CreateCertificate lives here: only the control plane issues worker certs (#88)
+    - internal/apikeys/**   # CP-only API keys: domain and its SQLite adapter (APIK-01)
   shared:
     - internal/config
     - internal/denyreason
     - internal/keys               # the JOSE port both planes share: workers verify CP-issued tokens (#76, #111)
+    - internal/workerca           # both planes: the CP issues, workers read their SPIFFE id (#88, #90)
     - internal/identity
     - internal/clock
     - internal/clock/clocktest
@@ -208,6 +217,7 @@ zones:
     - internal/archtest/**
     - tools/**
     - test/**
+    - internal/bundle   # both planes: the CP signs, workers verify (#95)
 
 # ---------------------------------------------------------------------------
 # Rules. `checker` says who fails on a violation; `fix` is the text printed

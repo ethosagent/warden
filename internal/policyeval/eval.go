@@ -60,6 +60,52 @@ func replaySubject(e analytics.Event) *identity.Subject {
 	}
 }
 
+// replayContext builds the per-event request context both Evaluate and the
+// Comparer replay: scheme from the recorded protocol, the default port when
+// none was recorded, the per-request form (#371) only when the event recorded a
+// method and a parseable URL, and the subject when the recorded identity was
+// valid. The event URL is the full "https://host/path?query" form the proxy
+// records; EscapedPath() recovers the raw path exactly as it was matched live.
+// Without either piece the replay is destination-only (constraints
+// could-match), matching the granularity that was recorded.
+func replayContext(e analytics.Event) policy.RequestContext {
+	scheme := policy.SchemeHTTPS
+	if e.Protocol == "http" {
+		scheme = policy.SchemeHTTP
+	}
+	port := e.Port
+	if port == 0 {
+		if scheme == policy.SchemeHTTP {
+			port = 80
+		} else {
+			port = 443
+		}
+	}
+	method := e.Method
+	path := ""
+	if u, err := url.Parse(e.URL); err == nil {
+		path = u.EscapedPath()
+	}
+	if method == "" || path == "" {
+		method, path = "", ""
+	}
+	return policy.RequestContext{
+		Domain: e.Domain, Port: port, Scheme: scheme, Method: method, Path: path, Subject: replaySubject(e),
+	}
+}
+
+// statelessPolicy returns a copy of p without rate limits and time windows:
+// both depend on state (a bucket, the wall clock) that a recorded event cannot
+// reproduce.
+func statelessPolicy(p config.Policy) config.Policy {
+	out := p.DeepCopy()
+	for i := range out.Allowlist {
+		out.Allowlist[i].RateLimit = ""
+		out.Allowlist[i].TimeWindow = ""
+	}
+	return out
+}
+
 // diffAcc accumulates one (domain, port, method, type) group.
 type diffAcc struct {
 	count     int
@@ -69,13 +115,7 @@ type diffAcc struct {
 
 // Evaluate replays events against a candidate policy and diffs outcomes.
 func Evaluate(events []analytics.Event, candidate config.Policy) *EvalResult {
-	// Strip rate limits and time windows for stateless replay
-	replayPolicy := candidate.DeepCopy()
-	for i := range replayPolicy.Allowlist {
-		replayPolicy.Allowlist[i].RateLimit = ""
-		replayPolicy.Allowlist[i].TimeWindow = ""
-	}
-	eval := policy.NewEvaluator(replayPolicy)
+	eval := policy.NewEvaluator(statelessPolicy(candidate))
 	result := &EvalResult{TotalEvents: len(events)}
 
 	// Track diffs grouped by (domain, port, method, type).
@@ -88,39 +128,9 @@ func Evaluate(events []analytics.Event, candidate config.Policy) *EvalResult {
 	diffs := make(map[diffKey]*diffAcc)
 
 	for _, e := range events {
-		// Determine scheme from protocol or port.
-		scheme := policy.SchemeHTTPS
-		if e.Protocol == "http" {
-			scheme = policy.SchemeHTTP
-		}
-
-		port := e.Port
-		if port == 0 {
-			if scheme == policy.SchemeHTTP {
-				port = 80
-			} else {
-				port = 443
-			}
-		}
-
-		// Replay the per-request form (#371) when the event recorded a method and
-		// a parseable URL, so candidate method/path constraints are exercised.
-		// The event URL is the full "https://host/path?query" form the proxy
-		// records; EscapedPath() recovers the raw path component exactly as it
-		// was matched live. Without either piece the replay is destination-only
-		// (constraints could-match), matching the granularity that was recorded.
-		method := e.Method
-		path := ""
-		if u, err := url.Parse(e.URL); err == nil {
-			path = u.EscapedPath()
-		}
-		if method == "" || path == "" {
-			method, path = "", ""
-		}
-		subject := replaySubject(e)
-		candidateDecision := eval.EvaluateFor(policy.RequestContext{
-			Domain: e.Domain, Port: port, Scheme: scheme, Method: method, Path: path, Subject: subject,
-		}).Decision
+		rc := replayContext(e)
+		subject := rc.Subject
+		candidateDecision := eval.EvaluateFor(rc).Decision
 		// Replay scores the STATIC policy outcome only (no judge in offline
 		// replay): a NoMatch would be default-denied, and a Conditional (a
 		// scoped entry without a valid identity) is a deny too, so collapse
@@ -138,9 +148,9 @@ func Evaluate(events []analytics.Event, candidate config.Policy) *EvalResult {
 		var key diffKey
 		switch {
 		case e.Decision == "deny" && candidateStr == "allow":
-			key = diffKey{domain: e.Domain, port: port, method: e.Method, diffType: "new_allow"}
+			key = diffKey{domain: e.Domain, port: rc.Port, method: e.Method, diffType: "new_allow"}
 		case e.Decision == "allow" && candidateStr == "deny":
-			key = diffKey{domain: e.Domain, port: port, method: e.Method, diffType: "new_deny"}
+			key = diffKey{domain: e.Domain, port: rc.Port, method: e.Method, diffType: "new_deny"}
 		default:
 			continue
 		}

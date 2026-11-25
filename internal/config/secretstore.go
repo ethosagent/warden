@@ -197,3 +197,19 @@ func validateSecretStore(c SecretStoreConfig) error {
 	}
 	return nil
 }
+
+// ReservedSecretNamespace is the logical secret-key namespace reserved for
+// control-plane only material (the worker CA, W-P2-WCA-01). Nothing a worker or
+// a human route handles may name it: secrets.IsReservedKey enforces it at run
+// time and validation rejects a placeholder that names it. The predicate lives
+// here, the lowest layer, so config validation and the secrets package share one
+// definition.
+const ReservedSecretNamespace = "cp"
+
+// IsReservedSecretKey reports whether key is the reserved namespace itself or
+// lies under "cp/", after trimming the surrounding whitespace every store entry
+// point trims.
+func IsReservedSecretKey(key string) bool {
+	k := strings.TrimSpace(key)
+	return k == ReservedSecretNamespace || strings.HasPrefix(k, ReservedSecretNamespace+"/")
+}
