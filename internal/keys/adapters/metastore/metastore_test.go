@@ -512,3 +512,33 @@ func TestPromoteAtomicToAPeer(t *testing.T) {
 		}
 	}
 }
+
+// TestStageCAS: Stage marks an unstaged next row once, stamping publish_at and
+// activate_at; an active, absent or already staged row changes nothing.
+func TestStageCAS(t *testing.T) {
+	s := New(openDB(t, true))
+	ctx := context.Background()
+	active, next := insertPair(t, s, keys.PurposeBundle)
+
+	at := t0.Add(time.Hour)
+	changed, err := s.Stage(ctx, next.KID, at)
+	if err != nil || !changed {
+		t.Fatalf("Stage(next) = %v, %v, want a change", changed, err)
+	}
+	got := rowOf(t, s, next.KID)
+	if got.State != keys.StateNext || !got.PublishAt.Equal(at) || !got.ActivateAt.Equal(at) {
+		t.Fatalf("staged row = %+v, want next with publish_at and activate_at %v", got, at)
+	}
+	if changed, err := s.Stage(ctx, next.KID, at.Add(time.Hour)); err != nil || changed {
+		t.Fatalf("second Stage = %v, %v, want no change", changed, err)
+	}
+	if again := rowOf(t, s, next.KID); !again.PublishAt.Equal(at) {
+		t.Errorf("a second stage moved publish_at to %v", again.PublishAt)
+	}
+	if changed, err := s.Stage(ctx, active.KID, at); err != nil || changed {
+		t.Fatalf("Stage(active) = %v, %v, want no change", changed, err)
+	}
+	if changed, err := s.Stage(ctx, "no-such-kid", at); err != nil || changed {
+		t.Fatalf("Stage(absent) = %v, %v, want no change", changed, err)
+	}
+}

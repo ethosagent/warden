@@ -59,6 +59,14 @@ type MetaStore interface {
 	// it changes the row only if it is still in from, stamps the timestamp
 	// column that belongs to to with at, and reports whether it changed it.
 	UpdateState(ctx context.Context, kid string, from, to State, at time.Time) (bool, error)
+	// Stage marks the bundle purpose's next key kid as staged: the control
+	// plane signs with it beside the active key from now on. It is a
+	// compare-and-swap on a next row that is not staged yet (activate_at
+	// unset, which a manual purpose's next key never has otherwise): it
+	// stamps publish_at, restarting the prepublish window from the moment
+	// dual signing began, and activate_at, the staged marker, with at, and
+	// reports whether it changed the row.
+	Stage(ctx context.Context, kid string, at time.Time) (bool, error)
 	// Promote moves purpose's signing slot in ONE transaction: the active key
 	// oldKID to oldTo, then the next key nextKID to active, both stamped with
 	// at. A peer reading between the two writes sees either both changes or

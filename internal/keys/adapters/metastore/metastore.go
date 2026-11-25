@@ -203,6 +203,28 @@ func (s *Store) UpdateState(ctx context.Context, kid string, from, to keys.State
 	return changed, nil
 }
 
+// Stage marks the next row kid staged: one compare-and-swap that stamps
+// publish_at and activate_at with at, only while the row is a next row with no
+// activate_at. A row that is not next, is absent, or is staged already changes
+// nothing and reports false.
+func (s *Store) Stage(ctx context.Context, kid string, at time.Time) (bool, error) {
+	changed := false
+	err := s.immediate(ctx, func(conn *sql.Conn) error {
+		n, err := execCAS(ctx, conn,
+			`UPDATE signing_keys SET publish_at = ?, activate_at = ? WHERE kid = ? AND state = ? AND activate_at IS NULL`,
+			kid, at.Unix(), at.Unix(), kid, string(keys.StateNext))
+		if err != nil {
+			return err
+		}
+		changed = n == 1
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return changed, nil
+}
+
 // DeletePurpose removes every row of purpose in one transaction and reports
 // how many it deleted; a purpose with no rows deletes none.
 func (s *Store) DeletePurpose(ctx context.Context, purpose string) (int, error) {
