@@ -533,11 +533,15 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 // booleans/counts that power the auto-advancing onboarding checklist. All are
 // derived from injected sources + the DataSource; no field carries a value.
 type setupResponse struct {
-	WorkersConnected  int    `json:"workersConnected"`
-	FirstEventSeen    bool   `json:"firstEventSeen"`
-	PolicyConfigured  bool   `json:"policyConfigured"`
-	SecretsConfigured bool   `json:"secretsConfigured"`
-	Mode              string `json:"mode"`
+	WorkersConnected int `json:"workersConnected"`
+	// WorkersWithoutBundleCap is the number of online workers that do not
+	// advertise bundle/v1 (they apply the unsigned wire) while the control
+	// plane serves signed bundles; 0 otherwise (W-P2-SBND-05).
+	WorkersWithoutBundleCap int    `json:"workersWithoutBundleCap"`
+	FirstEventSeen          bool   `json:"firstEventSeen"`
+	PolicyConfigured        bool   `json:"policyConfigured"`
+	SecretsConfigured       bool   `json:"secretsConfigured"`
+	Mode                    string `json:"mode"`
 	// AuthMode is the console sign-in mode (none or oidc), set by the control
 	// plane through SetAuthMode; absent on a worker's dashboard. The UI shows a
 	// persistent banner when it is none.
@@ -577,7 +581,11 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	// workersConnected: the fleet registry size when set (control plane); on a
 	// single node the dashboard is itself serving, so report 1.
 	if s.workersFn != nil {
-		resp.WorkersConnected = len(s.workersFn())
+		ws := s.workersFn()
+		resp.WorkersConnected = len(ws)
+		if s.bundlesServed != nil && s.bundlesServed() {
+			resp.WorkersWithoutBundleCap = WorkersMissingBundleCap(ws)
+		}
 	} else {
 		resp.WorkersConnected = 1
 	}

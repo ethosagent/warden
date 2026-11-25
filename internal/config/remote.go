@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -125,6 +126,58 @@ type heartbeatBody struct {
 	// use (serial in lowercase hex, expiry RFC 3339); omitted without one.
 	CertSerial   string `json:"certSerial,omitempty"`
 	CertNotAfter string `json:"certNotAfter,omitempty"`
+	// The signed-bundle state (W-P2-SBND-05), all omitted on a worker without
+	// pins so an old control plane sees the old body. BundleSeq stays at the
+	// applied bundle's seq after a rejection (a rejected bundle changes nothing
+	// applied); LastRejectReason is cleared by the next apply. PinnedKids are
+	// the first MaxHeartbeatPinnedKIDs pinned key ids, which keeps the body
+	// under the control plane's 4096-byte read limit. Kids are public key
+	// thumbprints; no key, signature or payload byte is reported.
+	BundleSeq        int64    `json:"bundleSeq,omitempty"`
+	BundleKID        string   `json:"bundleKid,omitempty"`
+	BundleIssuedAt   string   `json:"bundleIssuedAt,omitempty"`
+	PinnedKIDs       []string `json:"pinnedKids,omitempty"`
+	BundleStale      bool     `json:"bundleStale,omitempty"`
+	LastRejectReason string   `json:"lastRejectReason,omitempty"`
+	LastRejectAt     string   `json:"lastRejectAt,omitempty"`
+}
+
+// MaxHeartbeatPinnedKIDs bounds the pinned kids one heartbeat reports. Staged
+// rotation holds two or three pins; the cap only protects the body size.
+const MaxHeartbeatPinnedKIDs = 8
+
+// CapBundleV1 is the capability a worker advertises when it verifies signed
+// bundles, that is when it holds pins (W-P2-SBND-05). It is added to the
+// heartbeat only then, so the control plane can tell a verifying worker from
+// one that applies the unsigned wire.
+const CapBundleV1 = "bundle/v1"
+
+// bundleHeartbeat fills hb's signed-bundle fields and returns the caps to
+// advertise: caps plus CapBundleV1 when pins are set. st is one BundleStatus
+// read, so the fields describe one instant.
+func bundleHeartbeat(hb *heartbeatBody, caps []string, st BundleStatus) []string {
+	if !st.Enabled {
+		return caps
+	}
+	out := append([]string(nil), caps...)
+	if !slices.Contains(out, CapBundleV1) {
+		out = append(out, CapBundleV1)
+		sort.Strings(out)
+	}
+	hb.PinnedKIDs = st.PinnedKIDs
+	if len(hb.PinnedKIDs) > MaxHeartbeatPinnedKIDs {
+		hb.PinnedKIDs = hb.PinnedKIDs[:MaxHeartbeatPinnedKIDs]
+	}
+	hb.BundleStale = st.Applied && st.Expired
+	if st.Applied {
+		hb.BundleSeq, hb.BundleKID = st.Seq, st.KID
+		hb.BundleIssuedAt = st.IssuedAt.UTC().Format(time.RFC3339)
+	}
+	hb.LastRejectReason = st.LastRejectReason
+	if st.LastRejectReason != "" && !st.LastRejectAt.IsZero() {
+		hb.LastRejectAt = st.LastRejectAt.UTC().Format(time.RFC3339)
+	}
+	return out
 }
 
 // SetAgent sets the resolved agent id and the source of the effective identity
@@ -403,6 +456,7 @@ func (r *RemoteProvider) Heartbeat(ctx context.Context) error {
 	if modeFn != nil {
 		hb.IdentityMode = modeFn()
 	}
+	hb.Caps = bundleHeartbeat(&hb, hb.Caps, r.BundleStatus())
 	body, _ := json.Marshal(hb)
 
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

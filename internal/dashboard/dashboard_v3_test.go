@@ -824,3 +824,59 @@ func TestReservedKey_DashboardSecretStore(t *testing.T) {
 		t.Fatal("reserved key was removed from the store")
 	}
 }
+
+// TestWorkersMissingBundleCap: with one connected worker advertising bundle/v1
+// and one without, the setup status reports 1 worker not verifying bundles;
+// an offline worker is not counted, and nothing is counted while the control
+// plane serves no bundles.
+func TestWorkersMissingBundleCap(t *testing.T) {
+	workers := []WorkerView{
+		{ProxyID: "verifies", Online: true, Caps: []string{config.CapBundleV1, config.CapBlocklistV1}},
+		{ProxyID: "old", Online: true, Caps: []string{config.CapBlocklistV1}},
+		{ProxyID: "gone", Online: false},
+	}
+	newSrv := func(served func() bool) *Server {
+		srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+		srv.SetWriteGuard(AllowUngatedWritesForTests)
+		srv.SetWorkers(func() []WorkerView { return workers })
+		if served != nil {
+			srv.SetBundlesServed(served)
+		}
+		return srv
+	}
+	if got := getSetup(t, newSrv(func() bool { return true })).WorkersWithoutBundleCap; got != 1 {
+		t.Errorf("workersWithoutBundleCap = %d, want 1", got)
+	}
+	if got := getSetup(t, newSrv(func() bool { return false })).WorkersWithoutBundleCap; got != 0 {
+		t.Errorf("bundles not served: workersWithoutBundleCap = %d, want 0", got)
+	}
+	if got := getSetup(t, newSrv(nil)).WorkersWithoutBundleCap; got != 0 {
+		t.Errorf("no bundle source: workersWithoutBundleCap = %d, want 0", got)
+	}
+}
+
+// TestFleetBundleStateBadge: the fleet JSON carries the bundle fields and the
+// served console renders the rejection reason with textContent-safe code.
+func TestFleetBundleStateBadge(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
+	srv.SetWorkers(func() []WorkerView {
+		return []WorkerView{{ProxyID: "p", BundleSeq: 5, PinnedKIDs: []string{"k1"}, LastRejectReason: "bad_signature", LastRejectAt: "2026-01-01T00:00:00Z"}, {ProxyID: "plain"}}
+	})
+	var rows []map[string]any
+	if err := json.Unmarshal(doGet(t, srv.Handler(), "/dashboard/api/workers").Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows[0]["bundleSeq"] != float64(5) || rows[0]["lastRejectReason"] != "bad_signature" {
+		t.Fatalf("fleet JSON = %v", rows[0])
+	}
+	if _, ok := rows[1]["bundleSeq"]; ok {
+		t.Errorf("a worker with no bundle state serializes bundleSeq: %v", rows[1])
+	}
+	page := doGet(t, srv.Handler(), "/dashboard/").Body.String()
+	for _, want := range []string{"w.lastRejectReason", "w.bundleSeq", "workersWithoutBundleCap", "do not verify signed bundles"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("served dashboard lacks %q", want)
+		}
+	}
+}

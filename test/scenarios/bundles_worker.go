@@ -3,6 +3,7 @@ package scenarios
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -178,5 +179,74 @@ func pinnedWorkerTamperedBundleKeepsLastKnownGood(t *testing.T, h *harness.H) {
 	h.Eventually("the next good bundle is applied", func() bool {
 		h.Clock().Advance(time.Hour)
 		return connectStatus(t, h, rollbackHost+":443") == http.StatusOK
+	})
+}
+
+// fleetWorker is the part of a /dashboard/api/workers row the bundle scenario
+// reads.
+type fleetWorker struct {
+	ProxyID          string   `json:"proxyID"`
+	Behind           bool     `json:"behind"`
+	Caps             []string `json:"caps"`
+	BundleSeq        int64    `json:"bundleSeq"`
+	PinnedKIDs       []string `json:"pinnedKids"`
+	LastRejectReason string   `json:"lastRejectReason"`
+	BundleSeqAhead   bool     `json:"bundleSeqAhead"`
+}
+
+// pinnedWorkerFleetState (W-P2-SBND-05): the fleet view shows a pinned worker's
+// bundle seq and its pins, and does not call it behind (its heartbeat ETag is
+// the envelope's, which is never the legacy wire's ETag). A tampered bundle
+// then shows as a rejection reason with the seq unchanged, the worker's
+// warden_bundle_* metrics say the same, and the next good bundle clears it.
+func pinnedWorkerFleetState(t *testing.T, h *harness.H) {
+	h.Upstream(rollbackHost)
+	worker := func() (fleetWorker, bool) {
+		var rows []fleetWorker
+		if err := h.CP().GetJSON("/dashboard/api/workers", &rows); err != nil || len(rows) == 0 {
+			return fleetWorker{}, false
+		}
+		return rows[0], true
+	}
+	var applied fleetWorker
+	h.Eventually("the fleet view shows the pinned worker's bundle seq, not behind", func() bool {
+		h.Clock().Advance(time.Second) // workers heartbeat on the fake clock
+		w, ok := worker()
+		applied = w
+		return ok && w.BundleSeq > 0 && !w.Behind && w.LastRejectReason == ""
+	})
+	if !slices.Contains(applied.Caps, config.CapBundleV1) || len(applied.PinnedKIDs) == 0 || applied.BundleSeqAhead {
+		t.Fatalf("pinned worker row = %+v, want cap bundle/v1, its pinned kids and not ahead", applied)
+	}
+
+	h.TamperBundles(true)
+	saveAllowing(t, h, rollbackHost, `"v1"`)
+	var rejected fleetWorker
+	h.Eventually("the fleet view shows the rejection reason with the seq unchanged", func() bool {
+		h.Clock().Advance(5 * time.Second)
+		w, ok := worker()
+		rejected = w
+		return ok && w.LastRejectReason == "bad_signature"
+	})
+	if rejected.BundleSeq != applied.BundleSeq {
+		t.Errorf("seq moved from %d to %d on a rejected bundle", applied.BundleSeq, rejected.BundleSeq)
+	}
+	if !rejected.Behind {
+		t.Error("a worker that rejected the control plane's newest bundle is not shown behind")
+	}
+	if h.MetricsAvailable() {
+		rej := harness.MetricKey("warden.bundle.rejected.total", map[string]string{"reason": "bad_signature"})
+		h.Eventually("the rejection and the unchanged seq reach the worker's metrics", func() bool {
+			h.Clock().Advance(5 * time.Second)
+			m := h.Metrics()
+			return m[rej] == 1 && m["warden.bundle.seq"] == float64(applied.BundleSeq)
+		})
+	}
+
+	h.TamperBundles(false)
+	h.Eventually("the next good bundle clears the rejection and the worker is current", func() bool {
+		h.Clock().Advance(time.Hour)
+		w, ok := worker()
+		return ok && w.LastRejectReason == "" && w.BundleSeq > applied.BundleSeq && !w.Behind
 	})
 }

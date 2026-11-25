@@ -122,6 +122,29 @@ the new key while the control plane rotates its bundle key. Errors name
 include key material. `controlPlane.localOnly: true` ignores all of these keys
 and logs one INFO line.
 
+### Bundle state in metrics and the fleet view
+
+A pinned worker reports its bundle state three ways.
+
+- Metrics (when observability metrics are on): `warden_bundle_rejected_total{reason}`
+  (`reason` is one of the bundle rejection reasons or `invalid_policy`), and the
+  gauges `warden_bundle_seq` (the bundle in force; a rejected bundle leaves it
+  unchanged), `warden_bundle_age_seconds` and `warden_bundle_stale` (1 once the
+  bundle in force is past its expiry). Kids are never labels. The gauges refresh
+  every 10 seconds.
+- Heartbeat: the optional fields `bundleSeq`, `bundleKid`, `bundleIssuedAt`,
+  `pinnedKids` (at most 8), `bundleStale`, `lastRejectReason` and `lastRejectAt`,
+  and the capability `bundle/v1`. A worker without pins sends none of them, and a
+  control plane that does not know them ignores them.
+- Fleet view: the console shows each worker's bundle seq, a rejection badge with the
+  reason, and "N connected workers do not verify signed bundles" while the control
+  plane serves bundles. For a worker that advertises `bundle/v1`, `behind` means its
+  seq is below the control plane's newest signed seq. A worker that reports a seq
+  above it is flagged `bundleSeqAhead` and logged once as an ERROR: the control
+  plane was probably restored to older state. The control plane logs
+  `worker bundle rejected` (proxy id, `applied_seq` — the bundle the worker
+  still enforces, not the rejected one — and reason) once per change of reason.
+
 ## Run it
 
 ```sh
