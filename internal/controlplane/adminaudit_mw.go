@@ -112,12 +112,8 @@ func newAdminAuditor(rec adminaudit.Recorder, probe func(context.Context) error,
 		clock:          clk,
 		logger:         logger,
 	}
-	for _, c := range cc.TrustedProxies {
-		// Validated at config load; a bad entry here is skipped, never trusted.
-		if p, err := netip.ParsePrefix(c); err == nil {
-			a.trusted = append(a.trusted, p.Masked())
-		}
-	}
+	// Validated at config load; a bad entry is skipped, never trusted.
+	a.trusted = parseTrustedProxies(cc.TrustedProxies)
 	return a
 }
 
@@ -164,6 +160,9 @@ type auditActor struct {
 	actor      adminaudit.Actor
 	role       string
 	authMethod string
+	// apiKeyID is the id of the API key that made the request ("" otherwise);
+	// it is recorded as details.api_key_id.
+	apiKeyID string
 }
 
 // resolveActor finds the authenticated actor: a session or break-glass
@@ -176,6 +175,17 @@ func (s *Server) resolveActor(r *http.Request) (auditActor, bool) {
 		method := adminaudit.AuthMethodOIDC
 		if p.Kind == PrincipalBreakglass {
 			method = adminaudit.AuthMethodBreakglass
+		}
+		if p.Kind == PrincipalAPIKey {
+			// The row is the owner's: actor_id is the HMAC of the owner's sub and the
+			// side row holds their sub and email; the role is the owner's current
+			// one. Only details.api_key_id says a key made the request.
+			return auditActor{
+				actor:      adminaudit.Actor{Sub: p.ActorSub(), Email: p.Email},
+				role:       role.String(),
+				authMethod: adminaudit.AuthMethodAPIKey,
+				apiKeyID:   p.KeyID,
+			}, true
 		}
 		return auditActor{actor: adminaudit.Actor{Sub: p.Sub, Email: p.Email}, role: role.String(), authMethod: method}, true
 	}
@@ -265,6 +275,9 @@ func (s *Server) adminAuditMiddleware(classify func(*http.Request) (authzRow, bo
 		}
 		if csrfRefused(ctx) {
 			details[detailReason] = "csrf"
+		}
+		if who.apiKeyID != "" {
+			details[adminaudit.DetailAPIKeyID] = who.apiKeyID
 		}
 		in := adminaudit.Input{
 			Actor: who.actor, ActorRole: who.role, AuthMethod: who.authMethod,

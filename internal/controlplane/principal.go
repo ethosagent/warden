@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 
+	"github.com/ethosagent/warden/internal/apikeys"
 	"github.com/ethosagent/warden/internal/config"
 )
 
@@ -27,6 +28,38 @@ type Principal struct {
 	// SessionHash is sha256 of the session id for a session Principal (never the
 	// raw id). It keys per-session state such as the query/generate rate limit.
 	SessionHash string
+	// KeyID, Scopes and OwnerSub are set for Kind apikey only (W-P2-APIK-02).
+	// Sub is then "apikey:<id>" and Groups the owner's snapshot taken when the
+	// key was created; the role is still computed from Groups under the current
+	// console.roles on every request. OwnerSub is the human the key acts for.
+	KeyID    string
+	Scopes   []apikeys.Scope
+	OwnerSub string
+}
+
+// apiKeySubPrefix starts the Sub of an API key Principal.
+const apiKeySubPrefix = "apikey:"
+
+// ActorSub is the subject changes made by this Principal are attributed to:
+// the owner for an API key, the signed-in user otherwise. Anything that
+// compares or records "who did this" (audit actor, policy author, block list
+// creator, a future approver check) must use it rather than Sub, so a key can
+// never be treated as a second person.
+func (p Principal) ActorSub() string {
+	if p.Kind == PrincipalAPIKey {
+		return p.OwnerSub
+	}
+	return p.Sub
+}
+
+// hasScope reports whether an API key Principal holds s.
+func (p Principal) hasScope(s apikeys.Scope) bool {
+	for _, have := range p.Scopes {
+		if have == s {
+			return true
+		}
+	}
+	return false
 }
 
 type principalKey struct{}
