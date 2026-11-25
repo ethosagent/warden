@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -246,11 +247,19 @@ func TestRenewerRenewsAtHalfLifeThenBacksOff(t *testing.T) {
 	cred.ReceivedAt = clk.Now()
 	src := cpclient.NewSource(cred)
 	cp.failRenew.Store(3)
-	var outcomes []string
+	var (
+		omu      sync.Mutex
+		outcomes []string
+	)
+	got := func() string {
+		omu.Lock()
+		defer omu.Unlock()
+		return strings.Join(outcomes, ",")
+	}
 	var closed atomic.Int64
 	r := &cpclient.Renewer{
 		Endpoint: cp.url("/control/renew"), HTTP: http.DefaultClient, Source: src, StateDir: dir, Clock: clk,
-		Jitter: func() float64 { return 0 }, CloseIdle: func() { closed.Add(1) }, OnRenew: func(o string) { outcomes = append(outcomes, o) },
+		Jitter: func() float64 { return 0 }, CloseIdle: func() { closed.Add(1) }, OnRenew: func(o string) { omu.Lock(); outcomes = append(outcomes, o); omu.Unlock() },
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -276,7 +285,11 @@ func TestRenewerRenewsAtHalfLifeThenBacksOff(t *testing.T) {
 		}
 		clk.Advance(time.Second)
 	}
-	waitFor(t, "the renewal to succeed", func() bool { return src.Current().Serial() != cred.Serial() })
+	// The swap, the idle-connection drop and the outcome report follow one another.
+	waitFor(t, "the renewal to succeed", func() bool { return got() == "error,error,error,ok" && closed.Load() == 1 })
+	if src.Current().Serial() == cred.Serial() {
+		t.Error("the certificate was not swapped")
+	}
 	if cp.renews.Load() != 4 || closed.Load() != 1 {
 		t.Errorf("renewals = %d, CloseIdle = %d", cp.renews.Load(), closed.Load())
 	}
@@ -284,10 +297,6 @@ func TestRenewerRenewsAtHalfLifeThenBacksOff(t *testing.T) {
 	onDisk, err := newEnroller(cp, dir, "", nil).LoadOrEnroll(context.Background())
 	if err != nil || onDisk.Serial() != src.Current().Serial() {
 		t.Errorf("persisted serial %v (%v), want %s", onDisk, err, src.Current().Serial())
-	}
-	want := []string{"error", "error", "error", "ok"}
-	if strings.Join(outcomes, ",") != strings.Join(want, ",") {
-		t.Errorf("outcomes = %v, want %v", outcomes, want)
 	}
 	// And the next renewal is armed 12h after the new certificate arrived.
 	waitFor(t, "the next timer", func() bool { return clk.PendingTimers() == 1 })
