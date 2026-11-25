@@ -636,6 +636,42 @@ command's, or 128+N when signal N killed it.
 identity cache file (it is 0600 to that user). Run the command as a separate
 uid; Phase 2 adds `--run-as`.
 
+### warden identity forward
+
+`exec` serves one child. For a sidecar container that serves an agent in another
+container, `warden identity forward` runs the same loopback forwarder as a
+long-lived command. The agent sets `HTTPS_PROXY=http://sidecar:3128` once; the
+token is added to each CONNECT in the sidecar and never enters the agent's
+container.
+
+```sh
+warden identity forward --listen 0.0.0.0:3128 --worker warden:8080 --health-listen 127.0.0.1:3129 --client-credential-env FORWARD_CREDENTIAL
+warden identity forward --agent-id claude-code --listen 0.0.0.0:3128 --worker warden:8080 --client-credential-env FORWARD_CREDENTIAL
+```
+
+Both examples listen on a non-loopback address, so both set `--client-credential-env`: without it any peer that can reach the port can use the token, and with it the agent must present that secret as the proxy password (`HTTPS_PROXY=http://wx:$FORWARD_CREDENTIAL@sidecar:3128`).
+
+- It accepts CONNECT only (any other method gets 405) and dials only `--worker`,
+  never the CONNECT target. A non-loopback `--listen` logs one startup warning.
+- Without `--agent-id` it sends the user's ID token from the login cache. With
+  `--agent-id` (and `--token-endpoint`, `--agent-key-file`, `--subject-token-file`
+  as for `token`) it sends the agent's Warden token and renews it before it
+  expires. A worker 407 forces one renewal and one retry before the 407 is passed on.
+- With no usable token a CONNECT gets `503` and the reason in
+  `X-Warden-Forwarder-Reason`: `login_required`, `cp_unreachable` or
+  `exchange_denied` (`tunnel_limit` above `--max-tunnels`, default 512). The
+  forwarder keeps retrying and never exits for these reasons, including during
+  the minutes after a control plane creates its first token key.
+- After a rotation, a tunnel opened with the old token is closed once it has
+  carried no bytes for 2 s, and every tunnel is closed at its token's `exp`.
+- `--client-credential-env NAME` requires clients to send that variable's value as
+  the proxy password (user `wx`); it is never forwarded.
+- `--health-listen` serves `GET /healthz`: `{"state": "valid|expiring|login_required|cp_unreachable|exchange_denied", "exp": "..."}`,
+  status 200 while a token is held and 503 otherwise. It never shows a token.
+- Logs are structured events on stderr (`tunnel_open`, `tunnel_close`,
+  `token_rotated`, and each change of token state once); they hold a token
+  fingerprint, never a token.
+
 ## Client compatibility
 
 The worker never sends a `407` challenge, so a client must send
