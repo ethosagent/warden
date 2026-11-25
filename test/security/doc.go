@@ -97,6 +97,20 @@
 // X-Warden-Identity next to a valid CONNECT token; the mid-tunnel binding loss
 // shape is pinned in internal/proxy (TestIdentityRequireMode/rebind_ends_tunnel).
 //
+// # Lifecycle, recording and the integration test
+//
+// StopCP and RestartCP take the control plane down and bring it back on the same
+// address, state, worker CA and keys; StopWorker, RestartWorker and
+// DropBundleCache do the same for a worker (certificate kept). StackOptions
+// DecisionLog (the warden.decision.v1 file, Stack.DecisionLines),
+// CentralIngest (workers forward events to /central/ingest, Stack.FleetEvents
+// reads them from the CP), WorkerCertTTL (renewal within reach of the shared
+// clock) and Stack.UpstreamDials (zero dials for a refusal) serve the
+// require-mode end-to-end test in test/integration (TestIdentityRequire,
+// W-P2-WBND-10), which imports this package under the integration build tag.
+// TamperProxy.Requests records, per worker request, the path, whether an
+// Authorization header was present and the certificate the worker presented.
+//
 // # The gate canary
 //
 // TestCanary fails when WARDEN_SECURITY_CANARY=1. Running

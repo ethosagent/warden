@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -135,6 +136,19 @@ type StackOptions struct {
 	// route-boundary cases need a stack where a wwt_ token has a route of its
 	// own to be refused everywhere else.
 	WorkerTokens bool
+	// WorkerCertTTL is workerCA.certTTL (default: the CP's 24h; the minimum
+	// the config accepts is 1h). A case that forces a renewal sets it so the
+	// renewal timer is reached by advancing the shared clock a little.
+	WorkerCertTTL time.Duration
+	// DecisionLog turns on every worker's JSON decision stream
+	// (audit.jsonLog, warden.decision.v1) to a file, Worker.DecisionLogPath,
+	// which Stack.DecisionLines reads and the leak check scans.
+	DecisionLog bool
+	// CentralIngest makes every worker forward its events to the control
+	// plane's /central/ingest (central.mode worker, same origin as the control
+	// plane, so the worker certificate is the only credential), every second.
+	// The fleet store then holds what the workers record.
+	CentralIngest bool
 }
 
 // Stack is one running security stack: a control plane booted through
@@ -176,8 +190,13 @@ type Stack struct {
 	// a case signs hostile worker certificates that still chain to it.
 	wcaInter *x509.Certificate
 	wcaKey   *ecdsa.PrivateKey
+	// wcaChain is the worker CA chain file the CP config names; a restarted CP
+	// reuses it, so the certificates the workers hold stay valid.
+	wcaChain string
 	// bundleIssuer is the CP id workers pin when PinBundleIssuer is set.
 	bundleIssuer string
+	// dials counts the upstream dials of every worker.
+	dials atomic.Int64
 	// kv is scratch state a case's Attack shares with its test.
 	kv sync.Map
 
@@ -235,6 +254,12 @@ type Worker struct {
 	StateDir string
 	// DBPath is its analytics store.
 	DBPath string
+
+	// DecisionLogPath is the worker's warden.decision.v1 file (empty unless
+	// StackOptions.DecisionLog).
+	DecisionLogPath string
+
+	cfgPath string
 
 	// Tamper is the proxy between this worker and the CP, when StackOptions.
 	// CPEndpoint built one (see NewTamperProxy).
@@ -307,6 +332,10 @@ func StartStackNoWait(tb testing.TB, opts StackOptions) *Stack {
 // CP agree on. It is a test value, not a credential.
 const consoleSecretValue = "security-console-client-secret"
 
+// UpstreamDials is how many upstream dials the workers have attempted: a
+// request refused before the worker dials leaves it unchanged.
+func (s *Stack) UpstreamDials() int64 { return s.dials.Load() }
+
 // Server is the CP's in-process server handle (OnServer).
 func (s *Stack) Server() *controlplane.Server {
 	s.mu.Lock()
@@ -371,17 +400,38 @@ func (s *Stack) EventuallyAdvance(desc string, step time.Duration, cond func() b
 }
 
 // startCP renders the CP config, boots controlplane.Run and waits for OnReady.
-func (s *Stack) startCP() {
+func (s *Stack) startCP() { s.bootCP("") }
+
+// bootCP boots the control plane. A non-empty again is the address a stopped
+// control plane served on: the same state directory, worker CA and keys come
+// back, on the same port, which is what a restart is.
+func (s *Stack) bootCP(again string) {
 	s.tb.Helper()
 	dir := s.root
 	stateDir := filepath.Join(dir, "cp-state")
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	listen := "127.0.0.1:0"
+	if again != "" {
+		listen = again
+	}
+	var ln net.Listener
+	var err error
+	// A restart rebinds the port the stopped server just released.
+	for deadline := time.Now().Add(readyDeadline); ; {
+		if ln, err = net.Listen("tcp", listen); err == nil || again == "" || time.Now().After(deadline) {
+			break
+		}
+		<-time.After(10 * time.Millisecond)
+	}
 	if err != nil {
 		s.tb.Fatalf("security: listen for the control plane: %v", err)
 	}
 	addr := ln.Addr().String()
 	certFile, keyFile := s.CPCA.WriteFiles(dir, "cp-ca")
-	chain := s.writeWorkerCA(dir)
+	chain := s.wcaChain
+	if chain == "" {
+		chain = s.writeWorkerCA(dir)
+		s.wcaChain = chain
+	}
 	s.tb.Setenv(consoleSecretEnv, consoleSecretValue)
 
 	cfg := s.cpConfig(addr, chain)
@@ -484,6 +534,10 @@ func (s *Stack) cpConfig(addr, chain string) string {
 	if s.opts.APIKeys {
 		apiKeys = "  apiKeys:\n    enabled: true\n"
 	}
+	certTTL := ""
+	if s.opts.WorkerCertTTL > 0 {
+		certTTL = "  certTTL: " + s.opts.WorkerCertTTL.String() + "\n"
+	}
 	var b strings.Builder
 	level := "info"
 	if s.opts.DebugCP {
@@ -521,8 +575,8 @@ workerCA:
   certFile: %[11]s
   keySource: file
   keyFile: %[12]s
-`, s.opts.IdentityMode, s.Issuer.Issuer(), IdentityAudience, IdentityAZP, ConsoleClientID, consoleSecretEnv,
-		addr, ConsoleAdminGroup, ConsoleViewerGroup, TrustDomain, chain, filepath.Join(s.root, "worker-ca.key"), s.identityExtras(), apiKeys)
+%[15]s`, s.opts.IdentityMode, s.Issuer.Issuer(), IdentityAudience, IdentityAZP, ConsoleClientID, consoleSecretEnv,
+		addr, ConsoleAdminGroup, ConsoleViewerGroup, TrustDomain, chain, filepath.Join(s.root, "worker-ca.key"), s.identityExtras(), apiKeys, certTTL)
 	if len(s.opts.AgentModes) > 0 {
 		b.WriteString("\nagents:\n")
 		ids := make([]string, 0, len(s.opts.AgentModes))
@@ -575,6 +629,9 @@ func (s *Stack) startWorker(agent string) {
 		StateDir: filepath.Join(s.root, "worker-"+suffix, "state"),
 		DBPath:   filepath.Join(s.root, "worker-"+suffix, "analytics.db"),
 	}
+	if s.opts.DecisionLog {
+		w.DecisionLogPath = filepath.Join(s.root, "worker-"+suffix, "decisions.jsonl")
+	}
 	if err := os.MkdirAll(filepath.Dir(w.DBPath), 0o700); err != nil {
 		s.tb.Fatalf("security: worker dir: %v", err)
 	}
@@ -588,27 +645,49 @@ func (s *Stack) startWorker(agent string) {
 	if err := os.WriteFile(cfgPath, []byte(s.workerConfig(w)), 0o600); err != nil {
 		s.tb.Fatalf("security: write the %s config: %v", w.Name, err)
 	}
+	w.cfgPath = cfgPath
+	s.Workers = append(s.Workers, w)
+	s.runWorker(w, "", "")
+}
+
+// runWorker boots w through worker.Run and waits for OnReady. proxyAddr and
+// adminAddr are the addresses a stopped worker served on ("" picks new ports):
+// a restart rebinds them, so the clients the test holds still reach it.
+func (s *Stack) runWorker(w *Worker, proxyAddr, adminAddr string) {
+	s.tb.Helper()
+	suffix := strings.TrimPrefix(w.Name, "worker-")
 	caCert, caKey := s.ProxyCA.WriteFiles(filepath.Join(s.root, "worker-"+suffix), "proxy-ca")
 	if s.opts.NoCA {
 		caCert, caKey = "", ""
 	}
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		s.tb.Fatalf("security: listen for %s: %v", w.Name, err)
+	listen := func(addr string) net.Listener {
+		if addr == "" {
+			addr = "127.0.0.1:0"
+		}
+		var ln net.Listener
+		var err error
+		for deadline := time.Now().Add(readyDeadline); ; {
+			if ln, err = net.Listen("tcp", addr); err == nil || addr == "127.0.0.1:0" || time.Now().After(deadline) {
+				break
+			}
+			<-time.After(10 * time.Millisecond)
+		}
+		if err != nil {
+			s.tb.Fatalf("security: listen for %s: %v", w.Name, err)
+		}
+		return ln
 	}
-	adminLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		_ = proxyLn.Close()
-		s.tb.Fatalf("security: listen for %s admin: %v", w.Name, err)
-	}
+	proxyLn := listen(proxyAddr)
+	adminLn := listen(adminAddr)
 	w.ProxyAddr, w.AdminAddr = proxyLn.Addr().String(), adminLn.Addr().String()
 
 	ready := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	w.cancel = cancel
 	w.errCh = make(chan error, 1)
+	errCh := w.errCh
 	params := worker.Params{
-		ConfigPath:    cfgPath,
+		ConfigPath:    w.cfgPath,
 		DBPath:        w.DBPath,
 		CACert:        caCert,
 		CAKey:         caKey,
@@ -617,7 +696,7 @@ func (s *Stack) startWorker(agent string) {
 		AdminListener: adminLn,
 		OnReady:       func(_, _ string) { close(ready) },
 		Overrides: &worker.Overrides{
-			Dialer:          &mapDialer{host: UpstreamHost, addr: s.Upstream.Addr()},
+			Dialer:          &mapDialer{host: UpstreamHost, addr: s.Upstream.Addr(), dials: &s.dials},
 			UpstreamRootCAs: s.UpstreamCA.Pool(),
 			Clock:           s.Clock,
 			Inflight:        w.inflight,
@@ -628,11 +707,10 @@ func (s *Stack) startWorker(agent string) {
 			},
 		},
 	}
-	go func() { w.errCh <- worker.Run(ctx, s.logs, params) }()
-	s.Workers = append(s.Workers, w)
+	go func() { errCh <- worker.Run(ctx, s.logs, params) }()
 	select {
 	case <-ready:
-	case err := <-w.errCh:
+	case err := <-errCh:
 		w.cancel = nil
 		s.tb.Fatalf("security: %s exited before it was ready: %v\n%s", w.Name, err, tail(s.logs.String(), 2500))
 	case <-time.After(readyDeadline):
@@ -660,6 +738,14 @@ func (s *Stack) workerConfig(w *Worker) string {
 	if s.bundleIssuer != "" {
 		issuer = "  bundleIssuer: " + s.bundleIssuer + "\n"
 	}
+	central := ""
+	if s.opts.CentralIngest {
+		central = "  mode: worker\n  endpoint: https://" + endpoint + "/central/ingest\n  interval: 1s\n"
+	}
+	decisionLog := ""
+	if w.DecisionLogPath != "" {
+		decisionLog = "\naudit:\n  jsonLog:\n    enabled: true\n    output: file\n    path: " + w.DecisionLogPath + "\n"
+	}
 	return fmt.Sprintf(`logging:
   level: info
   format: json
@@ -678,7 +764,7 @@ controlPlane:
 
 central:
 %[7]s  proxyID: %[8]s
-
+%[14]s
 secrets:
   - placeholder: %[9]s
     envVar: %[10]s
@@ -691,8 +777,8 @@ mcp:
 observability:
   enabled: true
   serviceName: warden-security
-`, endpoint, s.CP.CertFile, s.opts.LongPollWait, raw, w.StateDir, w.TokenEnv, agentLine, w.Name,
-		SwappedPlaceholder, swappedEnv, UpstreamHost, issuer)
+%[13]s`, endpoint, s.CP.CertFile, s.opts.LongPollWait, raw, w.StateDir, w.TokenEnv, agentLine, w.Name,
+		SwappedPlaceholder, swappedEnv, UpstreamHost, issuer, decisionLog, central)
 }
 
 // bundlePins are the CP's bundle public keys, the controlPlane.bundleKeys every
@@ -797,6 +883,7 @@ func (s *Stack) stop() {
 	}
 	if s.CP != nil && s.CP.cancel != nil {
 		s.CP.cancel()
+		s.CP.cancel = nil
 		select {
 		case err := <-s.CP.errCh:
 			if err != nil && !errors.Is(err, context.Canceled) {
@@ -823,11 +910,18 @@ func (w *Worker) flushAnalytics() error {
 // mapDialer routes the one allowlisted fake hostname to the loopback upstream:
 // DNS replacement for the assembly-only Overrides.Dialer seam, never a way
 // around the SSRF guard in a shipped binary. Any other destination is refused.
-type mapDialer struct{ host, addr string }
+type mapDialer struct {
+	host, addr string
+	// dials counts every dial a worker attempted, allowed or not.
+	dials *atomic.Int64
+}
 
 var _ proxy.Dialer = (*mapDialer)(nil)
 
 func (m *mapDialer) check(addr string) error {
+	if m.dials != nil {
+		m.dials.Add(1)
+	}
 	h, _, err := net.SplitHostPort(addr)
 	if err != nil || h != m.host {
 		return fmt.Errorf("security: no fake upstream for %q", addr)
