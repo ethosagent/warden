@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ethosagent/warden/internal/controlplane"
 )
 
 // parseCP runs the control-plane flag parsing the way RunE does, without
@@ -71,5 +73,46 @@ func TestControlPlaneBackupFlagDefaults(t *testing.T) {
 	}
 	if p.Version != version {
 		t.Errorf("Version = %q, want the build version", p.Version)
+	}
+}
+
+// TestBundleGateDefaults: the CLI half of the Phase 2 gate flip (#719). With no
+// --bundles flag the control plane gets controlplane.BundlesDefault, which Run
+// resolves to require when --state-dir, --policy-store=versioned and keys.enabled
+// are present; --bundles=off and offer pass through as the explicit opt-outs.
+func TestBundleGateDefaults(t *testing.T) {
+	flag := newControlPlaneCmd().Flags().Lookup("bundles")
+	if flag == nil {
+		t.Fatal("no --bundles flag")
+	}
+	if flag.DefValue != controlplane.BundlesDefault {
+		t.Errorf("--bundles default = %q, want the unset default %q (require when the prerequisites are present)", flag.DefValue, controlplane.BundlesDefault)
+	}
+	for _, want := range []string{"require", "offer", "off", "WARN"} {
+		if !strings.Contains(flag.Usage, want) {
+			t.Errorf("--bundles usage does not mention %q: %s", want, flag.Usage)
+		}
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{nil, controlplane.BundlesDefault},
+		{[]string{"--bundles", "off"}, controlplane.BundlesOff},
+		{[]string{"--bundles=offer"}, controlplane.BundlesOffer},
+		{[]string{"--bundles=require"}, controlplane.BundlesRequire},
+	} {
+		cmd := newControlPlaneCmd()
+		cmd.Flags().String("config", "", "")
+		if err := cmd.ParseFlags(append([]string{"--config", "c.yaml"}, tc.args...)); err != nil {
+			t.Fatal(err)
+		}
+		p, err := controlPlaneParams(cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Bundles != tc.want {
+			t.Errorf("args %v: Params.Bundles = %q, want %q", tc.args, p.Bundles, tc.want)
+		}
 	}
 }

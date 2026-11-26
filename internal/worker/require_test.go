@@ -105,6 +105,7 @@ func startRequireWorker(t *testing.T, settings config.SettingsWire) (string, *co
 	cfg := `
 controlPlane:
   endpoint: ` + cp.URL + `/policy
+  requireSignedBundles: false   # not a bundle test: take the unsigned policy explicitly
   tokenEnv: WARDEN_CP_TOKEN
   caCert: ` + caPath + `
   longPollWait: 50ms

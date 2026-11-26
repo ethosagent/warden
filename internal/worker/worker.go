@@ -328,6 +328,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}
 	localOnly := localOnlyFlag || pol.ControlPlane.LocalOnly
 	managed := pol.ControlPlane.Endpoint != "" && !localOnly
+	// Signed bundles are required by default: a managed worker with no pinned
+	// keys and no explicit opt-out stops here, never running on unsigned policy.
+	if managed {
+		if err := pol.ControlPlane.CheckBundlePins(); err != nil {
+			return err
+		}
+	}
 	// A worker with no control plane has no signed bundle to verify Warden
 	// tokens with, so its local config can never enter require mode.
 	if !managed {

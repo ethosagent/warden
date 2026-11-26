@@ -324,6 +324,7 @@ logging:
   format: json
 controlPlane:
   endpoint: https://127.0.0.1:1/policy
+  requireSignedBundles: false   # not a bundle test: take the unsigned policy explicitly
   longPollWait: 50ms
   heartbeatInterval: 20ms
 central:
@@ -405,6 +406,7 @@ logging:
   format: json
 controlPlane:
   endpoint: https://` + strings.TrimPrefix(srv.URL, "https://") + `/policy
+  requireSignedBundles: false   # not a bundle test: take the unsigned policy explicitly
   tokenEnv: WARDEN_TEST_CP_TOKEN
   caCert: ` + caPath + `
   pollInterval: 20ms
@@ -958,6 +960,7 @@ func TestRun_Managed_KeepsLocalUpstreamExceptions(t *testing.T) {
 	cfg := `
 controlPlane:
   endpoint: ` + cp.URL + `/policy
+  requireSignedBundles: false   # not a bundle test: take the unsigned policy explicitly
   tokenEnv: WARDEN_CP_TOKEN
   caCert: ` + caPath + `
   longPollWait: 50ms
@@ -1018,5 +1021,42 @@ func waitForLog(t *testing.T, buf *syncBuffer, substr string) {
 			t.Fatalf("log line %q never appeared; got:\n%s", substr, buf.String())
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestBundleGateDefaults: the worker half of the signed-bundle default (#719).
+// A CP-managed worker with no pinned keys and no explicit opt-out fails closed
+// at startup naming controlPlane.bundleKeys; the same config runs under
+// --local-only (it is then not managed); the explicit opt-out starts.
+func TestBundleGateDefaults(t *testing.T) {
+	const head = `
+policy:
+  allowlist:
+    - domain: api.openai.com
+logging:
+  level: error
+  format: json
+controlPlane:
+  endpoint: https://127.0.0.1:1/policy
+  longPollWait: 50ms
+  heartbeatInterval: 20ms
+central:
+  mode: worker
+  endpoint: https://127.0.0.1:1/central/ingest
+  proxyID: worker-1
+`
+	p := runParams(t, writeConfig(t, head))
+	err := Run(context.Background(), io.Discard, p)
+	if err == nil || !strings.Contains(err.Error(), "controlPlane.bundleKeys") || !strings.Contains(err.Error(), "requireSignedBundles: false") {
+		t.Fatalf("managed worker without pins: err = %v, want a fail-closed error naming the keys and the opt-out", err)
+	}
+	local := runParams(t, writeConfig(t, head))
+	local.LocalOnly = true
+	if err := runUntilCtxDone(t, local); err != nil {
+		t.Fatalf("--local-only on a managed config without pins: %v", err)
+	}
+	optOut := runParams(t, writeConfig(t, strings.Replace(head, "  longPollWait", "  requireSignedBundles: false\n  longPollWait", 1)))
+	if err := runUntilCtxDone(t, optOut); err != nil {
+		t.Fatalf("explicit opt-out: %v", err)
 	}
 }

@@ -28,8 +28,10 @@ import (
 // Signed bundles (W-P2-SBND-02). With --bundles=offer or require the control
 // plane signs what it serves on GET /policy with its active purpose=bundle
 // key and serves the envelope to workers that ask for it with the bundle
-// Accept header. Everything here is behind the flag: with --bundles=off
-// (the default) no publisher exists and /policy is the code it always was.
+// Accept header. With --bundles=off (the explicit, temporary opt-out) no
+// publisher exists and /policy is the code it always was. Since the Phase 2
+// gate flip (W-P2-SBND-07, #719) an unset --bundles means require when the
+// prerequisites are there; see resolveBundles.
 //
 // The invariant the design rests on: a seq never covers two different
 // contents. seq is the newest policy_publish_log row; every input of the
@@ -45,6 +47,10 @@ const (
 	BundlesOff     = "off"
 	BundlesOffer   = "offer"
 	BundlesRequire = "require"
+	// BundlesDefault is the --bundles value when the flag is not given (the
+	// empty string). It resolves to require when the prerequisites are present
+	// and to the legacy wire, with a startup WARN, when they are not.
+	BundlesDefault = ""
 )
 
 const (
@@ -80,8 +86,14 @@ const (
 // BundlesConfig is the --bundles, --bundle-max-age and --bundle-seq-floor
 // settings, resolved and validated by Run.
 type BundlesConfig struct {
-	// Mode is off (the zero value counts as off), offer or require.
+	// Mode is off, offer or require, as resolved: an unset --bundles resolves
+	// to require, or to off when a prerequisite is missing (DefaultMissing).
 	Mode string
+	// Defaulted is true when --bundles was not given and Mode is the default.
+	Defaulted bool
+	// DefaultMissing names the prerequisites an unset --bundles found missing,
+	// which is why Mode fell back to off. Empty unless Defaulted and off.
+	DefaultMissing []string
 	// MaxAge is how long a signed bundle is valid; 0 = DefaultBundleMaxAge.
 	MaxAge time.Duration
 	// SeqFloor appends one restore row at this seq at startup when the
@@ -99,14 +111,39 @@ func (c BundlesConfig) maxAge() time.Duration {
 	return c.MaxAge
 }
 
+// bundlePrereqs lists the startup pieces signed bundles need and the config
+// lacks: a state dir, the versioned policy store and the signing keys.
+func bundlePrereqs(stateDir, policyStore string, kc config.KeysConfig) []string {
+	var missing []string
+	if stateDir == "" {
+		missing = append(missing, "--state-dir")
+	}
+	if policyStore != PolicyStoreVersioned {
+		missing = append(missing, "--policy-store=versioned")
+	}
+	if !kc.Enabled {
+		missing = append(missing, "keys.enabled: true in --config (the purpose=bundle signing key)")
+	}
+	return missing
+}
+
 // resolveBundles validates the bundle flags against the rest of the startup
 // configuration. Offer and require need a state dir, the versioned policy
 // store and the signing keys; an error names every piece that is missing.
+//
+// An unset --bundles (BundlesDefault) is require when those pieces are there.
+// When one is missing it is the legacy wire, and DefaultMissing names what is
+// missing so Run can log it: the default never stops a control plane that
+// could not serve bundles anyway, while an explicit offer or require does.
 func resolveBundles(p Params, stateDir, policyStore string, kc config.KeysConfig) (BundlesConfig, error) {
 	cfg := BundlesConfig{Mode: p.Bundles, MaxAge: p.BundleMaxAge, SeqFloor: p.BundleSeqFloor}
 	switch cfg.Mode {
-	case "":
-		cfg.Mode = BundlesOff
+	case BundlesDefault:
+		cfg.Defaulted = true
+		cfg.Mode = BundlesRequire
+		if cfg.DefaultMissing = bundlePrereqs(stateDir, policyStore, kc); len(cfg.DefaultMissing) > 0 {
+			cfg.Mode = BundlesOff
+		}
 	case BundlesOff, BundlesOffer, BundlesRequire:
 	default:
 		return BundlesConfig{}, fmt.Errorf("control-plane: --bundles must be off, offer or require, not %q", cfg.Mode)
@@ -120,20 +157,30 @@ func resolveBundles(p Params, stateDir, policyStore string, kc config.KeysConfig
 	if !cfg.On() {
 		return cfg, nil
 	}
-	var missing []string
-	if stateDir == "" {
-		missing = append(missing, "--state-dir")
-	}
-	if policyStore != PolicyStoreVersioned {
-		missing = append(missing, "--policy-store=versioned")
-	}
-	if !kc.Enabled {
-		missing = append(missing, "keys.enabled: true in --config (the purpose=bundle signing key)")
-	}
-	if len(missing) > 0 {
+	if missing := bundlePrereqs(stateDir, policyStore, kc); len(missing) > 0 {
 		return BundlesConfig{}, fmt.Errorf("control-plane: --bundles=%s needs %s", cfg.Mode, strings.Join(missing, ", "))
 	}
 	return cfg, nil
+}
+
+// logBundlesMode states at startup which way --bundles resolved, once: the
+// opt-out and the fallback are WARN, because both leave workers taking policy
+// they cannot verify.
+func logBundlesMode(logger *slog.Logger, c BundlesConfig) {
+	switch {
+	case c.Defaulted && len(c.DefaultMissing) > 0:
+		logger.Warn("control plane: signed bundles are off: --bundles is not set and its default (require) needs "+strings.Join(c.DefaultMissing, ", ")+"; serving the legacy unsigned policy",
+			"missing", c.DefaultMissing)
+	case c.Defaulted:
+		logger.Info("control plane: signed bundles required by default (--bundles=require); set --bundles=offer or --bundles=off to opt out",
+			"mode", c.Mode)
+	case c.Mode == BundlesOff:
+		logger.Warn("control plane: --bundles=off serves the legacy unsigned policy; this is a temporary opt-out, remove the flag to require signed bundles",
+			"mode", c.Mode)
+	case c.Mode == BundlesOffer:
+		logger.Warn("control plane: --bundles=offer serves the legacy unsigned policy to workers that do not pin bundle keys; use it only while pinning the fleet, then remove the flag to require signed bundles",
+			"mode", c.Mode)
+	}
 }
 
 // BundleMigrations is the cpstate migration of the bundle publisher's two

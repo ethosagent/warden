@@ -87,9 +87,14 @@ local-only/standalone worker still requires one.
 
 ## Pinning bundle keys (worker config)
 
-A worker pins the public keys that may sign the policy bundles it accepts. With
-none pinned a managed worker behaves as before and logs one WARN,
-`bundle verification disabled (no controlPlane.bundleKeys)`.
+A worker pins the public keys that may sign the policy bundles it accepts. Since
+the Phase 2 release a CP-managed worker **requires** pins: with none pinned and
+no explicit opt-out the config fails to load, naming `controlPlane.bundleKeys`
+and `controlPlane.bundleKeysFile` and the opt-out; the worker never falls back to
+unsigned policy on its own. The opt-out is `controlPlane.requireSignedBundles:
+false` (a worker with that and no pins takes policy unverified and logs one WARN,
+`bundle verification disabled (no controlPlane.bundleKeys, controlPlane.requireSignedBundles: false)`).
+See [Upgrading to required signed bundles](#upgrading-to-required-signed-bundles).
 
 With pins the worker sends `Accept: application/vnd.warden.bundle.v1+json` on every
 policy pull and applies only a bundle that verifies (signature, seq, expiry,
@@ -105,14 +110,15 @@ carries a policy the worker cannot enforce (for example an invalid
 decides what happens when the held bundle passes `expiresAt` (plus skew) with no
 valid replacement: `keep` (default) keeps enforcing it and logs a WARN, `deny`
 denies all traffic until a valid bundle arrives. A control plane started with
-`--bundles=require` answers a worker without pins `406 signed_bundle_required`;
-the worker logs a hint to pin the bundle keys.
+`--bundles=require` (the default when its prerequisites are present) answers a
+worker without pins `406 signed_bundle_required`; the worker logs a hint to pin
+the bundle keys.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `controlPlane.bundleKeys` | none | List of public JWKs (OKP/Ed25519 or EC/P-256). |
 | `controlPlane.bundleKeysFile` | none | JWKS JSON file `{"keys":[...]}`, merged with `bundleKeys`. |
-| `controlPlane.requireSignedBundles` | `false` | `true` makes config load fail when no keys are pinned (checked whenever the endpoint is set and `controlPlane.localOnly` is not true, so a worker started with `--local-only` is checked too, deliberately fail-closed). |
+| `controlPlane.requireSignedBundles` | `true` | A CP-managed worker (endpoint set, neither `controlPlane.localOnly` nor `--local-only`) with no keys pinned fails at startup. `false` is the explicit, temporary opt-out: the worker takes unsigned policy and logs a WARN at boot. Pins always verify, whatever this says. |
 | `controlPlane.bundleIssuer` | none | When set, a bundle's `cpId` must equal it. |
 | `controlPlane.bundleClockSkew` | `5m` | Tolerance on `issuedAt` and `expiresAt`, at most `1h`. |
 | `controlPlane.bundleExpiry` | `keep` | `keep` enforces the last-known-good past expiry, `deny` blocks. |
@@ -124,6 +130,98 @@ the new key while the control plane rotates its bundle key. Errors name
 `controlPlane.bundleKeys[i]` or `controlPlane.bundleKeysFile[i]` and never
 include key material. `controlPlane.localOnly: true` ignores all of these keys
 and logs one INFO line.
+
+### Upgrading to required signed bundles
+
+**Breaking change in the Phase 2 release.** Two defaults flip together:
+
+| Side | Before | Now |
+|---|---|---|
+| Control plane `--bundles` | `off` | unset = `require` when `--state-dir`, `--policy-store=versioned` and `keys.enabled: true` are all present; otherwise the legacy unsigned policy and one startup WARN naming what is missing |
+| Worker `controlPlane.requireSignedBundles` | `false` | `true`: a CP-managed worker with no `bundleKeys` or `bundleKeysFile` fails to start |
+
+A worker never falls back to unsigned by itself: one that upgrades without pins
+stops at startup with an error that names the keys to pin and the opt-out. The
+control plane differs: with `--bundles` unset and a prerequisite missing it serves
+the unsigned policy and logs one WARN naming the gap. A pinned worker rejects that
+as `unsigned`, and an unpinned worker does not start without the opt-out.
+
+**Do these in order, before you upgrade any binary.**
+
+1. **Pin first.** The control plane needs the prerequisites (`--state-dir`,
+   `--policy-store=versioned`, `keys.enabled: true`). Start it once so it creates
+   its bundle key, with `--bundles=offer` set explicitly (offer serves the
+   envelope to workers that ask for it and the unsigned policy to the rest, so no
+   unpinned worker breaks), then export the public keys:
+
+   ```sh
+   warden control-plane keys export --purpose bundle --state-dir /var/lib/warden-cp \
+     > bundle-keys.json
+   ```
+
+   Put the file on every worker and set `controlPlane.bundleKeysFile` to it (or
+   inline `controlPlane.bundleKeys`). Pinning works on every release that has
+   signed bundles, so pin the old binaries now; the fleet view shows each pinned
+   worker's `bundleSeq`, `pinnedKids` and the `bundle/v1` capability. A worker too
+   old to pin must be upgraded to a release that can before anything else.
+2. **Upgrade the workers** (any order among themselves). A pinned worker sends
+   the bundle `Accept` header, applies only bundles that verify and never the
+   unsigned wire.
+3. **Upgrade the control plane**, keeping `--bundles=offer` until the fleet view
+   shows no worker without `bundle/v1`. Then remove the flag: the control plane
+   resolves to `require` and answers an unpinned request `406 signed_bundle_required`.
+   (`docker-compose.bundles.yml` is this path in compose: it exports the pins and
+   starts each worker pinned.)
+
+**Opting out, temporarily.** Both opt-outs are explicit and log a WARN (the
+control plane's unset-flag fallback above logs one too):
+
+- Control plane: `--bundles=off` serves the legacy unsigned policy and logs
+  `--bundles=off serves the legacy unsigned policy; this is a temporary opt-out`
+  (`--bundles=offer` also logs a WARN: it serves unsigned policy to unpinned workers).
+- Worker: `controlPlane.requireSignedBundles: false` (the WARN above). Pins, when
+  present, still verify. `warden run --local-only` ignores the control plane and
+  needs no pins; the check runs only for a worker that is CP-managed.
+
+**What a worker does when the control plane serves no signed envelope.** It fails
+closed, not open:
+
+- A pinned worker rejects an unsigned 200 as `unsigned` (a control plane with
+  `--bundles=off`, or one without the prerequisites, serves exactly that), counts
+  `warden_bundle_rejected_total{reason="unsigned"}` and keeps enforcing its
+  last-known-good policy. Booted with nothing applied it denies all traffic, as
+  it does before its first pull. With `controlPlane.stateDir` it may start from
+  the [last-known-good cache](#last-known-good-bundle-cache-opt-in) if that verifies.
+- `503 signed_bundle_unavailable` (the control plane is degraded and has no
+  envelope) is a failed pull: the same last-known-good, no fallback.
+- `406 signed_bundle_required` to a worker without pins (a control plane on
+  `require`, a worker on the opt-out) is a failed pull with a hint to pin.
+- An upgraded worker with no pins and no opt-out does not start.
+
+**Mixed-version fleets.** Mixed is safe only through `--bundles=offer`. Against a
+control plane on `require`, a worker without pins keeps its in-memory policy until
+it restarts, then denies all traffic. Against an old control plane (`--bundles`
+off), a pinned worker rejects its unsigned policy; keep the old workers on the
+opt-out until the control plane is upgraded and signing. The control plane serves
+a `bundle/v1` worker the envelope and an older worker the unsigned policy in
+`offer`; "N connected workers do not verify signed bundles" in the fleet view
+counts the rest.
+
+**Rollback.** Roll back one side at a time and keep the two consistent:
+
+- Control plane to the previous release, or to unsigned: start it with
+  `--bundles=offer` (pinned workers keep their verified envelopes, unpinned ones
+  keep the unsigned policy). Use `--bundles=off` only when no worker is pinned,
+  because a pinned worker rejects every unsigned policy and holds its last-known-good.
+- Worker to the previous release: its config still loads (the key is the same
+  boolean), and an old binary with pins still verifies. A worker that must run
+  without pins needs `controlPlane.requireSignedBundles: false` on the new
+  binary, or no pins on the old one.
+- A binary rollback moves no seq. A worker holding the
+  [last-known-good cache](#last-known-good-bundle-cache-opt-in) refuses a lower
+  seq until the cached bundle expires (about 24h by default), so after restoring
+  control-plane state from a backup set `--bundle-seq-floor` above the highest seq
+  any worker reports ([runbook](runbooks/key-rotation.md)).
 
 ### Last-known-good bundle cache (opt-in)
 
@@ -2877,16 +2975,23 @@ egress outage: workers keep enforcing the last policy they pulled and reconnect 
 
 ## Signed bundles (`--bundles`)
 
-`warden control-plane --bundles=off|offer|require` (default `off`) lets the
-control plane sign what it serves on `GET /policy` with its `purpose=bundle`
-signing key (see Signing keys above). `off` keeps `/policy` byte-identical: same
-body, same ETag, no signing, no extra work. This section is the serving side;
-a worker that pins the key and verifies the envelope is a later ticket, so
-today the workers keep pulling the unsigned policy.
+`warden control-plane --bundles=off|offer|require` lets the control plane sign
+what it serves on `GET /policy` with its `purpose=bundle` signing key (see
+Signing keys above). Unset it is `require` when `--state-dir`,
+`--policy-store=versioned` and `keys.enabled: true` are present, and the legacy
+unsigned policy with one startup WARN naming the missing piece when not (it never
+stops a control plane that could not sign anyway); an explicit `offer` or
+`require` without them refuses to start. `--bundles=off` is the explicit,
+temporary opt-out and logs a WARN: `/policy` is byte-identical to before (same
+body, same ETag, no signing, no extra work). Upgrade steps, mixed fleets and
+rollback are in [Upgrading to required signed bundles](#upgrading-to-required-signed-bundles).
+A worker that pins the key and verifies the envelope is described in
+[Pinning bundle keys](#pinning-bundle-keys-worker-config).
 
 - **Prerequisites.** `offer` and `require` need `--state-dir`,
   `--policy-store=versioned` and `keys.enabled: true`; startup fails with an
-  error naming each missing piece, and also when no bundle key can be loaded.
+  error naming each missing piece, and also when no bundle key can be loaded. An
+  unset `--bundles` is not an error: it is the legacy wire plus a WARN.
 - **Negotiation.** A request with `Accept: application/vnd.warden.bundle.v1+json`
   gets the envelope with that `Content-Type`. Other requests get the legacy
   policy in `offer` and `406 {"error":"signed_bundle_required"}` in `require`.
@@ -2986,7 +3091,7 @@ route-level reference.
   published key, answer 503 `signer_unavailable` with `Retry-After` for about 2 minutes.
   Consumers of `/.well-known/jwks.json` must refetch on an unknown kid (rate-limited); Warden
   workers never use it (they take token keys from signed bundles). The key must also be in the
-  JWKS the control plane serves. With signed bundles on (`--bundles=offer|require`) it must also
+  JWKS the control plane serves. With signed bundles on (`--bundles=offer|require`, or unset with the prerequisites) it must also
   be in the token JWKS of the bundle served now (the last one signed, which stays served while
   the publisher is degraded), because a pinned worker holds token keys only from there; until
   that bundle is signed the service answers `signer_unavailable`. This covers the first key and

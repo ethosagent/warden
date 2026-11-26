@@ -18,10 +18,10 @@ func TestLogBundleVerification(t *testing.T) {
 		managed, localOnly bool
 		want               string // substring of the single line, "" for none
 	}{
-		{"managed without pins warns", config.ControlPlaneConfig{}, true, false, "level=WARN msg=\"bundle verification disabled (no controlPlane.bundleKeys)\""},
+		{"managed without pins warns", config.ControlPlaneConfig{}, true, false, "level=WARN msg=\"bundle verification disabled (no controlPlane.bundleKeys, controlPlane.requireSignedBundles: false)"},
 		{"managed with pins is silent", pinned, true, false, ""},
 		{"local-only with pins informs", pinned, false, true, "level=INFO"},
-		{"local-only with require flag informs", config.ControlPlaneConfig{RequireSignedBundles: true}, false, true, "level=INFO"},
+		{"local-only with the default require flag is silent", config.ControlPlaneConfig{RequireSignedBundles: true}, false, true, ""},
 		{"local-only without keys is silent", config.ControlPlaneConfig{}, false, true, ""},
 		{"standalone is silent", config.ControlPlaneConfig{}, false, false, ""},
 	}

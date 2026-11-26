@@ -59,7 +59,7 @@ responseScan:
 # cert via the same proxy CA this worker already uses.
 controlPlane:
   endpoint: https://control-plane:7070/policy
-  bundleKeysFile: /etc/warden/pins/bundle-keys.json   # public keys only; a worker with pins applies only verified bundles
+  bundleKeysFile: /etc/warden/pins/bundle-keys.json   # public keys only; a worker with pins applies only verified bundles (requireSignedBundles stays at its default, true)
   # Certificate auth: the worker trades its one-time wet_ enrollment token (named by
   # the env var below) for a short-lived client certificate, keeps it renewed and
   # persists it under stateDir (a named volume), so a restart does not re-enroll.
