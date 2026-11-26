@@ -143,13 +143,13 @@ Warden tokens) or no keys, a Warden token is `unverified` with reason
 worker logs one error and verifies no Warden token until they differ. A token key
 removed from the bundle stops verifying for every new request and CONNECT. A CONNECT
 tunnel already established keeps the identity it verified until the token's `exp`
-plus skew (at most about 15 minutes) until per-request binding checks land.
+plus skew (at most about 15 minutes) for a raw tunnel; terminated traffic is re-checked on
+every request (see [agent binding](#agent-binding-of-warden-tokens)).
 
-A valid Warden token attributes the user (`sub`, `email`, `groups`). The worker
-verifies the token here but does not yet check that `act.sub` is its own agent
-or that `cnf.jkt` is one of that agent's current keys (agent binding comes
-next), so until then a valid Warden token is attribution, not proof of which
-agent sent it. The `token_type` label of the verify metric is `warden` for these tokens.
+A valid Warden token attributes the user (`sub`, `email`, `groups`) and, after the
+[agent binding](#agent-binding-of-warden-tokens) checks, the agent. The
+`token_type` label of the verify metric is `warden` for these tokens. How a
+harness gets one is in the [token service guide](token-service.md).
 
 **IdP tokens next to Warden tokens.** The worker routes by the token's `iss`:
 the bundle's `tokenIssuer` goes to the Warden verifier, `identity.issuer` to the
@@ -590,9 +590,17 @@ sessions when binding stops holding belongs to `require` mode session closing
 (W-P2-WBND-03 and W-P2-WBND-09).
 
 **What this proves.** The token was minted for this worker's agent, and the key
-it was minted for is still registered. It is **not** proof of possession: the
-token is a bearer credential and the worker cannot tell who presents it. Binding
-is one agent per worker; a second agent needs its own worker.
+it was minted for is still registered. The Warden token is a **bearer token bound
+to the agent by `act.sub` and `cnf.jkt`**, not proof of possession: the worker
+cannot tell who presents it, so anyone holding an unexpired token can use it from
+that agent's listener until it expires. Replay of a stolen token is a documented
+Phase 2 non-goal; proof of possession (agent mTLS, `cnf` `x5t#S256`) is a later
+step. Real upstream credentials still never reach the agent. Binding is one agent
+per worker; a second agent needs its own worker. Limit the exposure with the short
+lifetime and by keeping the token out of the agent (the sidecar holds it), and cut
+a leaked token by blocking the user, disabling the agent or an **emergency** token-key
+rotation (`warden control-plane keys rotate --purpose token --emergency`; a normal rotation keeps the old key
+valid for the overlap) (see [revoking access](token-service.md#revoking-access)).
 
 ## Observability
 
