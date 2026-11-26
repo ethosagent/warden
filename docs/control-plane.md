@@ -832,11 +832,6 @@ Present a key as `Authorization: Bearer wak_...` on `/dashboard/api/*` only:
   owner no longer holds answers `403 {"error":"insufficient_scope","need":"<scope>"}`.
   A route with no table row is never reachable by a key, so a new route stays closed
   until it is classified.
-- Never keyable: `/central/secrets*` (403), settings, integrations, llmproviders and
-  secretstore writes, sessions, setup, backup, `query/generate`, worker-token create and
-  every route classified `none`. `/policy`, `/control/heartbeat` and `/central/ingest`
-  refuse a `wak_` bearer with 401 whatever the worker auth mode, and `/dashboard/` and
-  `/auth/me` answer a key 401.
 - A key whose owner is on the [block list](#block-list) is refused at once with the same
   403 (reads and writes), like the owner's sessions; lifting the block restores it.
 - A key may make `ratePerKey` requests per second (burst 2x); over that is `429` with
@@ -860,6 +855,318 @@ refused by the running control plane at the next poll. If the index cannot confi
 current for 30 seconds it refuses every key (fail closed) rather than risk accepting one
 revoked elsewhere. Last-use time and address are kept in memory and written every 60
 seconds and at shutdown.
+
+### Enabling, creating and expiring keys
+
+Add the block to the operator-owned `--config` file (a commented copy with the
+defaults is in `configs/config.control-plane.yaml`) and restart. Keys need
+`console.auth: oidc` and `--state-dir`; startup names whichever is missing.
+
+```yaml
+console:
+  auth: oidc
+  apiKeys:
+    enabled: true
+    defaultTTL: 2160h   # 90 days when the request names no expiry
+    maxTTL: 8760h       # hard ceiling; a longer request is 400
+    maxPerOwner: 25     # active keys one owner may hold; the 26th is 409
+    ratePerKey: 10      # requests per second per key (burst 2x)
+```
+
+A key has the form `wak_<16 hex id>_<52 character secret>`. Only a hash of the
+secret is stored, and the full key is shown once, in the `201` that creates it.
+Keys are created from a signed-in console session only: a key, a break-glass
+session and an unauthenticated caller cannot mint one (`403 session_required`).
+The console API Keys tab (#263) is the normal way to create, list and revoke keys;
+see that tab's own documentation (the console tab ships with #263). The same routes
+work from any HTTP client that holds a session.
+
+- **Scopes.** A key holds the scopes it was created with and nothing else. The
+  creator may only grant scopes their own role allows (`403 scope_exceeds_role`
+  lists the ones that exceed it). At request time the key also needs the owner's
+  *current* role to meet the route's minimum role. That role comes from the IdP
+  groups saved with the key when it was created, mapped through the live
+  `console.roles`: changing a group's mapping in `console.roles` (after a restart)
+  narrows the keys of its members, but later IdP group changes do not reach existing
+  keys, so offboarding someone needs a revoke by owner (`DELETE
+  /dashboard/api/api-keys?owner_sub=<sub>` or `warden control-plane api-key revoke
+  --owner-sub`).
+- **Expiry.** `expiresIn` is a Go duration between `1h` and `maxTTL`; omit it for
+  `defaultTTL`. A key cannot be extended: create a new one.
+- **Names.** A name is 1 to 64 characters and unique per owner, including revoked
+  keys (`409 name_taken`).
+
+#### API key scopes
+
+One row per scope a key can hold today. The table is pinned to the code by
+`TestScopesDocumented`. The routes each scope opens, and the minimum role of each
+route, are the **API key scope** column of the generated
+[role matrix](#console-roles-and-the-role-matrix); this table does not repeat it.
+A route's own minimum role can be higher than its scope's (for example the
+blocked-users reads need admin although they take `policy:read`).
+
+<!-- api-key-scopes:start -->
+| Scope | Minimum role | What it covers |
+|---|---|---|
+| `policy:read` | viewer | Read the policy, its versions and diffs, change drafts, detection config and the block list. |
+| `policy:draft` | editor | Create a change draft (`POST /dashboard/api/changes`). |
+| `policy:write` | editor | Write the policy and detection config, update, submit, withdraw, rebase and replay drafts, edit the block list. |
+| `settings:read` | viewer | Read settings (`GET /dashboard/api/settings`). Settings writes are session-only. |
+| `traffic:read` | viewer | Traffic, endpoints, analytics, MCP, workers, the query endpoints and alerts. |
+| `audit:read` | viewer | The traffic audit log and its verify call. |
+| `adminaudit:read` | admin | The admin audit log, its verify call and its public key. |
+| `agents:read` | admin | List and read agents in the registry. |
+| `agents:write` | admin | Create, update, enable and disable agents. |
+| `workers:admin` | admin | Revoke a worker certificate (`POST /dashboard/api/workers/{id}/revoke`). |
+<!-- api-key-scopes:end -->
+
+Scope names for later features (`mcp:read`, `mcp:write`, `grants:read`,
+`grants:write`) are reserved and cannot be requested until their feature ships.
+
+**Never keyable.** These answer a key `403 insufficient_scope` (with `need: none`),
+or `401` where noted, whatever scopes it holds:
+
+- key management itself (list, create, revoke; only `GET /dashboard/api/api-keys/self`
+  is open to a key), sessions, token sessions, setup, backup, break-glass;
+- policy rollback and the `PUT` variants of policy and detection (only `POST` is
+  scoped, as `policy:write`), signing-keys routes, `query/generate`;
+- change approve, reject, review and emergency apply;
+- `/central/secrets*` including `GET`, secret-store, integrations and llmproviders
+  reads and writes, and settings writes: these stay session-only in P2;
+- worker-token create, list and revoke;
+- every other route classified `none`.
+
+The worker routes (`/policy`, `/control/*`, `/central/ingest`) refuse a `wak_`
+bearer with `401`, and `/dashboard/` and `/auth/me` answer a key `401`. A route with
+no table row is closed to keys until someone classifies it. The **API key scope**
+column of the [role matrix](#console-roles-and-the-role-matrix) is the source of
+truth: `none` means never keyable.
+
+### Using a key in CI
+
+Keep the key in a CI secret named `WARDEN_API_KEY` and send it as a bearer token
+over HTTPS. Never put it in a URL (`400 api_key_in_query`). Later features (GitOps,
+the admin MCP) use the same variable name.
+
+```sh
+export WARDEN_CP=https://warden-cp.example.com   # the control plane's base URL
+```
+
+Each example shows the request, the status and the body. `$WARDEN_API_KEY` stands
+for a key like `wak_6127c9843b4791dd_kpvx…`; the examples use the key id
+`6127c9843b4791dd`.
+
+**200 read.** A `policy:read` key reads the policy.
+
+```sh
+curl -sS -i "$WARDEN_CP/dashboard/api/policy" -H "Authorization: Bearer $WARDEN_API_KEY"
+```
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"allowlist":[{"domain":"api.openai.com","port":0}],"denylist":[{"domain":"evil.example.com","port":0}],"lint":[],"editable":true,"drift":false}
+```
+
+**200 introspect.** Any valid key can ask what it is allowed to do.
+`effectiveScopes` is `scopes` capped by the owner's current role. The secret is
+never returned.
+
+```sh
+curl -sS -i "$WARDEN_CP/dashboard/api/api-keys/self" -H "Authorization: Bearer $WARDEN_API_KEY"
+```
+```
+HTTP/1.1 200 OK
+Cache-Control: no-store
+
+{"id":"6127c9843b4791dd","name":"ci","description":"deploys","scopes":["policy:read"],"effectiveScopes":["policy:read"],"ownerEmail":"eve@example.com","createdAt":"2027-01-15T08:00:00Z","expiresAt":"2027-02-14T08:00:00Z","lastUsedAt":"2027-01-15T08:00:00Z","status":"active"}
+```
+
+**201 create.** From a signed-in console session (cookie plus the CSRF header, as
+the console sends it; a key cannot do this).
+
+```sh
+curl -sS -i -X POST "$WARDEN_CP/dashboard/api/api-keys" \
+  -H "Cookie: $SESSION_COOKIE" -H "X-Warden-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"name":"ci","description":"deploys","scopes":["policy:read"],"expiresIn":"720h"}'
+```
+```
+HTTP/1.1 201 Created
+Cache-Control: no-store
+
+{"id":"6127c9843b4791dd","name":"ci","scopes":["policy:read"],"createdAt":"2027-01-15T08:00:00Z","expiresAt":"2027-02-14T08:00:00Z","key":"wak_6127c9843b4791dd_kpvx…"}
+```
+
+**400 bad request.** Invalid input, an unknown scope, a key in the query string,
+two `Authorization` headers, or a key sent with a session cookie
+(`ambiguous_credentials`).
+
+```sh
+curl -sS -i "$WARDEN_CP/dashboard/api/policy?token=wak_0123456789abcdef_<redacted>"
+```
+```
+HTTP/1.1 400 Bad Request
+
+{"error":"api_key_in_query"}
+```
+
+A key that was ever sent in a URL is leaked (proxy and access logs keep URLs): revoke it and rotate.
+
+```sh
+curl -sS -i -X POST "$WARDEN_CP/dashboard/api/api-keys" -H "Cookie: $SESSION_COOKIE" \
+  -H "X-Warden-CSRF: $CSRF" -H 'Content-Type: application/json' -d '{"name":"ci","scopes":["bogus:scope"]}'
+```
+```
+HTTP/1.1 400 Bad Request
+
+{"detail":"apikeys: unknown scope: \"bogus:scope\"","error":"unknown_scope"}
+```
+
+**401 unauthorized.** Malformed, unknown, wrong secret, expired and revoked keys
+all look the same, so a caller learns nothing about which it was. The same applies
+to a key on a worker route (`/policy`), where the body is the worker plane's.
+
+```sh
+curl -sS -i "$WARDEN_CP/dashboard/api/policy" -H "Authorization: Bearer $WARDEN_API_KEY"
+```
+```
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer
+
+{"error":"unauthorized"}
+```
+
+**403 forbidden.** A valid key without the scope. `need` names it; for a route no
+key may reach it is `none`.
+
+```sh
+curl -sS -i -X POST "$WARDEN_CP/dashboard/api/policy" -H "Authorization: Bearer $WARDEN_API_KEY" \
+  -H 'Content-Type: application/json' -d '{"allowlist":[],"denylist":[]}'
+```
+```
+HTTP/1.1 403 Forbidden
+
+{"error":"insufficient_scope","need":"policy:write"}
+```
+
+```sh
+curl -sS -i "$WARDEN_CP/central/secrets" -H "Authorization: Bearer $WARDEN_API_KEY"
+```
+```
+HTTP/1.1 403 Forbidden
+
+{"error":"insufficient_scope","need":"none"}
+```
+
+**404 not found.** An unknown or malformed key id on revoke.
+
+```sh
+curl -sS -i -X DELETE "$WARDEN_CP/dashboard/api/api-keys/0123456789abcdef" \
+  -H "Cookie: $SESSION_COOKIE" -H "X-Warden-CSRF: $CSRF"
+```
+```
+HTTP/1.1 404 Not Found
+
+{"error":"api_key_not_found"}
+```
+
+**409 conflict.** A name already used by one of the owner's keys (`name_taken`), or
+the owner already holds `maxPerOwner` active keys (`too_many_keys`).
+
+```sh
+curl -sS -i -X POST "$WARDEN_CP/dashboard/api/api-keys" -H "Cookie: $SESSION_COOKIE" \
+  -H "X-Warden-CSRF: $CSRF" -H 'Content-Type: application/json' -d '{"name":"ci","scopes":["policy:read"]}'
+```
+```
+HTTP/1.1 409 Conflict
+
+{"error":"name_taken"}
+```
+
+**429 too many requests.** More than `ratePerKey` requests per second (burst 2x)
+on one key. Wait `Retry-After` seconds.
+
+```sh
+curl -sS -i "$WARDEN_CP/dashboard/api/policy" -H "Authorization: Bearer $WARDEN_API_KEY"
+```
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 1
+
+{"error":"rate_limited"}
+```
+
+### Rotating a key
+
+1. Create the new key (same scopes, new name, for example `ci-2027-02`) from the
+   console or the create call above.
+2. Put it in the CI secret store as `WARDEN_API_KEY` and redeploy or re-run the
+   jobs that use it.
+3. Check the old key is no longer in use: `GET /dashboard/api/api-keys` shows
+   each key's `lastUsedAt` (kept in memory and written every 60 seconds).
+4. Revoke the old key: `DELETE /dashboard/api/api-keys/{id}` from its owner's
+   session (or any admin's). The next request with it is `401`. Revoking twice is
+   `204` and changes nothing.
+
+An admin can revoke every key of one owner with `DELETE
+/dashboard/api/api-keys?owner_sub=<sub>`, for example when someone leaves. Blocking
+a user on the [block list](#block-list) also refuses their keys at once, and
+lifting the block restores them.
+
+### Incident: offline revoke and restore
+
+When the console is unavailable or a key has leaked, revoke from the host, with the
+control plane running or stopped. The command opens `<state-dir>/warden-cp.db`
+directly, creates no key and never prints a secret or hash. A running control plane
+refuses the key within 2 seconds.
+
+```sh
+warden control-plane api-key list --state-dir /data [--json]
+warden control-plane api-key revoke --state-dir /data --id 6127c9843b4791dd
+warden control-plane api-key revoke --state-dir /data --owner-sub <sub>
+```
+
+`--admin-audit-key-file` names the admin audit signing key when it is not at
+`<state-dir>/cp-audit.key`. Each revoke is one admin audit row (`api_key.revoke` or `api_key.revoke_owner`,
+auth method `cli`, actor `cli:<os user>`) when admin audit is enabled in the state
+dir. Exit codes: 0 done (including an already revoked key), 1 a refusal or an audit
+failure after the revoke, 2 usage.
+
+Restoring an older [backup](#scheduled-backups---backup-dir) brings back keys
+revoked after it was taken. Re-apply those revocations from the shipped
+`admin_audit` log, or restore with `--revoke-api-keys`, which revokes every key in
+the restored database before it is put in place and records the count as
+`api_keys_revoked` in the `cp.restore` audit row. Owners then create new keys. See
+[backup and restore](runbooks/backup-restore.md).
+
+```sh
+warden control-plane restore --from /backups/20270115T080000Z --state-dir /data --force --revoke-api-keys
+```
+
+### Expiry warnings
+
+With `console.apiKeys.enabled`, the control plane scans once an hour for unrevoked
+keys that expire within 7 days and publishes one `api_key_expiring` finding (medium
+severity) per key to the configured alert sinks. The finding carries the key id,
+name, owner email and expiry, never a secret. A key is reported once, and again only
+if its expiry changes; a control plane restart warns once more.
+
+### Known limits
+
+- **DLP scans request bodies only.** With `dlp.wardenTokens: true` (off by default) the egress detector flags a `wak_` or `wwt_`
+  token in a proxied request body to a third party. The same token in a header or
+  query string, or in an MCP call, is not flagged.
+- **Owner revokes do not record the owner.** The audit row of a revoke by owner
+  (console or CLI) names the actor, the count and the action, but not which
+  `owner_sub` was targeted. The list of keys before the revoke is the record.
+- **The expiry alert resolves itself.** The stored `api_key_expiring` alert is
+  auto-resolved 15 minutes after it is published, like every one-shot finding. The
+  notification is the warning; the key list shows the expiry for as long as the key
+  lives.
+- **Owner role changes need a restart.** The owner's role comes from the groups
+  saved with the key and the live `console.roles`, which are read at startup.
+- Rate limits on key create and revoke are not in place yet (tracked with the
+  session rate limits).
 
 ## Console roles and the role matrix
 
