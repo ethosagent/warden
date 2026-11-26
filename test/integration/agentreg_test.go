@@ -251,6 +251,9 @@ controlPlane:
   tokenEnv: WARDEN_AGENTREG_IT_TOKEN
   longPollWait: 5s
   heartbeatInterval: 1s
+  # The CP here serves the legacy unsigned policy (no versioned store or
+  # bundle key), so opt out of the Phase 2 signed-bundle default.
+  requireSignedBundles: false
 `, cpAddr, caCert))
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
