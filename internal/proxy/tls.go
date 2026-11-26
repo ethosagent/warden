@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
+	"github.com/ethosagent/warden/internal/denyreason"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/policy"
 	"github.com/ethosagent/warden/internal/protocol"
 )
@@ -94,9 +96,10 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 		var sess *session
 		if p.trackSession(ci) {
 			sess = p.sessions.newSession("tcp", domain, port, true, clientConn)
-			sess.bind(ci)
+			cut := sess.bind(ci)
+			cut = p.armExpiry(sess, ci, !cut) || cut
 			defer sess.release()
-			if p.refusedAtCreate(sess, ci, domain, port, "tcp") {
+			if p.refusedAtCreate(sess, ci, domain, port, "tcp") || cut {
 				return
 			}
 		}
@@ -212,6 +215,15 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 		return
 	}
 
+	// Require mode admits only a valid Warden token, and this leg has no request
+	// to carry one: a transparent connection (no CONNECT identity) is refused
+	// here, before any dial.
+	if h := p.identity(); h != nil && h.mode == IdentityModeRequire &&
+		(ci.status() != identity.StatusValid || ci.Claims.TokenType != identity.TokenWarden) {
+		p.storeDeny(ci, domain, port, "tcp", denyreason.IdentityRequired, "")
+		return
+	}
+
 	// Unrecognized protocol inside TLS: raw forwarding.
 	proto := detected.String()
 	if detected == protocol.Unknown {
@@ -223,9 +235,10 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 	var sess *session
 	if p.trackSession(ci) {
 		sess = p.sessions.newSession(proto, domain, port, true, tlsConn)
-		sess.bind(ci)
+		cut := sess.bind(ci)
+		cut = p.armExpiry(sess, ci, !cut) || cut
 		defer sess.release()
-		if p.refusedAtCreate(sess, ci, domain, port, proto) {
+		if p.refusedAtCreate(sess, ci, domain, port, proto) || cut {
 			return
 		}
 	}
@@ -411,7 +424,16 @@ func cacheSize(m *sync.Map) int {
 	return n
 }
 
-// clock returns the proxy's time source, defaulting to time.Now when the
+// validityClock is the time source for identity and session validity decisions:
+// the injected Config.IdentityClock when set, else clock().
+func (p *Proxy) validityClock() time.Time {
+	if p.idNow != nil {
+		return p.idNow()
+	}
+	return p.clock()
+}
+
+// clock returns the leaf-cert time source, defaulting to time.Now when the
 // injectable now field is unset (production). Tests set p.now to a controllable
 // clock to exercise leaf expiry deterministically.
 func (p *Proxy) clock() time.Time {

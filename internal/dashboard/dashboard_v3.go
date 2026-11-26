@@ -533,11 +533,15 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 // booleans/counts that power the auto-advancing onboarding checklist. All are
 // derived from injected sources + the DataSource; no field carries a value.
 type setupResponse struct {
-	WorkersConnected  int    `json:"workersConnected"`
-	FirstEventSeen    bool   `json:"firstEventSeen"`
-	PolicyConfigured  bool   `json:"policyConfigured"`
-	SecretsConfigured bool   `json:"secretsConfigured"`
-	Mode              string `json:"mode"`
+	WorkersConnected int `json:"workersConnected"`
+	// WorkersWithoutBundleCap is the number of online workers that do not
+	// advertise bundle/v1 (they apply the unsigned wire) while the control
+	// plane serves signed bundles; 0 otherwise (W-P2-SBND-05).
+	WorkersWithoutBundleCap int    `json:"workersWithoutBundleCap"`
+	FirstEventSeen          bool   `json:"firstEventSeen"`
+	PolicyConfigured        bool   `json:"policyConfigured"`
+	SecretsConfigured       bool   `json:"secretsConfigured"`
+	Mode                    string `json:"mode"`
 	// AuthMode is the console sign-in mode (none or oidc), set by the control
 	// plane through SetAuthMode; absent on a worker's dashboard. The UI shows a
 	// persistent banner when it is none.
@@ -549,6 +553,15 @@ type setupResponse struct {
 	// serve (a state dir is configured); the console hides the Agents tab
 	// otherwise, a worker's dashboard included. Always present.
 	AgentRegistry bool `json:"agentRegistry"`
+	// ApprovalsEnabled is true only when the change draft routes are wired
+	// (console.approvals.enabled on a control plane): the console shows the
+	// Changes tab only then. Always present.
+	ApprovalsEnabled bool `json:"approvalsEnabled"`
+	// ApprovalsReplayTimeoutSec is console.approvals.replayTimeout in seconds,
+	// so the Changes tab stops polling a pending replay when the server gives
+	// up on it. Omitted when approvals are off or the control plane did not
+	// say.
+	ApprovalsReplayTimeoutSec int `json:"approvalsReplayTimeoutSec,omitempty"`
 	// APIKeys is present only on a control plane with console.apiKeys.enabled
 	// (W-P2-APIK-04): the console shows the API Keys tab and builds its create
 	// dialog from the scope list. Absent elsewhere.
@@ -574,6 +587,9 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := setupResponse{Mode: s.setupMode(), AuthMode: s.authMode}
 	resp.AgentRegistry = s.agents != nil && s.agents.Ready() == nil
+	if resp.ApprovalsEnabled = s.changeDrafts != nil; resp.ApprovalsEnabled {
+		resp.ApprovalsReplayTimeoutSec = int(s.approvalsReplayTimeout / time.Second)
+	}
 	resp.APIKeys = s.apiKeysSetup()
 	if s.backupFn != nil {
 		resp.Backup = s.backupFn(r)
@@ -582,7 +598,11 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	// workersConnected: the fleet registry size when set (control plane); on a
 	// single node the dashboard is itself serving, so report 1.
 	if s.workersFn != nil {
-		resp.WorkersConnected = len(s.workersFn())
+		ws := s.workersFn()
+		resp.WorkersConnected = len(ws)
+		if s.bundlesServed != nil && s.bundlesServed() {
+			resp.WorkersWithoutBundleCap = WorkersMissingBundleCap(ws)
+		}
 	} else {
 		resp.WorkersConnected = 1
 	}

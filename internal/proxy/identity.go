@@ -31,9 +31,8 @@ const (
 	identityVerifyTimeout = 2 * time.Second
 )
 
-// IdentityMode is an agent's identity mode. Only off, attribute and challenge
-// exist in P1; any other value is treated as off, so an unknown mode never
-// verifies.
+// IdentityMode is an agent's identity mode. Any value but attribute, challenge
+// and require is treated as off, so an unknown mode never verifies.
 type IdentityMode string
 
 const (
@@ -42,6 +41,11 @@ const (
 	// IdentityModeChallenge verifies like attribute and refuses a CONNECT with
 	// no valid identity with a 407 that carries a sign-in URL (challenge.go).
 	IdentityModeChallenge IdentityMode = "challenge"
+	// IdentityModeRequire refuses a CONNECT without a valid Warden token bound
+	// to this worker's agent with a 407 and no sign-in offer, and a terminated
+	// request whose identity is not valid with a 403 (require.go). An IdP token
+	// never satisfies it (unbound_token).
+	IdentityModeRequire IdentityMode = "require"
 )
 
 // IdentityConfig seeds the identity holder from proxy.Config. The zero value
@@ -54,7 +58,7 @@ type IdentityConfig struct {
 }
 
 // identityHolder is the immutable value behind Proxy.identityP. It exists only
-// in attribute and challenge mode: a nil pointer means off.
+// in attribute, challenge and require mode: a nil pointer means off.
 type identityHolder struct {
 	v    identity.Verifier
 	mode IdentityMode
@@ -64,10 +68,20 @@ type identityHolder struct {
 	// identity's expiry on each later request. Verifiers expose it through
 	// ClockSkew(); one that does not gets the default.
 	skew time.Duration
+	// snapshot returns the Warden snapshot a Warden token is bound against; nil
+	// for a verifier without one (the bare IdP verifier). It is read on every
+	// binding check, never held, so a new bundle applies on the next request.
+	snapshot func() *identity.WardenSnapshot
+}
+
+// snapshotSource is a verifier that serves the Warden snapshot Warden tokens are
+// bound against (identity.MultiVerifier, identity.WardenVerifier).
+type snapshotSource interface {
+	Snapshot() *identity.WardenSnapshot
 }
 
 func newIdentityHolder(v identity.Verifier, mode IdentityMode, signin SignInStarter) *identityHolder {
-	if v == nil || (mode != IdentityModeAttribute && mode != IdentityModeChallenge) {
+	if v == nil || (mode != IdentityModeAttribute && mode != IdentityModeChallenge && mode != IdentityModeRequire) {
 		return nil
 	}
 	if mode != IdentityModeChallenge {
@@ -77,7 +91,11 @@ func newIdentityHolder(v identity.Verifier, mode IdentityMode, signin SignInStar
 	if sk, ok := v.(interface{ ClockSkew() time.Duration }); ok {
 		skew = sk.ClockSkew()
 	}
-	return &identityHolder{v: v, mode: mode, signin: signin, skew: skew}
+	h := &identityHolder{v: v, mode: mode, signin: signin, skew: skew}
+	if sv, ok := v.(snapshotSource); ok {
+		h.snapshot = sv.Snapshot
+	}
+	return h
 }
 
 // identity loads the live holder; nil means mode off. One snapshot per use keeps
@@ -85,7 +103,7 @@ func newIdentityHolder(v identity.Verifier, mode IdentityMode, signin SignInStar
 func (p *Proxy) identity() *identityHolder { return p.identityP.Load() }
 
 // SetIdentity atomically swaps the identity verifier and mode. A nil verifier
-// or any mode but attribute or challenge turns identity off. It is race-free
+// or any mode but attribute, challenge or require turns identity off. It is race-free
 // against the hot path; connections already open keep the identity they
 // resolved at CONNECT. The mode is the agent's resolved mode, decided by the
 // caller. Challenge mode has no sign-in starter here: use SetIdentityWithSignIn.
@@ -101,7 +119,7 @@ func (p *Proxy) SetIdentityWithSignIn(v identity.Verifier, mode IdentityMode, si
 }
 
 // IdentityModeName is the effective identity mode this proxy enforces now: off
-// when no verifier is installed, else attribute or challenge. The heartbeat
+// when no verifier is installed, else attribute, challenge or require. The heartbeat
 // reports it, so the control plane sees what runs, not what was requested.
 func (p *Proxy) IdentityModeName() string {
 	if h := p.identity(); h != nil {
@@ -130,6 +148,18 @@ func (p *Proxy) warnIdentityCoverage() {
 		if p.caCert == nil {
 			p.warnChallengeNoCA.Do(func() {
 				p.cfg.Logger.Warn("identity challenge mode without a CA: a raw tunnel is checked at CONNECT only and is not cut when the token expires")
+			})
+		}
+	}
+	if h.mode == IdentityModeRequire {
+		if p.cfg.Mode == config.ProxyModeTransparent {
+			p.warnRequireTransparent.Do(func() {
+				p.cfg.Logger.Warn("identity require mode on a transparent-only worker: there is no CONNECT, so a request is admitted only with a valid bound Warden token in X-Warden-Identity")
+			})
+		}
+		if p.caCert == nil {
+			p.warnRequireNoCA.Do(func() {
+				p.cfg.Logger.Warn("identity require mode without a CA: a raw tunnel is checked at CONNECT only and is not cut when the token expires or its binding is revoked")
 			})
 		}
 	}
@@ -218,8 +248,83 @@ func (p *Proxy) verifyToken(h *identityHolder, tok string) idResult {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	c, st, r := h.v.Verify(ctx, tok)
 	cancel()
-	p.recordIdentity(st, r, string(identity.TokenIdP))
-	return idResult{claims: c, status: st, reason: r}
+	res := p.bind(h, idResult{claims: c, status: st, reason: r})
+	p.recordIdentity(res.status, res.reason, tokenTypeOf(res.claims))
+	return res
+}
+
+// rebind re-checks a live CONNECT identity against the current snapshot on each
+// later request: the signing key must still be in the bundle's token JWKS
+// (unknown_kid, e.g. an emergency key removal), the issuer must still match
+// (wrong_iss), and the token must still bind to the agent and key. Allocation
+// free. A non-Warden identity passes, except in require mode, where it fails
+// as unbound_token.
+func (p *Proxy) rebind(h *identityHolder, r idResult) idResult {
+	if r.status != identity.StatusValid {
+		return r
+	}
+	warden := r.claims.TokenType == identity.TokenWarden
+	// An IdP identity opened under another mode is not bound there; in require
+	// mode it must not outlive the flip, so it goes through the binding check
+	// (unbound_token) like every other valid identity.
+	if !warden && h.mode != IdentityModeRequire {
+		return r
+	}
+	var snap *identity.WardenSnapshot
+	if h.snapshot != nil {
+		snap = h.snapshot() // read once for the whole re-check
+	}
+	if warden && h.snapshot != nil {
+		switch {
+		case !snap.HasKey(r.claims.KID):
+			return idResult{claims: r.claims, status: identity.StatusInvalid, reason: identity.ReasonUnknownKID}
+		case snap.Issuer() != r.claims.Issuer:
+			return idResult{claims: r.claims, status: identity.StatusInvalid, reason: identity.ReasonWrongIss}
+		}
+	}
+	return p.bindSnap(h, snap, r)
+}
+
+// bind applies agent binding (W-P2-WBND-02) to a verified result. Only a valid
+// Warden token is bound; every other result passes through. A token that fails
+// binding becomes invalid with the binding reason and no Subject, but keeps its
+// claims: the block-list check still matches the parsed sub and email, because
+// a match can only deny. The snapshot is read here, per call, so a binding is
+// never older than the bundle currently applied. A Warden token with no
+// snapshot to bind against fails closed. In require mode a valid token of any
+// other type (an IdP token) fails as unbound_token.
+func (p *Proxy) bind(h *identityHolder, r idResult) idResult {
+	var snap *identity.WardenSnapshot
+	if h.snapshot != nil {
+		snap = h.snapshot()
+	}
+	return p.bindSnap(h, snap, r)
+}
+
+// bindSnap is bind against a snapshot the caller already read.
+func (p *Proxy) bindSnap(h *identityHolder, snap *identity.WardenSnapshot, r idResult) idResult {
+	if r.status != identity.StatusValid {
+		return r
+	}
+	// In require mode every valid token is bound, so an IdP token is refused as
+	// unbound_token (BindingCheck): it never satisfies the mode.
+	if r.claims.TokenType != identity.TokenWarden && h.mode != IdentityModeRequire {
+		return r
+	}
+	if reason, ok := identity.BindingCheck(snap, p.cfg.AgentID, r.claims); !ok {
+		return idResult{claims: r.claims, status: identity.StatusInvalid, reason: reason}
+	}
+	return r
+}
+
+// tokenTypeOf is the token_type metric label for claims a verifier returned. A
+// dispatching verifier says which kind of token it held; one that does not
+// (the bare IdP verifier) means an IdP token.
+func tokenTypeOf(c identity.Claims) string {
+	if c.TokenType == "" {
+		return string(identity.TokenIdP)
+	}
+	return string(c.TokenType)
 }
 
 func (p *Proxy) recordIdentity(st identity.Status, r identity.Reason, tokenType string) {
@@ -280,7 +385,8 @@ func (p *Proxy) captureIdentityHeader(s *requestScope) {
 // identityStage resolves who made this request and sets s.subject. In attribute
 // mode it never ends the request: identity is recorded, not enforced. In
 // challenge mode an expired connection identity or a conflicting header ends it
-// with a 403 (challenge.go). The raw header value is dropped here, so no later
+// with a 403 (challenge.go); in require mode so does any identity that is not
+// valid (require.go). The raw header value is dropped here, so no later
 // stage (judge, DLP, MCP) can see it.
 //
 // Rules, in order:
@@ -315,11 +421,11 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 	start := time.Now()
 	var r idResult
 	connLive := cs == identity.StatusValid
-	if connLive && !p.clock().Before(ci.Expiry.Add(h.skew)) {
+	if connLive && !p.validityClock().Before(ci.Expiry.Add(h.skew)) {
 		// Past exp plus skew (or no exp at all, which a valid token always has:
 		// fail closed). The connection's identity is spent.
 		connLive, cs = false, identity.StatusExpired
-		p.recordIdentity(identity.StatusExpired, "", string(identity.TokenIdP))
+		p.recordIdentity(identity.StatusExpired, "", tokenTypeOf(ci.Claims))
 	}
 	switch {
 	case cs == identity.StatusNone || cs == identity.StatusOff:
@@ -339,17 +445,29 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 		}
 	case connLive:
 		r = idResult{claims: ci.Claims, status: identity.StatusValid}
-		if n > 0 {
+		// A tunnel outlives the bundle it was opened under: bind again against
+		// the snapshot current now, so a removed key or a disabled agent ends
+		// the identity on this request, not at token expiry. Before the Subject
+		// is built below, which stamps the worker's agent.
+		if br := p.rebind(h, r); br.status != identity.StatusValid {
+			r = br
+			s.idRebound = true
+			p.recordIdentity(br.status, br.reason, tokenTypeOf(br.claims))
+		}
+		if n > 0 && r.status == identity.StatusValid {
 			hr := p.headerResult(h, raw, n)
 			switch {
 			case hr.status == identity.StatusInvalid && hr.reason == identity.ReasonMalformed:
 				// A header that is not a single well-formed Bearer value is malformed
 				// even next to a live CONNECT identity.
 				r = hr
-			case hr.status == identity.StatusValid && hr.claims.Sub != ci.Claims.Sub:
-				s.idHeaderClaims = hr.claims
+			case hr.status == identity.StatusValid && hr.claims.Sub != ci.Claims.Sub,
+				h.mode == IdentityModeRequire && requireHeaderConflicts(hr, ci.Claims):
+				if hr.status == identity.StatusValid {
+					s.idHeaderClaims = hr.claims
+				}
 				r = idResult{status: identity.StatusConflict}
-				p.recordIdentity(identity.StatusConflict, "", string(identity.TokenIdP))
+				p.recordIdentity(identity.StatusConflict, "", tokenTypeOf(ci.Claims))
 			}
 		}
 	default:
@@ -357,10 +475,16 @@ func (p *Proxy) identityStage(s *requestScope) (endSession bool) {
 	}
 	s.idStatus, s.idReason, s.idClaims = r.status, r.reason, r.claims
 	if r.status == identity.StatusValid {
+		// Binding already ran: a Warden token reaching here has act.sub equal to
+		// this worker's agent, so this stamp changes nothing for it and only
+		// names the agent for an IdP token.
 		s.subject = identity.SubjectFrom(r.claims, r.status)
 		s.subject.AgentID = p.cfg.AgentID
 	}
 	p.cfg.Metrics.ObserveAddedLatency("identity", time.Since(start))
+	if h.mode == IdentityModeRequire {
+		return p.requireTerminated(s)
+	}
 	return p.challengeTerminated(s, h)
 }
 
@@ -399,6 +523,8 @@ func (c connIdentity) stamp(ev *analytics.Event, on bool) {
 	ev.UserGroups = c.Claims.Groups
 	ev.UserGroupsTruncated = c.Claims.GroupsTruncated
 	ev.UserSID = c.Claims.SID
+	ev.UserAct = c.Claims.Act
+	ev.IdentityTokenType = string(c.Claims.TokenType)
 }
 
 // recordEvent is the one place the proxy hands an event to the analytics

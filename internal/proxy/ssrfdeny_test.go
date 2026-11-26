@@ -878,3 +878,67 @@ func TestDialRefusal_StaleRedialOneDenyEvent(t *testing.T) {
 	}
 	wantSSRFDeny(t, denies[0], "backend.test", "https", SSRFReasonBlocked, "loopback")
 }
+
+// TestSafeDialerDefault pins the production default of the upstream dial seam:
+// with no Dialer override (cmd/proxy never sets one), a CONNECT to an
+// allowlisted loopback address is still refused by the SSRF-safe dialer and
+// nothing ever reaches the listener behind it. The Go-only test seams
+// (Config.Dialer, Config.UpstreamRootCAs) change this only when a test sets
+// them explicitly.
+func TestSafeDialerDefault(t *testing.T) {
+	backend, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	accepted := make(chan struct{}, 1)
+	go func() {
+		c, err := backend.Accept()
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+		accepted <- struct{}{}
+	}()
+	port := backend.Addr().(*net.TCPAddr).Port
+
+	store := &syncStore{}
+	p := startProxy(t, store, nil, nil, port, func(cfg *Config) {
+		cfg.Policy = policy.NewEvaluator(config.Policy{Allowlist: []config.AllowlistEntry{
+			{Domain: "127.0.0.1", Port: port},
+		}})
+	})
+	if p.safeDial == nil {
+		t.Fatal("proxy built without Config.Dialer must install the SafeDialer")
+	}
+
+	conn, err := net.Dial("tcp", p.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_, _ = fmt.Fprintf(conn, "CONNECT 127.0.0.1:%d HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n", port, port)
+	// The tunnel's 200 is sent before the upstream dial; the refusal shows as
+	// the tunnel closing with no bytes from the loopback listener.
+	br := bufio.NewReader(conn)
+	status, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read CONNECT status: %v", err)
+	}
+	if !strings.HasPrefix(status, "HTTP/1.1 200") {
+		t.Fatalf("CONNECT status = %q, want HTTP/1.1 200 (policy allowed it; only the dialer may refuse)", status)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.Copy(io.Discard, br); err != nil {
+		t.Fatalf("tunnel to the refused loopback target did not close cleanly: %v", err)
+	}
+	events := waitForEvents(t, store, 1)
+	// A policy deny would also close the tunnel; only the SSRF dialer yields a
+	// deny with the blocked reason and the loopback address class.
+	wantSSRFDeny(t, events[0], "127.0.0.1", "tcp", SSRFReasonBlocked, "loopback")
+	select {
+	case <-accepted:
+		t.Fatal("the loopback listener was reached through the proxy")
+	case <-time.After(200 * time.Millisecond):
+	}
+}

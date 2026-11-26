@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -40,7 +42,8 @@ type ControlPlaneConfig struct {
 	// Empty means verification is off.
 	BundleKeys []keys.JWK
 	// RequireSignedBundles makes an empty pin set a config error for a
-	// CP-managed worker.
+	// CP-managed worker. It defaults to true when controlPlane.
+	// requireSignedBundles is absent; false is the explicit, temporary opt-out.
 	RequireSignedBundles bool
 	// BundleIssuer, when set, must equal the signed bundle's cpId.
 	BundleIssuer string
@@ -50,7 +53,42 @@ type ControlPlaneConfig struct {
 	// BundleExpiry is what an expired bundle means: keep the last-known-good
 	// policy enforced (default) or deny.
 	BundleExpiry BundleExpiry
+
+	// StateDir is the worker's own state directory (created 0700). The worker
+	// certificate lives in its cert/ subdirectory (W-P2-WCA-03).
+	StateDir string
+	// BundleCacheMaxAge enables the last-known-good bundle cache (W-P2-SBND-06):
+	// a pinned worker with StateDir set persists each verified bundle (never
+	// the credential sidecar) under <StateDir>/bundle/ and, when the first pull
+	// fails at boot, enforces it if its issuedAt is at most this old. Default
+	// 24h; 0 disables the cache. See BundleCacheEnabled.
+	BundleCacheMaxAge time.Duration
+	// Enrollment, when set, makes the worker trade a wet_ enrollment token for a
+	// worker client certificate and keep it renewed. Exclusive with ClientCert.
+	Enrollment EnrollmentConfig
+	// ClientCert and ClientKey are the PEM paths of a client certificate issued
+	// outside Warden. Such a certificate is presented as is and never renewed.
+	ClientCert string
+	ClientKey  string
 }
+
+// EnrollmentConfig is the `controlPlane.enrollment` block (W-P2-WCA-03). Both
+// fields name environment variables; the token itself is never in the file.
+type EnrollmentConfig struct {
+	// TokenEnv names the env var holding the wet_ enrollment token. Set means
+	// enrollment is on.
+	TokenEnv string
+	// WorkerIDSuffixEnv names the env var holding the worker id suffix a
+	// prefix-bound token appends to its prefix. Empty or unset: the hostname.
+	WorkerIDSuffixEnv string
+}
+
+// Enabled reports whether the worker enrolls for its certificate.
+func (e EnrollmentConfig) Enabled() bool { return e.TokenEnv != "" }
+
+// CertAuth reports whether the worker authenticates to the control plane with a
+// client certificate (enrolled or supplied) instead of the bearer token.
+func (c ControlPlaneConfig) CertAuth() bool { return c.Enrollment.Enabled() || c.ClientCert != "" }
 
 // BundleExpiry selects the behaviour once the applied bundle has expired.
 type BundleExpiry string
@@ -64,6 +102,13 @@ const (
 // BundleVerification reports whether signed-bundle verification is configured
 // (at least one pin). A CP-managed worker without it behaves as before.
 func (c ControlPlaneConfig) BundleVerification() bool { return len(c.BundleKeys) > 0 }
+
+// BundleCacheEnabled reports whether the worker keeps the last-known-good
+// bundle on disk: it needs the state directory, pinned bundle keys and a
+// non-zero bundleCacheMaxAge. Otherwise nothing is written or read.
+func (c ControlPlaneConfig) BundleCacheEnabled() bool {
+	return c.StateDir != "" && c.BundleVerification() && c.BundleCacheMaxAge > 0
+}
 
 // BundlePins returns a copy of the pin set for verification.
 func (c ControlPlaneConfig) BundlePins() []keys.JWK {
@@ -88,10 +133,19 @@ type rawControlPlane struct {
 
 	BundleKeys           []map[string]any `yaml:"bundleKeys"`
 	BundleKeysFile       string           `yaml:"bundleKeysFile"`
-	RequireSignedBundles bool             `yaml:"requireSignedBundles"`
+	RequireSignedBundles *bool            `yaml:"requireSignedBundles"`
 	BundleIssuer         string           `yaml:"bundleIssuer"`
 	BundleClockSkew      string           `yaml:"bundleClockSkew"`
 	BundleExpiry         string           `yaml:"bundleExpiry"`
+
+	StateDir          string `yaml:"stateDir"`
+	BundleCacheMaxAge string `yaml:"bundleCacheMaxAge"`
+	Enrollment        *struct {
+		TokenEnv          string `yaml:"tokenEnv"`
+		WorkerIDSuffixEnv string `yaml:"workerIdSuffixEnv"`
+	} `yaml:"enrollment"`
+	ClientCert string `yaml:"clientCert"`
+	ClientKey  string `yaml:"clientKey"`
 }
 
 // control-plane defaults applied when the corresponding field is omitted.
@@ -101,6 +155,7 @@ const (
 	defaultHeartbeatInterval        = 10 * time.Second
 	defaultBundleClockSkew          = 5 * time.Minute
 	maxBundleClockSkew              = time.Hour
+	defaultBundleCacheMaxAge        = 24 * time.Hour
 )
 
 // parseControlPlane converts the raw controlPlane block into typed config,
@@ -114,6 +169,22 @@ func parseControlPlane(r *rawControlPlane) (ControlPlaneConfig, error) {
 	c.TokenEnv = r.TokenEnv
 	c.CACert = strings.TrimSpace(r.CACert)
 	c.LocalOnly = r.LocalOnly
+	c.StateDir = strings.TrimSpace(r.StateDir)
+	c.ClientCert = strings.TrimSpace(r.ClientCert)
+	c.ClientKey = strings.TrimSpace(r.ClientKey)
+	if r.Enrollment != nil {
+		c.Enrollment = EnrollmentConfig{
+			TokenEnv:          strings.TrimSpace(r.Enrollment.TokenEnv),
+			WorkerIDSuffixEnv: strings.TrimSpace(r.Enrollment.WorkerIDSuffixEnv),
+		}
+		if c.Enrollment.TokenEnv == "" {
+			return ControlPlaneConfig{}, fmt.Errorf("config: controlPlane.enrollment.tokenEnv is required when controlPlane.enrollment is set")
+		}
+	}
+	c.BundleCacheMaxAge = defaultBundleCacheMaxAge
+	if err := parseDurationField("controlPlane.bundleCacheMaxAge", r.BundleCacheMaxAge, &c.BundleCacheMaxAge); err != nil {
+		return ControlPlaneConfig{}, err
+	}
 	c.PollInterval = defaultControlPlanePollInterval
 	c.LongPollWait = defaultLongPollWait
 	c.HeartbeatInterval = defaultHeartbeatInterval
@@ -135,6 +206,18 @@ func parseControlPlane(r *rawControlPlane) (ControlPlaneConfig, error) {
 // validateControlPlane enforces the control-plane block's requirements only when
 // it is enabled (Endpoint set), so an absent/empty block is always valid.
 func validateControlPlane(c ControlPlaneConfig) error {
+	if c.Enrollment.Enabled() && c.ClientCert != "" {
+		return fmt.Errorf("config: controlPlane.enrollment and controlPlane.clientCert are mutually exclusive")
+	}
+	if (c.ClientCert == "") != (c.ClientKey == "") {
+		return fmt.Errorf("config: controlPlane.clientCert and controlPlane.clientKey must be set together")
+	}
+	if c.StateDir != "" && !filepath.IsAbs(c.StateDir) {
+		return fmt.Errorf("config: controlPlane.stateDir must be an absolute path, got %q", c.StateDir)
+	}
+	if c.Enrollment.Enabled() && c.StateDir == "" {
+		return fmt.Errorf("config: controlPlane.stateDir is required when controlPlane.enrollment is set")
+	}
 	if c.Endpoint == "" {
 		return nil
 	}
@@ -144,8 +227,17 @@ func validateControlPlane(c ControlPlaneConfig) error {
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("config: controlPlane.pollInterval must be greater than 0")
 	}
-	if c.RequireSignedBundles && !c.LocalOnly && !c.BundleVerification() {
-		return fmt.Errorf("config: controlPlane.requireSignedBundles is true but controlPlane.bundleKeys and controlPlane.bundleKeysFile pin no keys")
+	return nil
+}
+
+// CheckBundlePins is the fail-closed check of a CP-managed worker: signed
+// bundles are required (the default) and no keys are pinned. The worker runs it
+// once it knows it is managed, that is after the --local-only flag and
+// controlPlane.localOnly are both applied, so a standalone run of a managed
+// config still works. It never falls back to unsigned policy.
+func (c ControlPlaneConfig) CheckBundlePins() error {
+	if c.Endpoint != "" && !c.LocalOnly && c.RequireSignedBundles && !c.BundleVerification() {
+		return errors.New(errNoBundlePins)
 	}
 	return nil
 }

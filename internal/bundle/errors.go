@@ -72,8 +72,22 @@ type facts struct {
 	payload []byte // reduced to a 16-hex digest prefix when printed
 }
 
+// factError is a rejection with the facts Verify knew when it failed. Its text
+// is the base error followed by the printable facts; it unwraps to the base.
+type factError struct {
+	base   error
+	seq    int64
+	kid    string
+	digest string
+	text   string
+}
+
+func (e *factError) Error() string { return e.text }
+func (e *factError) Unwrap() error { return e.base }
+
 func (f facts) wrap(base error) error {
 	s := ""
+	digest := ""
 	if f.seq != 0 {
 		s += fmt.Sprintf(" seq=%d", f.seq)
 	}
@@ -81,10 +95,22 @@ func (f facts) wrap(base error) error {
 		s += " kid=" + f.kid
 	}
 	if len(f.payload) > 0 {
-		s += " digest=" + digest16(f.payload)
+		digest = digest16(f.payload)
+		s += " digest=" + digest
 	}
 	if s == "" {
 		return base
 	}
-	return fmt.Errorf("%w (%s)", base, s[1:])
+	return &factError{base: base, seq: f.seq, kid: f.kid, digest: digest, text: fmt.Sprintf("%v (%s)", base, s[1:])}
+}
+
+// FactsOf returns the seq, signing kid and 16-hex payload digest a rejection
+// from Verify carries, each zero when Verify had not got that far. They are
+// the same facts the error text prints, and never payload content.
+func FactsOf(err error) (seq int64, kid, digest string) {
+	var fe *factError
+	if errors.As(err, &fe) {
+		return fe.seq, fe.kid, fe.digest
+	}
+	return 0, "", ""
 }

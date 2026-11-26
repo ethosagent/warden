@@ -541,6 +541,7 @@ func TestBundleFieldCoverage(t *testing.T) {
 	in := base(5)
 	in.Policy = json.RawMessage(`{"a":1}`)
 	in.Sections = map[string]json.RawMessage{"tokenJWKS": json.RawMessage(`{"keys":[]}`), "other": json.RawMessage(`[1]`)}
+	in.TokenIssuer = "https://warden.example.com"
 	creds := &bundle.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: secretValue}
 	v, err := bundle.Verify(mustSign(t, in, creds, s), []keys.JWK{pin}, bundle.State{}, opts())
 	if err != nil {
@@ -609,5 +610,259 @@ func TestSignRejectsInvalidUTF8(t *testing.T) {
 	b.Sections = map[string]json.RawMessage{"bad\xff": json.RawMessage(`1`)}
 	if _, err := bundle.Sign(context.Background(), b, nil, s); err == nil {
 		t.Error("section name with invalid UTF-8 must be rejected")
+	}
+}
+
+// TestBundleTokenIssuerSigned: the token issuer rides in the signed payload and
+// the content hash. Editing it without re-signing is a bad signature; editing it
+// and re-signing with the right key still fails, because contentSha256 no
+// longer matches. Two bundles that differ only in issuer have different hashes.
+func TestBundleTokenIssuerSigned(t *testing.T) {
+	s, pin := newKey(t, keys.AlgEdDSA)
+	in := base(5)
+	in.TokenIssuer = "https://warden.example.com"
+	raw := mustSign(t, in, nil, s)
+	v, err := bundle.Verify(raw, []keys.JWK{pin}, bundle.State{}, opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Bundle.TokenIssuer != in.TokenIssuer {
+		t.Fatalf("tokenIssuer %q, want %q", v.Bundle.TokenIssuer, in.TokenIssuer)
+	}
+
+	swap := func(p []byte) []byte {
+		out := bytes.Replace(p, []byte("warden.example.com"), []byte("evil.example.com"), 1)
+		if bytes.Equal(out, p) {
+			t.Fatal("issuer not found in the payload")
+		}
+		return out
+	}
+	var env bundle.Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := base64.RawURLEncoding.DecodeString(env.Payload)
+	tampered := mutateEnv(t, raw, func(e *bundle.Envelope) { e.Payload = base64.RawURLEncoding.EncodeToString(swap(payload)) })
+	if _, err := bundle.Verify(tampered, []keys.JWK{pin}, bundle.State{}, opts()); !errors.Is(err, bundle.ErrBadSignature) {
+		t.Fatalf("unsigned edit: got %v, want bad signature", err)
+	}
+	if _, err := bundle.Verify(resign(t, raw, s, swap), []keys.JWK{pin}, bundle.State{}, opts()); !errors.Is(err, bundle.ErrMalformed) {
+		t.Fatalf("re-signed edit: got %v, want malformed (content hash)", err)
+	}
+
+	other := in
+	other.TokenIssuer = "https://other.example.com"
+	ov, err := bundle.Verify(mustSign(t, other, nil, s), []keys.JWK{pin}, bundle.State{}, opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ov.ContentSHA256 == v.ContentSHA256 {
+		t.Error("the token issuer must change contentSha256")
+	}
+
+	// Without an issuer the member is omitted and the bundle verifies.
+	none := base(5)
+	nv, err := bundle.Verify(mustSign(t, none, nil, s), []keys.JWK{pin}, bundle.State{}, opts())
+	if err != nil || nv.Bundle.TokenIssuer != "" {
+		t.Fatalf("bundle without issuer: %+v %v", nv.Bundle.TokenIssuer, err)
+	}
+	var env2 bundle.Envelope
+	_ = json.Unmarshal(mustSign(t, none, nil, s), &env2)
+	p2, _ := base64.RawURLEncoding.DecodeString(env2.Payload)
+	if bytes.Contains(p2, []byte("tokenIssuer")) {
+		t.Error("an empty tokenIssuer must be omitted from the payload")
+	}
+}
+
+func TestSignRejectsInvalidUTF8TokenIssuer(t *testing.T) {
+	s, _ := newKey(t, keys.AlgEdDSA)
+	b := base(1)
+	b.TokenIssuer = "https://x\xff"
+	if _, err := bundle.Sign(context.Background(), b, nil, s); err == nil {
+		t.Error("tokenIssuer with invalid UTF-8 must be rejected")
+	}
+}
+
+// TestVerifyEnvelopeMemberNamesAreExact refuses, as malformed, an envelope
+// member that only case-folds to payload, signatures or credentials, and a
+// repeated one of those. encoding/json would accept both (case-insensitive
+// match, last duplicate wins), and a reader that parsed the envelope another
+// way would then see a different sidecar than Verify did.
+func TestVerifyEnvelopeMemberNamesAreExact(t *testing.T) {
+	s, pin := newKey(t, keys.AlgEdDSA)
+	pins := []keys.JWK{pin}
+	creds := &bundle.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: secretValue}
+	good := string(mustSign(t, base(5), creds, s))
+	if _, err := bundle.Verify([]byte(good), pins, bundle.State{}, opts()); err != nil {
+		t.Fatalf("the unedited envelope: %v", err)
+	}
+	var env struct {
+		Payload     json.RawMessage `json:"payload"`
+		Signatures  json.RawMessage `json:"signatures"`
+		Credentials json.RawMessage `json:"credentials"`
+	}
+	if err := json.Unmarshal([]byte(good), &env); err != nil {
+		t.Fatal(err)
+	}
+	members := map[string]json.RawMessage{"payload": env.Payload, "signatures": env.Signatures, "credentials": env.Credentials}
+	// build writes the members in order, each as name:value.
+	build := func(kv ...string) []byte {
+		parts := make([]string, 0, len(kv)/2)
+		for i := 0; i < len(kv); i += 2 {
+			parts = append(parts, fmt.Sprintf("%q:%s", kv[i], kv[i+1]))
+		}
+		return []byte("{" + strings.Join(parts, ",") + "}")
+	}
+	for _, name := range []string{"payload", "signatures", "credentials"} {
+		val := string(members[name])
+		others := func(renamed string) []string {
+			var kv []string
+			for _, n := range []string{"payload", "signatures", "credentials"} {
+				if n == name {
+					kv = append(kv, renamed, val)
+				} else {
+					kv = append(kv, n, string(members[n]))
+				}
+			}
+			return kv
+		}
+		variants := []string{
+			strings.ToUpper(name[:1]) + name[1:],
+			strings.ToUpper(name),
+			name[:len(name)-1] + strings.ToUpper(name[len(name)-1:]),
+		}
+		if strings.Contains(name, "s") {
+			variants = append(variants, strings.Replace(name, "s", "\u017f", 1)) // U+017F (long s) folds to s
+		}
+		for _, v := range variants {
+			t.Run(name+"/variant "+v, func(t *testing.T) {
+				// Renamed in place, and next to the exact name.
+				for _, raw := range [][]byte{build(others(v)...), build(append(others(name), v, val)...)} {
+					if _, err := bundle.Verify(raw, pins, bundle.State{}, opts()); !errors.Is(err, bundle.ErrMalformed) {
+						t.Fatalf("%s: got %v, want ErrMalformed", raw[:min(len(raw), 80)], err)
+					}
+				}
+			})
+		}
+		t.Run(name+"/duplicate", func(t *testing.T) {
+			// An escaped spelling of the same name is still a duplicate.
+			escaped := fmt.Sprintf(`\u%04x`, name[0]) + name[1:]
+			plain := build(others(name)...)
+			for _, raw := range [][]byte{
+				build(append([]string{name, val}, others(name)...)...),
+				build(append(others(name), name, val)...),
+				[]byte(string(plain[:len(plain)-1]) + `,"` + escaped + `":` + val + "}"),
+			} {
+				if _, err := bundle.Verify(raw, pins, bundle.State{}, opts()); !errors.Is(err, bundle.ErrMalformed) {
+					t.Fatalf("%.80s: got %v, want ErrMalformed", raw, err)
+				}
+			}
+		})
+	}
+
+	// Still accepted: an escape that decodes to the exact name, and unknown
+	// members (repeated or not), which later envelope fields may use.
+	for _, raw := range []string{
+		strings.Replace(good, `"credentials"`, `"cred\u0065ntials"`, 1),
+		strings.Replace(good, `{"payload"`, `{"extra":1,"extra":[2],"Extra":{},"payload"`, 1),
+		strings.Replace(good, `{"payload"`, `{"pay": "x", "payloads": "y", "payload"`, 1),
+	} {
+		v, err := bundle.Verify([]byte(raw), pins, bundle.State{}, opts())
+		if err != nil || v.Credentials == nil {
+			t.Fatalf("%.60s: got %+v %v, want accepted with the sidecar", raw, v.Credentials, err)
+		}
+	}
+}
+
+// TestVerifiedWithoutCredentials is what the worker caches: only the verified
+// payload and signatures, under the exact names, re-verifiable with
+// AllowMissingCredentials and never carrying a sidecar or an extra member.
+func TestVerifiedWithoutCredentials(t *testing.T) {
+	s1, pin1 := newKey(t, keys.AlgEdDSA)
+	s2, pin2 := newKey(t, keys.AlgES256)
+	creds := &bundle.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: secretValue}
+	good := string(mustSign(t, base(5), creds, s1, s2))
+	for _, raw := range []string{
+		good,
+		strings.Replace(good, `{"payload"`, `{"extra":{"secretAccessKey":"`+secretValue+`"},"payload"`, 1),
+		strings.Replace(good, `"credentials"`, `"cred\u0065ntials"`, 1),
+	} {
+		v, err := bundle.Verify([]byte(raw), []keys.JWK{pin1}, bundle.State{}, opts())
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := v.WithoutCredentials()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(out), secretValue) || strings.Contains(string(out), "AKIAEXAMPLE") {
+			t.Fatalf("the stripped envelope carries the credential: %s", out)
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(out, &m); err != nil || len(m) != 2 || m["payload"] == nil || m["signatures"] == nil {
+			t.Fatalf("members = %v %v, want exactly payload and signatures", m, err)
+		}
+		o := opts()
+		o.AllowMissingCredentials = true
+		// Both signatures are kept, so a pin rotated to the second key still verifies.
+		for _, pins := range [][]keys.JWK{{pin1}, {pin2}} {
+			w, err := bundle.Verify(out, pins, bundle.State{}, o)
+			if err != nil || w.Credentials != nil || w.ContentSHA256 != v.ContentSHA256 {
+				t.Fatalf("re-verify: %+v %v", w.Credentials, err)
+			}
+		}
+		if _, err := bundle.Verify(out, []keys.JWK{pin1}, bundle.State{}, opts()); !errors.Is(err, bundle.ErrCredentialMismatch) {
+			t.Fatalf("without AllowMissingCredentials: %v", err)
+		}
+	}
+	if _, err := (bundle.Verified{}).WithoutCredentials(); err == nil {
+		t.Fatal("a zero Verified must not produce an envelope")
+	}
+}
+
+// TestWithoutCredentialsDoesNotHTMLEscape: the unsigned signature entries are
+// written byte for byte, so <, > and & are not inflated to six-byte escapes.
+func TestWithoutCredentialsDoesNotHTMLEscape(t *testing.T) {
+	s, pin := newKey(t, keys.AlgEdDSA)
+	good := string(mustSign(t, base(5), nil, s))
+	raw := strings.Replace(good, `"signatures":[`, `"signatures":[{"kid":"<a&b>","sig":"x"},`, 1)
+	if raw == good {
+		t.Fatal("no signatures member")
+	}
+	v, err := bundle.Verify([]byte(raw), []keys.JWK{pin}, bundle.State{}, opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := v.WithoutCredentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"kid":"<a&b>"`) || bytes.HasSuffix(out, []byte("\n")) {
+		t.Fatalf("stripped envelope = %.200s, want the kid unescaped and no trailing newline", out)
+	}
+	if !bytes.HasPrefix([]byte(good), out[:len(`{"payload":`)]) {
+		t.Fatalf("unexpected prefix %.40s", out)
+	}
+}
+
+// TestWithoutCredentialsRefusesOversize: invalid UTF-8 in an unsigned kid is
+// re-encoded as U+FFFD (one byte becomes three), so an envelope just under
+// the limit can grow past it. That is an error (the cache write fails and
+// logs), never a file LoadCache would refuse.
+func TestWithoutCredentialsRefusesOversize(t *testing.T) {
+	s, pin := newKey(t, keys.AlgEdDSA)
+	good := string(mustSign(t, base(5), nil, s))
+	bad := strings.Repeat(string([]byte{0xff}), bundle.MaxEnvelopeBytes/2)
+	raw := strings.Replace(good, `"signatures":[`, `"signatures":[{"kid":"`+bad+`","sig":"x"},`, 1)
+	if len(raw) > bundle.MaxEnvelopeBytes {
+		t.Fatalf("test envelope is %d bytes, over the limit", len(raw))
+	}
+	v, err := bundle.Verify([]byte(raw), []keys.JWK{pin}, bundle.State{}, opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := v.WithoutCredentials()
+	if !errors.Is(err, bundle.ErrTooLarge) || out != nil {
+		t.Fatalf("got %d bytes, %v; want ErrTooLarge", len(out), err)
 	}
 }

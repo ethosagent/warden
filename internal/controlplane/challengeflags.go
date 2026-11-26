@@ -22,6 +22,8 @@ type challengeFlags struct {
 	served   bool
 	computed bool
 	logged   map[string]string // proxy id -> etag the lack was logged for
+	// loggedRequire is the same for identity/require-v1 (noteIdentityRequire).
+	loggedRequire map[string]string
 }
 
 // challengeServedWire reports whether w's settings put any agent in challenge

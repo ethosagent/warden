@@ -10,13 +10,21 @@ import (
 	"github.com/ethosagent/warden/internal/keys"
 )
 
+// errNoBundlePins is the load error of a control-plane-managed worker that
+// requires signed bundles (the default) and pins no keys. It never falls back
+// to unsigned policy: the operator must pin keys or opt out in writing.
+const errNoBundlePins = "config: controlPlane.requireSignedBundles is true (the default since the Phase 2 release) but controlPlane.bundleKeys and controlPlane.bundleKeysFile pin no keys: " +
+	"export the control plane's bundle keys with `warden control-plane keys export --purpose bundle` and set controlPlane.bundleKeysFile, " +
+	"or, only temporarily, set controlPlane.requireSignedBundles: false to take unsigned policy (see docs/control-plane.md, Upgrading to required signed bundles)"
+
 // maxBundleKeys bounds the pin set: inline and file keys together.
 const maxBundleKeys = 16
 
 // parseBundleOptions fills the signed-bundle fields of c from r: defaults,
 // the skew and expiry values, and the merged, validated pin set.
 func parseBundleOptions(r *rawControlPlane, c *ControlPlaneConfig) error {
-	c.RequireSignedBundles = r.RequireSignedBundles
+	// Signed bundles are required unless the operator opts out explicitly.
+	c.RequireSignedBundles = r.RequireSignedBundles == nil || *r.RequireSignedBundles
 	c.BundleIssuer = strings.TrimSpace(r.BundleIssuer)
 	c.BundleClockSkew = defaultBundleClockSkew
 	if err := parseDurationField("controlPlane.bundleClockSkew", r.BundleClockSkew, &c.BundleClockSkew); err != nil {

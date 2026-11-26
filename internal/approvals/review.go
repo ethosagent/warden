@@ -331,6 +331,12 @@ func adminFields(c Classification) []string {
 // reports ok=false when the head is unavailable or is not d's base (then the
 // apply will report the moved head).
 func (s *Service) freshClassification(ctx context.Context, d Draft) (Classification, bool) {
+	if d.Target != TargetPolicy {
+		// Another target is judged against its own live state; the Applier still
+		// refuses a draft whose entity moved (ErrRebaseRequired).
+		c, err := s.classifyTarget(ctx, d.Target, d.TargetRef, d.DocJSON)
+		return c, err == nil
+	}
 	if s.cfg.Head == nil {
 		return Classification{}, false
 	}

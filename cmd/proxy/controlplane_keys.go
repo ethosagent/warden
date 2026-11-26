@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/ethosagent/warden/internal/controlplane"
+	"github.com/ethosagent/warden/internal/identityclient"
 	"github.com/ethosagent/warden/internal/keys"
 )
 
@@ -145,16 +149,23 @@ func newKeysListCmd() *cobra.Command {
 func newKeysRotateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rotate",
-		Short: "Rotate a purpose's signing key (token; bundle is staged).",
+		Short: "Rotate a purpose's signing key (token; bundle is --stage then --activate).",
 		Long: "Promote a purpose's published next key to the signing slot and publish a " +
 			"fresh next key. The control plane picks the change up within about 2 seconds, " +
 			"and verifiers already hold the new key (it was published one prepublish window " +
 			"ahead). --emergency promotes at once, past the prepublish window, and revokes " +
 			"the old key instead of retiring it: tokens it signed stop verifying once " +
 			"verifiers refresh — on a non-interactive stdin it refuses without --yes. The " +
-			"bundle purpose is never rotated here: workers pin its keys out of band, so the " +
-			"refusal names the next key to pin before a staged rotation (see " +
-			"docs/runbooks/key-rotation.md).",
+			"bundle purpose rotates only in two steps, because workers pin its keys out of " +
+			"band: --stage makes the control plane sign every envelope with both the active " +
+			"and the next key (a worker pinning either verifies it); --activate then makes " +
+			"the next key the only signer and keeps the old one published for keys.bundle.overlap. " +
+			"--activate is refused, naming the proxy ids, unless every online worker reports " +
+			"the next kid in its heartbeat pinnedKids, which it reads from the running control " +
+			"plane (--admin-url, an API key with the traffic:read scope in --api-key-file or " +
+			"$WARDEN_API_KEY); --force overrides that and writes the missing ids to the audit " +
+			"row. Without --stage or --activate the bundle purpose is refused and the next " +
+			"key to pin is named (see docs/runbooks/key-rotation.md).",
 		Args: usageArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			f := cmd.Flags()
@@ -170,6 +181,13 @@ func newKeysRotateCmd() *cobra.Command {
 			emergency, _ := f.GetBool("emergency")
 			yes, _ := f.GetBool("yes")
 			keyFile, _ := f.GetString("admin-audit-key-file")
+			stage, _ := f.GetBool("stage")
+			unstage, _ := f.GetBool("unstage")
+			activate, _ := f.GetBool("activate")
+			force, _ := f.GetBool("force")
+			if err := checkRotateSteps(purpose, stage, unstage, activate, force, emergency); err != nil {
+				return usageErr(err)
+			}
 			if emergency && !yes {
 				if !stdinIsTerminal(os.Stdin) {
 					return usageErr(errors.New("--emergency also needs --yes on a non-interactive stdin (it revokes the current key at once)"))
@@ -183,12 +201,29 @@ func newKeysRotateCmd() *cobra.Command {
 					return usageErr(errors.New("aborted; nothing changed"))
 				}
 			}
-			o, err := controlplane.OpenKeysOffline(cmd.Context(), stateDir, keysOptions(configPath, keyFile))
+			opt := keysOptions(configPath, keyFile)
+			opt.Logger = slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
+			var workers controlplane.WorkersSource
+			if activate {
+				var err error
+				if workers, err = workersFromFlags(cmd); err != nil {
+					return usageErr(err)
+				}
+			}
+			o, err := controlplane.OpenKeysOffline(cmd.Context(), stateDir, opt)
 			if err != nil {
 				return usageErr(err)
 			}
 			defer func() { _ = o.Close() }()
 			noticeNoAudit(cmd, o, stateDir)
+			switch {
+			case stage:
+				return runBundleStage(cmd, o)
+			case unstage:
+				return runBundleUnstage(cmd, o)
+			case activate:
+				return runBundleActivate(cmd, o, controlplane.ActivateBundleOptions{Workers: workers, Force: force, Emergency: emergency})
+			}
 			res, err := o.Rotate(cmd.Context(), purpose, emergency)
 			if err != nil {
 				if errors.Is(err, keys.ErrRotationStood) {
@@ -222,12 +257,162 @@ func newKeysRotateCmd() *cobra.Command {
 		},
 	}
 	keysFlags(cmd)
-	cmd.Flags().String("purpose", "", "the purpose to rotate: token (bundle rotation is staged; see docs/runbooks/key-rotation.md) (required)")
-	cmd.Flags().Bool("emergency", false, "promote the next key at once and revoke the current one instead of retiring it")
+	cmd.Flags().String("purpose", "", "the purpose to rotate: token, or bundle with --stage or --activate (required)")
+	cmd.Flags().Bool("stage", false, "bundle: sign every envelope with both the active and the next key (creates the next key if missing)")
+	cmd.Flags().Bool("unstage", false, "bundle: stop signing with the staged next key (recovery when its material is lost; works without it)")
+	cmd.Flags().Bool("activate", false, "bundle: make the staged next key the only signer; needs every online worker to report it pinned")
+	cmd.Flags().Bool("force", false, "bundle --activate: go on although workers lack the next kid or their pins cannot be read (audited)")
+	cmd.Flags().String("admin-url", "", "bundle --activate: base URL of the running control plane, for the workers' heartbeat pins")
+	cmd.Flags().String("api-key-file", "", "bundle --activate: file holding an API key with the traffic:read scope (default: $WARDEN_API_KEY)")
+	cmd.Flags().String("ca-cert", "", "bundle --activate: PEM certificate authority of --admin-url, added to the system roots")
+	cmd.Flags().Bool("emergency", false, "promote the next key at once and revoke the current one instead of retiring it (bundle: with --activate)")
 	cmd.Flags().Bool("yes", false, "confirm an emergency rotation (required with --emergency on a non-interactive stdin)")
 	cmd.Flags().String("admin-audit-key-file", "", "admin audit signing key (default <state-dir>/cp-audit.key)")
 	quiet(cmd)
 	return cmd
+}
+
+// checkRotateSteps validates the staged-rotation flags: --stage and --activate
+// are the bundle purpose's steps, exclusive of each other, and --force goes with
+// --activate only.
+func checkRotateSteps(purpose string, stage, unstage, activate, force, emergency bool) error {
+	switch {
+	case stage && activate, unstage && (stage || activate):
+		return errors.New("--stage, --unstage and --activate are separate steps: stage, pin, then activate")
+	case (stage || unstage || activate) && purpose != keys.PurposeBundle:
+		return fmt.Errorf("--stage, --unstage and --activate are for --purpose bundle; %s rotates in one step", purpose)
+	case unstage && emergency:
+		return errors.New("--emergency goes with --activate; an unstage only takes a signature away")
+	case force && !activate:
+		return errors.New("--force overrides the pin check of --activate")
+	case stage && emergency:
+		return errors.New("--emergency goes with --activate (it promotes the next key at once); a stage only adds a signature")
+	}
+	return nil
+}
+
+// maxFleetBody caps the fleet list the activate gate reads (a few KiB a worker).
+const maxFleetBody = 8 << 20
+
+// checkAdminURL refuses an --admin-url that would send the API key in clear
+// text over a network: https always, http only to a loopback host.
+func checkAdminURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return errors.New("--admin-url is not a valid URL")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if ip := net.ParseIP(host); host == "localhost" || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+	}
+	return errors.New("--admin-url must be https (http only for localhost or a loopback address): the API key is sent with every request")
+}
+
+// workersFromFlags builds the activate gate's view of the fleet from
+// --admin-url and the API key. Without --admin-url the source is nil, and the
+// gate refuses unless --force is given.
+func workersFromFlags(cmd *cobra.Command) (controlplane.WorkersSource, error) {
+	f := cmd.Flags()
+	adminURL, _ := f.GetString("admin-url")
+	if adminURL == "" {
+		return nil, nil
+	}
+	if err := checkAdminURL(adminURL); err != nil {
+		return nil, err
+	}
+	keyFile, _ := f.GetString("api-key-file")
+	ca, _ := f.GetString("ca-cert")
+	key := strings.TrimSpace(os.Getenv("WARDEN_API_KEY"))
+	if keyFile != "" {
+		raw, err := os.ReadFile(keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("--api-key-file: %w", err)
+		}
+		key = strings.TrimSpace(string(raw))
+	}
+	if key == "" {
+		return nil, errors.New("--admin-url needs an API key with the traffic:read scope: --api-key-file or $WARDEN_API_KEY")
+	}
+	client, err := identityclient.NewCPHTTPClientCapped(ca, maxFleetBody)
+	if err != nil {
+		return nil, fmt.Errorf("--ca-cert: %w", err)
+	}
+	return controlplane.AdminAPIWorkers(client, adminURL, key)
+}
+
+// runBundleStage is `keys rotate --purpose bundle --stage`.
+func runBundleStage(cmd *cobra.Command, o *controlplane.OfflineKeys) error {
+	res, err := o.StageBundle(cmd.Context())
+	if err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	if res.Already {
+		_, _ = fmt.Fprintf(out, "already staged: bundle signs with %s and %s; nothing changed\n", res.ActiveKID, res.NextKID)
+		return nil
+	}
+	_, _ = fmt.Fprintf(out, "staged: the control plane signs every bundle with %s (active) and %s (next) within about 2 seconds.\n"+
+		"Workers pinning either key verify them. Pin %s on every worker (keys export --purpose bundle), "+
+		"wait for them to report it, then run keys rotate --purpose bundle --activate.\n", res.ActiveKID, res.NextKID, res.NextKID)
+	return nil
+}
+
+// runBundleUnstage is `keys rotate --purpose bundle --unstage`.
+func runBundleUnstage(cmd *cobra.Command, o *controlplane.OfflineKeys) error {
+	res, err := o.UnstageBundle(cmd.Context())
+	if err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	switch {
+	case res.Already:
+		_, _ = fmt.Fprintln(out, "nothing is staged; nothing changed")
+	case res.Dropped:
+		_, _ = fmt.Fprintf(out, "unstaged: the staged key %s could not be loaded, so it was dropped; the control plane signs with the active key alone and publishes a fresh next key. "+
+			"Workers pinned only to %s must be re-pinned to the active key.\n", res.NextKID, res.NextKID)
+	default:
+		_, _ = fmt.Fprintf(out, "unstaged: the control plane signs with the active key alone within about 2 seconds; %s is a plain next key again. "+
+			"Workers pinned only to %s must be re-pinned to the active key.\n", res.NextKID, res.NextKID)
+	}
+	return nil
+}
+
+// runBundleActivate is `keys rotate --purpose bundle --activate`.
+func runBundleActivate(cmd *cobra.Command, o *controlplane.OfflineKeys, opt controlplane.ActivateBundleOptions) error {
+	res, err := o.ActivateBundle(cmd.Context(), opt)
+	stderr := cmd.ErrOrStderr()
+	if len(res.Report.Offline) > 0 {
+		_, _ = fmt.Fprintf(stderr, "warning: %d known worker(s) are offline and do not report %s pinned; they reject bundles until pinned: %s\n",
+			len(res.Report.Offline), res.KID, strings.Join(res.Report.Offline, ", "))
+	}
+	if err != nil {
+		if errors.Is(err, keys.ErrRotationStood) {
+			_, _ = fmt.Fprintf(stderr, "the bundle activation stood: %s signs and %s stopped, but publishing the fresh next key failed — "+
+				"the control plane's scheduler republishes one, `keys list` shows when it is there\n", res.KID, res.Previous)
+			return &exitError{code: exitKeysRotationStood, err: err}
+		}
+		return err
+	}
+	if res.Forced {
+		missing := strings.Join(res.Report.Missing, ", ")
+		if res.PinsUnread {
+			missing = "the workers' pins could not be read"
+		}
+		_, _ = fmt.Fprintf(stderr, "forced: activated although %s; recorded in the admin audit log\n", missing)
+	}
+	line := "activated: the control plane now signs bundles with " + res.KID + " alone within about 2 seconds; " +
+		res.Previous + " stays published for its overlap, so keep it pinned until then (keys export --purpose bundle lists what to pin)"
+	if res.Emergency {
+		line = "emergency activation complete: the control plane now signs bundles with " + res.KID +
+			" alone; " + res.Previous + " is revoked and out of the published set — unpin it on every worker"
+	}
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), line)
+	return nil
 }
 
 func newKeysExportCmd() *cobra.Command {

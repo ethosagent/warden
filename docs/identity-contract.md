@@ -84,6 +84,7 @@ warden identity login --issuer https://dex.example.com/dex --scopes audience:ser
 warden identity status
 warden identity token
 warden identity logout
+warden identity enroll --agent-id agent-1
 ```
 
 `login` runs the RFC 8628 device-code grant and prints the verification URL and
@@ -93,12 +94,72 @@ thirds of its lifetime; it never prompts. Settings come from flags, the
 `WARDEN_IDENTITY_*` variables, or `identity.yaml` in the user config directory.
 The default client id is `warden-cli` and the default audience `warden`.
 
+**Agent mode.** `warden identity enroll --agent-id ID` writes an Ed25519 key
+(PKCS#8 PEM, `0600`, in a `0700` directory; default
+`<user config dir>/warden/agents/ID.key`) and prints only its public JWK, which
+an operator registers for the agent. With `--agent-id` (or
+`WARDEN_IDENTITY_AGENT_ID`), `token` and `status` exchange the user's ID token
+at the control plane's `POST /oauth2/token` (`--token-endpoint` or
+`WARDEN_IDENTITY_TOKEN_ENDPOINT`, required; `--cp-ca` or `WARDEN_IDENTITY_CP_CA`
+for its TLS CA; `--agent-key-file`; `--subject-token-file` for a `0600` file
+holding the ID token instead of the login cache) and print the Warden token, or
+for `status` its sub, act.sub, cnf.jkt, scope and exp. Without `--agent-id`
+nothing changes.
+
 | Exit code | Meaning |
 |---|---|
 | `0` | Success |
 | `1` | Any other error |
 | `2` | Login is required |
-| `3` | The issuer is unreachable and no valid cached token remains |
+| `3` | The issuer (or, in agent mode, the control plane) is unreachable and no valid token remains |
+| `4` | The control plane refused the agent's token exchange (`invalid_client`, `unauthorized_client`, `invalid_grant`, ...) |
+
+### Warden tokens (Phase 2)
+
+A worker that pins the control plane's bundle keys (`controlPlane.bundleKeys`)
+also verifies the **Warden tokens** the control plane's token service mints
+(`typ` `wt+jwt`, signed with EdDSA or ES256). It takes everything it checks
+them against from the last signed bundle it verified, and from nothing else: the
+key set (bundle section `tokenJWKS`), the issuer (the signed `tokenIssuer`) and
+the registered agents. It never fetches keys, and it never uses the control
+plane id as the issuer.
+
+| Rule | Reason when it fails |
+|---|---|
+| `typ` is `wt+jwt`; the header and payload parse | `malformed` |
+| `alg` is EdDSA or ES256 and fits the key type | `alg_not_allowed` |
+| `kid` is in the bundle key set | `unknown_kid` |
+| The signature verifies | `bad_signature` |
+| `iss` equals the bundle `tokenIssuer` byte for byte | `wrong_iss` |
+| `aud` contains `warden-worker` (not the IdP audience) | `wrong_aud` |
+| `sub`, `act.sub`, `sid`, `jti` and `cnf.jkt` are present | `missing_claim` |
+| `exp - iat` at most 15 minutes | `ttl_too_long` |
+| `exp` and `nbf` hold within `identity.clockSkewSeconds` | `expired`, or `malformed` for a future `nbf` |
+
+Until the worker has applied a verified bundle, with no pinned keys (the legacy
+wire), with a bundle that carries no `tokenIssuer` (the control plane mints no
+Warden tokens) or no keys, a Warden token is `unverified` with reason
+`jwks_unavailable`. A `tokenIssuer` that equals `identity.issuer` is refused: the
+worker logs one error and verifies no Warden token until they differ. A token key
+removed from the bundle stops verifying for every new request and CONNECT. A CONNECT
+tunnel already established keeps the identity it verified until the token's `exp`
+plus skew (at most about 15 minutes) for a raw tunnel; terminated traffic is re-checked on
+every request (see [agent binding](#agent-binding-of-warden-tokens)).
+
+A valid Warden token attributes the user (`sub`, `email`, `groups`) and, after the
+[agent binding](#agent-binding-of-warden-tokens) checks, the agent. The
+`token_type` label of the verify metric is `warden` for these tokens. How a
+harness gets one is in the [token service guide](token-service.md).
+
+**IdP tokens next to Warden tokens.** The worker routes by the token's `iss`:
+the bundle's `tokenIssuer` goes to the Warden verifier, `identity.issuer` to the
+IdP verifier, anything else is `invalid` with reason `wrong_iss`.
+`identity.acceptDexTokens` decides whether IdP tokens are accepted at all: unset
+means true when `identity.issuer` is set and false otherwise; `false` turns each
+IdP token away as `invalid` with reason `unbound_token` (and then `identity.issuer`
+and `identity.audience` are not needed for `attribute`). An accepted IdP token
+is recorded with `token_type` `idp` and logs at most one deprecation warning an
+hour.
 
 ## Transport
 
@@ -191,8 +252,15 @@ The mode is set per worker in `identity.defaultMode` and per agent in
 | `off` | Default. No token is read or verified. Events, logs and metrics are byte-identical to a worker without identity. |
 | `attribute` | A presented token is verified and the result recorded on every event. Nothing is ever blocked. Needs `identity.issuer` and `identity.audience`. |
 | `challenge` | Like `attribute`, but a CONNECT without a valid token is refused with a `407` that carries a sign-in URL (see [Challenge mode](#challenge-mode-407-with-a-sign-in-url)). Needs `identity.issuer` and `identity.audience`; `identity.signIn.clientID` must be in `identity.allowedAZP` when that list is set. |
+| `require` | Phase 2. A CONNECT needs a valid Warden token bound to the worker's agent, or it is refused with a `407` that has no sign-in (see [Require mode](#require-mode)). An IdP token never satisfies it. |
 
-`require` is rejected at config load until Phase 2.
+`require` is served by a control plane (`agents[].identity` or
+`identity.defaultMode` in the settings it distributes) and enforced by a
+control-plane-managed worker. A standalone worker (no `controlPlane.endpoint`, or
+`--local-only`) has no signed bundle to verify Warden tokens with, so it refuses
+to start with `require` in its local YAML. A worker that does not advertise the
+`identity/require-v1` heartbeat capability ignores the mode and keeps its
+previous identity config.
 
 ### Statuses
 
@@ -220,13 +288,19 @@ strings never become a reason.
 | `wrong_iss` | `iss` differs from `identity.issuer` |
 | `wrong_aud` | `aud` does not contain `identity.audience` |
 | `wrong_azp` | `azp` is not in `identity.allowedAZP` |
-| `unknown_kid` | The key id is not in the issuer's key set |
+| `unknown_kid` | The key id is not in the issuer's key set, as of a JWKS fetch that succeeded |
 | `alg_not_allowed` | `alg` is not RS256 or ES256 |
 | `malformed` | Not a parseable JWT, a missing `sub`/`exp`/`iat`, a future `nbf`, or a header in the wrong form |
 | `too_large` | The token is over 16 KiB |
 | `ttl_too_long` | `exp - iat` is over the maximum token lifetime |
-| `jwks_unavailable` | The issuer's key set could not be fetched (status `unverified`) |
+| `jwks_unavailable` | The issuer's key set could not be fetched (status `unverified`): a cold cache, or a key id missing from the cached set while the latest refetch failed (it may be a rotated key). Cached key ids keep verifying |
 | `wrong_nonce` | Console login only: the nonce does not match. Never seen on proxied traffic |
+| `missing_claim` | A Warden token without `sub`, `act.sub`, `sid`, `jti` or `cnf.jkt` |
+| `unbound_token` | An IdP token on a worker that does not accept them (`identity.acceptDexTokens` false), and in `require` mode every IdP token |
+| `agent_unregistered` | Warden token, but the worker's bound agent is not in the bundle's registered agents (a derived id such as `agent:8080` matches only an identical registry id) |
+| `agent_disabled` | Warden token, but the bound agent is disabled in the current bundle |
+| `agent_mismatch` | Warden token whose `act.sub` is not the worker's bound agent |
+| `cnf_mismatch` | Warden token whose `cnf.jkt` is not one of the bound agent's registered key thumbprints |
 
 ### Challenge mode: 407 with a sign-in URL
 
@@ -391,7 +465,142 @@ dropped, with no poll), and then splices the tunnel, where the agent reads the
 forwarder, receives the whole body including `device_code`, and may implement
 the same poll; any process that can read that `407` can also claim the login.
 The ID token is a bearer token, not bound to the agent: whoever holds it can use
-it until `exp` (at most 1 h). Phase 2's `require` mode closes this.
+it until `exp` (at most 1 h). Phase 2's `require` mode closes this: it admits
+only a Warden token minted for the agent.
+
+### Require mode
+
+In `require` mode the worker admits only a Warden token that verified against the
+current signed bundle **and** bound to the worker's agent (see
+[Agent binding](#agent-binding-of-warden-tokens)). The order on a CONNECT is: the
+`agent_disabled` check (`403`), then identity, then the block list and the policy.
+A CONNECT without such a token is answered with the challenge `407`, **before**
+the block list, the policy and any dial, with no sign-in offer:
+
+```http
+HTTP/1.1 407 Proxy Authentication Required
+Proxy-Authenticate: Basic realm="warden"
+Content-Type: application/json
+Cache-Control: no-store
+Connection: close
+
+{"error": "identity_required", "reason": "unbound_token"}
+```
+
+- `reason` is the verifier's reason (`unbound_token`, `agent_unregistered`,
+  `agent_disabled`, `agent_mismatch`, `cnf_mismatch`, `bad_signature`,
+  `jwks_unavailable`, ...) or, with none, the status: `none`, `expired`,
+  `invalid` or `unverified`. It is never token text or a library error.
+- An IdP (Dex) token is `invalid` with reason `unbound_token` whatever
+  `identity.acceptDexTokens` says: a require-mode worker builds no IdP verifier,
+  so the token is refused by its issuer without being verified or any key being
+  fetched. (A tunnel opened under another mode with an IdP token is refused the
+  same way on its next request once the agent moves to `require`.)
+- It fails closed. Before the first verified bundle, with an empty key set, or
+  with an unregistered agent, no token verifies, so every CONNECT gets the `407`
+  with reason `jwks_unavailable` or `agent_unregistered`. A bundle loaded from the
+  opt-in bundle cache lifts this at restart without the control plane.
+- One deny event with reason `identity_required` is stored per refusal, and
+  `warden.blocked.total{reason}` and `warden.requests.total{decision="deny"}` count it.
+- Terminated traffic (an h1 request, an h2 stream, a WebSocket upgrade, MCP over
+  HTTP) is checked on every request against the current bundle. A request whose
+  identity is not valid gets a JSON `403`: `{"error":"identity_expired"}` past the
+  CONNECT token's `exp` plus skew; `{"error":"identity_conflict"}` when
+  `X-Warden-Identity` names a different `sub` or `act` than the CONNECT identity;
+  `{"error":"identity_required"}` for anything else (a key removed from the
+  bundle, the agent disabled, a request with no CONNECT identity). `Connection:
+  close` is set on h1, and an h2 stream gets the `403` on the stream. A `401` and
+  `WWW-Authenticate` are never written, because after TLS termination a `401`
+  looks like an upstream challenge and starts credential or OAuth discovery in
+  MCP clients; MCP refusals are this plain JSON, with no JSON-RPC body.
+- The block list and the default-deny policy, including identity-scoped entries
+  evaluated with the Warden subject, still run after identity passes.
+- Binding is **agent match plus key liveness**: the token's `act.sub` is the
+  worker's agent, the agent is active and `cnf.jkt` is a registered key. It is
+  **not** proof of possession; a token is a bearer credential.
+- Dex (IdP) tokens are accepted only in `attribute` and `challenge` mode, never
+  in `require`.
+
+#### Closing sessions at token expiry (W-P2-WBND-09)
+
+A Warden token lasts at most 15 minutes, but a raw tunnel (no CA), an upgraded
+WebSocket, an h2 connection or an idle keep-alive is admitted once and no
+per-request check sees it again. In `require` mode the worker therefore
+registers every such session that carries a verified Warden token in the block
+list's session registry with the token's `exp` and `kid`, and closes it:
+
+| Session | Closed |
+|---|---|
+| Idle HTTP/1 keep-alive | at `exp` (one that is mid-request finishes that request first) |
+| h2 connection | `GOAWAY` at `exp`: in-flight streams finish, new ones are refused; the connection is closed at `exp` plus skew at the latest |
+| Raw tunnel, WebSocket | at `exp` plus `identity.clockSkewSeconds` |
+
+Each closure writes one deny event with reason `identity_expired` and counts
+`warden.blocked.total{reason="identity_expired"}` (the stored event carries
+`identity_status=expired`). A connection is cut at its own CONNECT token's `exp`;
+the client's reconnect then uses the newest token. A session that carries its
+Warden token only in `X-Warden-Identity` (a transparent leg) is armed from the
+first request that resolves to one. An HTTP/1 request still streaming at `exp`
+finishes within the skew and is then force-closed.
+
+After each applied bundle the worker also re-checks every armed
+session against the bundle now in force and closes those whose binding no longer
+holds: the signing key left the token JWKS (`unknown_kid`), the agent was
+disabled (`agent_disabled`) or its key removed (`cnf_mismatch`). That closure is
+one `identity_required` deny event whose stored `identity_status` is `invalid`
+and `identity_reason` the check's reason, counted in
+`warden_identity_verify_total`. Sessions opened before the agent moved to
+`require` are swept at the next apply: one holding a Warden token that still
+binds is armed, any other open tunnel, WebSocket or h2 connection is closed.
+While an agent is in attribute mode nothing is armed, so those sessions see no
+change. No v1 header, claim or status changes; this section only adds to
+Contract v1.
+
+## Agent binding of Warden tokens
+
+A worker serves one agent (the id from `--agent-id`, then `central.agentID`, then
+`worker.defaultAgentID`). After a Warden token's signature verifies, the worker
+checks it against the registered agents of the **current** signed bundle, in this
+order, and the first failure is the reason:
+
+1. the worker's agent is not registered: `agent_unregistered`. A derived id is
+   used as it is and matches only a registry entry with the identical id, so name
+   the worker with `--agent-id` or `central.agentID`;
+2. the agent is disabled: `agent_disabled`;
+3. `act.sub` is another agent: `agent_mismatch`;
+4. `cnf.jkt` is not one of the agent's registered key thumbprints: `cnf_mismatch`.
+
+A failure gives status `invalid` and no subject. In `attribute` mode the request
+continues as anonymous under policy, so identity-scoped allow entries deny with
+`identity_required`; the block list still matches the parsed `sub` and `email`,
+because a match can only deny. The check runs on every request, not once per
+connection, against the snapshot applied by the latest long-poll, so removing a
+key or disabling the agent ends the identity of an open CONNECT tunnel on its
+next request, within one long-poll cycle.
+
+The per-request re-check applies to terminated tunnels, on each HTTP/1 or h2
+request. It also requires the signing key to still be in the bundle's token key
+set (`unknown_kid`, for an emergency key removal) and the issuer to still match
+(`wrong_iss`). In `challenge` mode a request that fails the re-check is answered
+`403` `identity_required` with `Connection: close`, not served anonymously.
+
+**Limit.** A raw tunnel (a worker without a CA) and an upgraded WebSocket are
+bound at CONNECT or upgrade only and run until the token's `exp`. Closing those
+sessions when binding stops holding belongs to `require` mode session closing
+(W-P2-WBND-03 and W-P2-WBND-09).
+
+**What this proves.** The token was minted for this worker's agent, and the key
+it was minted for is still registered. The Warden token is a **bearer token bound
+to the agent by `act.sub` and `cnf.jkt`**, not proof of possession: the worker
+cannot tell who presents it, so anyone holding an unexpired token can use it from
+that agent's listener until it expires. Replay of a stolen token is a documented
+Phase 2 non-goal; proof of possession (agent mTLS, `cnf` `x5t#S256`) is a later
+step. Real upstream credentials still never reach the agent. Binding is one agent
+per worker; a second agent needs its own worker. Limit the exposure with the short
+lifetime and by keeping the token out of the agent (the sidecar holds it), and cut
+a leaked token by blocking the user, disabling the agent or an **emergency** token-key
+rotation (`warden control-plane keys rotate --purpose token --emergency`; a normal rotation keeps the old key
+valid for the overlap) (see [revoking access](token-service.md#revoking-access)).
 
 ## Observability
 
@@ -406,11 +615,18 @@ Event fields (on `/dashboard/api/traffic` and in the fleet view):
 | `user_groups` | Status `valid` |
 | `user_groups_truncated` | Status `valid` and groups were dropped for count or size |
 | `user_sid` | Status `valid` and the token has `sid` |
+| `user_act` | Status `valid` and the token is a Warden token: the agent it was minted for (`act.sub`) |
+| `identity_token_type` | Status `valid` and the verifier says which kind: `warden` or `idp` |
 
 The unverified `sub` or `email` of an expired or invalid token is never stored.
 
 Filter by user with `/dashboard/api/traffic?user=<sub or email>` (an exact
-`sub` match or a case-insensitive email match).
+`sub` match or a case-insensitive email match). Filter by agent with
+`/dashboard/api/traffic?act=<agent id>` (an exact `user_act` match; events
+without a Warden token never match). The control plane's fleet store keeps
+`user_act` and `identity_token_type` in the same-named columns; an older fleet
+database gains them, empty, the first time it is opened, and events from older
+workers store empty values.
 
 The worker counts every verification in the metric
 `warden.identity.verify.total{result,reason,token_type}`, exported to Prometheus
@@ -527,8 +743,94 @@ does not enforce identity, such a request goes through unattributed. Its exit co
 command's, or 128+N when signal N killed it.
 
 **Same-uid limit.** A command that runs as the same user can still read the
-identity cache file (it is 0600 to that user). Run the command as a separate
-uid; Phase 2 adds `--run-as`.
+identity cache file and, with `--agent-id`, the agent key (both are 0600 to
+that user). Without `--run-as`, `exec` protects against leaks through the
+environment, argv and logs and against stale tokens, but not against a hostile
+command running as the same uid. Use `--run-as` (below) or run the command as
+another user.
+
+#### Phase 2 addendum: `--agent-id` and `--run-as`
+
+```sh
+warden identity exec --agent-id claude-code --worker 127.0.0.1:8080 --ca certs/proxy-ca.crt -- my-agent
+sudo warden identity exec --agent-id claude-code --run-as 61001:61001 --worker 127.0.0.1:8080 -- my-agent
+```
+
+For an agent behind a worker in `require` mode, `exec --agent-id ID` sends the
+agent's Warden token (see [Warden tokens](#warden-tokens-phase-2)) instead of
+the user's ID token. It takes `--token-endpoint`, `--agent-key-file`,
+`--cp-ca` and `--subject-token-file` (or their `WARDEN_IDENTITY_*` variables)
+exactly as `token` does, and uses the same forwarder as `forward`: a token
+renewal or a worker 407 drains tunnels opened with the old token, and a
+CONNECT with no usable token gets a 503 with its reason in
+`X-Warden-Forwarder-Reason`. Nothing else changes: the per-run loopback
+credential, the child environment rules, signal forwarding and the exit codes
+are the same, and no header or claim of Contract v1 changes. The Warden token,
+the user's token and the key path never enter the command's environment, argv
+or files.
+
+- The first exchange happens before the command starts. If the control plane
+  refuses it (`invalid_client` and the other denials), `exec` exits 4 and the
+  command never runs. Without a login, `exec` runs the device-code login on a
+  terminal and otherwise exits 2, as in Phase 1. A control plane that is
+  unreachable or unavailable at start exits 3; once running, `exec` keeps
+  retrying like `forward`.
+- `--agent-id` cannot be combined with `--challenge`, `--challenge-in-tunnel`
+  or `--signin-notify`: those ask the user to sign in for their own token.
+- `--run-as UID:GID` (Linux only, `exec` must run as root) starts the command
+  with exactly that numeric uid and gid and no supplementary groups, so a
+  hostile command cannot read the agent key or the login cache. Use a
+  dedicated uid and gid that nothing else runs as, not 65534 (`nobody`): other
+  processes under the same uid could read the command's `/proc/<pid>/environ`
+  and take the forwarder credential. The key, the subject token file and the
+  cache directory must be owned by a different uid than the one in `--run-as`
+  (for example root under `sudo`) and unreadable by that gid and by others;
+  `exec` checks this before it starts anything and refuses otherwise. It also
+  refuses `--run-as` when it is not root, on other platforms, and for a uid
+  or gid of 0; a failed credential change stops the command from starting, and
+  the command is killed if `exec` dies. Because HOME, USER, LOGNAME and SHELL
+  describe the parent, a `--run-as` command does not inherit them; pass one with
+  `--env NAME` if the command needs it.
+- **Shared terminal.** A command that shares your terminal can inject keystrokes
+  into it with the `TIOCSTI` ioctl, whatever its uid. Use Linux 6.2 or later
+  with `sysctl dev.tty.legacy_tiocsti=0`, or run `sudo` with `use_pty`, or run
+  `exec` without a terminal.
+
+### warden identity forward
+
+`exec` serves one child. For a sidecar container that serves an agent in another
+container, `warden identity forward` runs the same loopback forwarder as a
+long-lived command. The agent sets `HTTPS_PROXY=http://sidecar:3128` once; the
+token is added to each CONNECT in the sidecar and never enters the agent's
+container.
+
+```sh
+warden identity forward --listen 0.0.0.0:3128 --worker warden:8080 --health-listen 127.0.0.1:3129 --client-credential-env FORWARD_CREDENTIAL
+warden identity forward --agent-id claude-code --listen 0.0.0.0:3128 --worker warden:8080 --client-credential-env FORWARD_CREDENTIAL
+```
+
+Both examples listen on a non-loopback address, so both set `--client-credential-env`: without it any peer that can reach the port can use the token, and with it the agent must present that secret as the proxy password (`HTTPS_PROXY=http://wx:$FORWARD_CREDENTIAL@sidecar:3128`).
+
+- It accepts CONNECT only (any other method gets 405) and dials only `--worker`,
+  never the CONNECT target. A non-loopback `--listen` logs one startup warning.
+- Without `--agent-id` it sends the user's ID token from the login cache. With
+  `--agent-id` (and `--token-endpoint`, `--agent-key-file`, `--subject-token-file`
+  as for `token`) it sends the agent's Warden token and renews it before it
+  expires. A worker 407 forces one renewal and one retry before the 407 is passed on.
+- With no usable token a CONNECT gets `503` and the reason in
+  `X-Warden-Forwarder-Reason`: `login_required`, `cp_unreachable` or
+  `exchange_denied` (`tunnel_limit` above `--max-tunnels`, default 512). The
+  forwarder keeps retrying and never exits for these reasons, including during
+  the minutes after a control plane creates its first token key.
+- After a rotation, a tunnel opened with the old token is closed once it has
+  carried no bytes for 2 s, and every tunnel is closed at its token's `exp`.
+- `--client-credential-env NAME` requires clients to send that variable's value as
+  the proxy password (user `wx`); it is never forwarded.
+- `--health-listen` serves `GET /healthz`: `{"state": "valid|expiring|login_required|cp_unreachable|exchange_denied", "exp": "..."}`,
+  status 200 while a token is held and 503 otherwise. It never shows a token.
+- Logs are structured events on stderr (`tunnel_open`, `tunnel_close`,
+  `token_rotated`, and each change of token state once); they hold a token
+  fingerprint, never a token.
 
 ## Client compatibility
 
@@ -574,8 +876,8 @@ Phase 2 adds agent-bound tokens, mTLS workers and the `require` mode. It adds to
 Contract v1 and changes none of it: the `Proxy-Authorization` and
 `X-Warden-Identity` headers, the `session` user name, the claims above and the
 status and reason values keep their v1 meaning. `require` reuses the `407` body
-and the three `identity_*` deny reasons of `challenge` mode. v1 Dex tokens must stay accepted
-for workers that already set `identity.issuer`, so a harness that follows this
-page keeps attributing after the upgrade. The planned `require` mode turns
-`conflict` and the non-valid statuses into a 403, and only for agents an
-operator moves to that mode.
+(without `sign_in`) and the three `identity_*` deny reasons of `challenge` mode.
+v1 Dex tokens must stay accepted for workers that already set `identity.issuer`,
+so a harness that follows this page keeps attributing after the upgrade. `require`
+turns `conflict` and the non-valid statuses into a 403 on terminated traffic, and
+only for agents an operator moves to that mode.

@@ -28,14 +28,17 @@ import (
 // Signed bundles (W-P2-SBND-02). With --bundles=offer or require the control
 // plane signs what it serves on GET /policy with its active purpose=bundle
 // key and serves the envelope to workers that ask for it with the bundle
-// Accept header. Everything here is behind the flag: with --bundles=off
-// (the default) no publisher exists and /policy is the code it always was.
+// Accept header. With --bundles=off (the explicit, temporary opt-out) no
+// publisher exists and /policy is the code it always was. Since the Phase 2
+// gate flip (W-P2-SBND-07, #719) an unset --bundles means require when the
+// prerequisites are there; see resolveBundles.
 //
 // The invariant the design rests on: a seq never covers two different
 // contents. seq is the newest policy_publish_log row; every input of the
 // signed content either moves the served policy ETag (policy, block list,
 // credential, ... each append a row) or is tracked here and appends a row of
-// its own first (the token JWKS, reason token_jwks). The publisher signs only
+// its own first (the token JWKS, reason token_jwks; the token issuer, reason
+// token_issuer). The publisher signs only
 // when the newest row is the one that describes the content it is about to
 // sign, and it refuses to re-sign a seq with different content.
 
@@ -44,6 +47,10 @@ const (
 	BundlesOff     = "off"
 	BundlesOffer   = "offer"
 	BundlesRequire = "require"
+	// BundlesDefault is the --bundles value when the flag is not given (the
+	// empty string). It resolves to require when the prerequisites are present
+	// and to the legacy wire, with a startup WARN, when they are not.
+	BundlesDefault = ""
 )
 
 const (
@@ -63,8 +70,9 @@ const (
 	// bundleRetryAfter is the Retry-After of a 503 for a missing envelope.
 	bundleRetryAfter = 5
 	// stateCPID and stateJWKSSHA are the bundle_state names.
-	stateCPID    = "cp_id"
-	stateJWKSSHA = "jwks_sha256"
+	stateCPID      = "cp_id"
+	stateJWKSSHA   = "jwks_sha256"
+	stateIssuerSHA = "token_issuer_sha256"
 	// stateSigned is "<seq>:<content fingerprint>" of the newest envelope
 	// signed. It outlives a restart, so a seq can never be signed twice with
 	// different content, whatever changed while the control plane was down.
@@ -78,8 +86,14 @@ const (
 // BundlesConfig is the --bundles, --bundle-max-age and --bundle-seq-floor
 // settings, resolved and validated by Run.
 type BundlesConfig struct {
-	// Mode is off (the zero value counts as off), offer or require.
+	// Mode is off, offer or require, as resolved: an unset --bundles resolves
+	// to require, or to off when a prerequisite is missing (DefaultMissing).
 	Mode string
+	// Defaulted is true when --bundles was not given and Mode is the default.
+	Defaulted bool
+	// DefaultMissing names the prerequisites an unset --bundles found missing,
+	// which is why Mode fell back to off. Empty unless Defaulted and off.
+	DefaultMissing []string
 	// MaxAge is how long a signed bundle is valid; 0 = DefaultBundleMaxAge.
 	MaxAge time.Duration
 	// SeqFloor appends one restore row at this seq at startup when the
@@ -97,14 +111,39 @@ func (c BundlesConfig) maxAge() time.Duration {
 	return c.MaxAge
 }
 
+// bundlePrereqs lists the startup pieces signed bundles need and the config
+// lacks: a state dir, the versioned policy store and the signing keys.
+func bundlePrereqs(stateDir, policyStore string, kc config.KeysConfig) []string {
+	var missing []string
+	if stateDir == "" {
+		missing = append(missing, "--state-dir")
+	}
+	if policyStore != PolicyStoreVersioned {
+		missing = append(missing, "--policy-store=versioned")
+	}
+	if !kc.Enabled {
+		missing = append(missing, "keys.enabled: true in --config (the purpose=bundle signing key)")
+	}
+	return missing
+}
+
 // resolveBundles validates the bundle flags against the rest of the startup
 // configuration. Offer and require need a state dir, the versioned policy
 // store and the signing keys; an error names every piece that is missing.
+//
+// An unset --bundles (BundlesDefault) is require when those pieces are there.
+// When one is missing it is the legacy wire, and DefaultMissing names what is
+// missing so Run can log it: the default never stops a control plane that
+// could not serve bundles anyway, while an explicit offer or require does.
 func resolveBundles(p Params, stateDir, policyStore string, kc config.KeysConfig) (BundlesConfig, error) {
 	cfg := BundlesConfig{Mode: p.Bundles, MaxAge: p.BundleMaxAge, SeqFloor: p.BundleSeqFloor}
 	switch cfg.Mode {
-	case "":
-		cfg.Mode = BundlesOff
+	case BundlesDefault:
+		cfg.Defaulted = true
+		cfg.Mode = BundlesRequire
+		if cfg.DefaultMissing = bundlePrereqs(stateDir, policyStore, kc); len(cfg.DefaultMissing) > 0 {
+			cfg.Mode = BundlesOff
+		}
 	case BundlesOff, BundlesOffer, BundlesRequire:
 	default:
 		return BundlesConfig{}, fmt.Errorf("control-plane: --bundles must be off, offer or require, not %q", cfg.Mode)
@@ -118,20 +157,30 @@ func resolveBundles(p Params, stateDir, policyStore string, kc config.KeysConfig
 	if !cfg.On() {
 		return cfg, nil
 	}
-	var missing []string
-	if stateDir == "" {
-		missing = append(missing, "--state-dir")
-	}
-	if policyStore != PolicyStoreVersioned {
-		missing = append(missing, "--policy-store=versioned")
-	}
-	if !kc.Enabled {
-		missing = append(missing, "keys.enabled: true in --config (the purpose=bundle signing key)")
-	}
-	if len(missing) > 0 {
+	if missing := bundlePrereqs(stateDir, policyStore, kc); len(missing) > 0 {
 		return BundlesConfig{}, fmt.Errorf("control-plane: --bundles=%s needs %s", cfg.Mode, strings.Join(missing, ", "))
 	}
 	return cfg, nil
+}
+
+// logBundlesMode states at startup which way --bundles resolved, once: the
+// opt-out and the fallback are WARN, because both leave workers taking policy
+// they cannot verify.
+func logBundlesMode(logger *slog.Logger, c BundlesConfig) {
+	switch {
+	case c.Defaulted && len(c.DefaultMissing) > 0:
+		logger.Warn("control plane: signed bundles are off: --bundles is not set and its default (require) needs "+strings.Join(c.DefaultMissing, ", ")+"; serving the legacy unsigned policy",
+			"missing", c.DefaultMissing)
+	case c.Defaulted:
+		logger.Info("control plane: signed bundles required by default (--bundles=require); set --bundles=offer or --bundles=off to opt out",
+			"mode", c.Mode)
+	case c.Mode == BundlesOff:
+		logger.Warn("control plane: --bundles=off serves the legacy unsigned policy; this is a temporary opt-out, remove the flag to require signed bundles",
+			"mode", c.Mode)
+	case c.Mode == BundlesOffer:
+		logger.Warn("control plane: --bundles=offer serves the legacy unsigned policy to workers that do not pin bundle keys; use it only while pinning the fleet, then remove the flag to require signed bundles",
+			"mode", c.Mode)
+	}
 }
 
 // BundleMigrations is the cpstate migration of the bundle publisher's two
@@ -191,10 +240,13 @@ func (s bundleState) cpID(ctx context.Context) (string, error) {
 	return id, nil
 }
 
-// bundleKeys is the slice of *keys.KeySet the publisher needs: the active
-// signer and the public JWKS of a purpose, and change notifications.
+// bundleKeys is the slice of *keys.KeySet the publisher needs: the signers
+// and the public JWKS of a purpose, and change notifications. Signers is the
+// active key first, then the staged next key during a staged bundle rotation:
+// every envelope carries a signature of each, so a worker that pins either
+// verifies it.
 type bundleKeys interface {
-	Active(purpose string) (keys.Signer, error)
+	Signers(purpose string) ([]keys.Signer, error)
 	JWKS(purpose string) keys.JWKS
 	Subscribe(fn func(purpose string)) (unsubscribe func())
 }
@@ -205,12 +257,15 @@ type signedBundle struct {
 	env       []byte
 	etag      string // 16 hex of the envelope bytes
 	seq       int64
-	kid       string
+	kids      []string // the signing kids: the active key, then any staged one
 	issuedAt  time.Time
 	expiresAt time.Time
 	// fp fingerprints the signed content (policy, credential, sections), so a
 	// re-sign of the same seq can prove it signs the same content.
 	fp string
+	// tokenKIDs are the kids of the tokenJWKS section this envelope signs: the
+	// keys a worker holds once it applies it. The token mint guard reads them.
+	tokenKIDs map[string]struct{}
 }
 
 // bundlePublisher builds and signs the envelope. Its mutable state is guarded
@@ -222,10 +277,15 @@ type bundlePublisher struct {
 	now    func() time.Time
 	logger *slog.Logger
 
-	active    bool
-	cpID      string
-	jwksSHA   string // hash of the token JWKS the publish log last covered
-	jwksKnown bool
+	active bool
+	cpID   string
+	// jwks and issuer are the signed inputs that move no policy ETag, each
+	// tracked so a change appends a row of its own before signing.
+	jwks   trackedInput
+	issuer trackedInput
+	// tokenIssuer is tokenService.issuer, signed as the payload's tokenIssuer
+	// ("" = the control plane mints no tokens). Guarded by refreshMu.
+	tokenIssuer string
 	// signedSeq and signedFP are the persisted newest signed (seq, content
 	// fingerprint); signedSeq 0 = nothing signed yet.
 	signedSeq int64
@@ -239,7 +299,87 @@ type bundlePublisher struct {
 }
 
 func newBundlePublisher(cfg BundlesConfig, k bundleKeys, db *sql.DB, now func() time.Time, logger *slog.Logger) *bundlePublisher {
-	return &bundlePublisher{cfg: cfg, keys: k, state: bundleState{db: db}, now: now, logger: logger}
+	return &bundlePublisher{
+		cfg: cfg, keys: k, state: bundleState{db: db}, now: now, logger: logger,
+		jwks:   trackedInput{stateKey: stateJWKSSHA, reason: publishReasonTokenJWKS},
+		issuer: trackedInput{stateKey: stateIssuerSHA, reason: publishReasonTokenIssuer, zeroBaseline: true},
+	}
+}
+
+// trackedInput is one signed input that moves no policy ETag: the hash the
+// publish log last covered, persisted so a restart notices a change made while
+// the control plane was down.
+type trackedInput struct {
+	stateKey, reason string
+	// sha is the covered hash; known is false until one was stored.
+	sha   string
+	known bool
+	// zeroBaseline treats a never-stored hash as the hash of "nothing": the
+	// first sight of a non-empty value then counts as a change. It is how a
+	// control plane upgraded to a build that signs this input gets the row
+	// that keeps one seq from covering two contents.
+	zeroBaseline bool
+}
+
+// load reads the stored hash.
+func (in *trackedInput) load(ctx context.Context, st bundleState) error {
+	sha, ok, err := st.get(ctx, in.stateKey)
+	if err != nil {
+		return err
+	}
+	if ok {
+		in.sha, in.known = sha, true
+	}
+	return nil
+}
+
+// hashOf is the covered form of a plain string value ("" stays "").
+func hashOf(v string) string {
+	if v == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(v))
+	return hex.EncodeToString(sum[:])
+}
+
+// cover makes sure the publish log describes the current value cur: a change
+// appends a marker row at head (reason in.reason), then the hash is stored. Row
+// first, then the stored hash: a crash in between costs one extra row at the
+// next start, never an uncovered change. A failed put is a sign failure:
+// signing on would let a restart forget the change this row covered. The
+// caller holds refreshMu.
+func (ps *policyServer) cover(ctx context.Context, in *trackedInput, cur string, head int64, etag string) error {
+	b := ps.bundles
+	if (in.known || in.zeroBaseline) && cur != in.sha {
+		if _, err := ps.versions.AppendMarker(ctx, head, etag, in.reason, publishActorBundle); err != nil {
+			return fmt.Errorf("append %s row: %w", in.reason, err)
+		}
+		b.logger.Info("policy publish logged", "version", head, "etag", etag, "reason", in.reason)
+	}
+	if !in.known || cur != in.sha {
+		if err := b.state.put(ctx, in.stateKey, cur); err != nil {
+			return err
+		}
+		in.sha, in.known = cur, true
+	}
+	return nil
+}
+
+// setTokenIssuer installs tokenService.issuer as the payload's tokenIssuer and
+// signs again when the publisher is already running. The issuer is a public
+// URL; it is the only token-service value that enters a bundle.
+func (ps *policyServer) setTokenIssuer(iss string) {
+	if ps.bundles == nil {
+		return
+	}
+	ps.refreshMu.Lock()
+	changed := ps.bundles.tokenIssuer != iss
+	ps.bundles.tokenIssuer = iss
+	active := ps.bundles.active
+	ps.refreshMu.Unlock()
+	if changed && active {
+		ps.refresh(false)
+	}
 }
 
 // BundlesOn reports whether this server serves signed bundles.
@@ -265,7 +405,7 @@ func (ps *policyServer) startBundles(ctx context.Context) error {
 	if ps.versions == nil {
 		return errors.New("control-plane: --bundles needs --policy-store=versioned")
 	}
-	if _, err := b.keys.Active(keys.PurposeBundle); err != nil {
+	if _, err := b.keys.Signers(keys.PurposeBundle); err != nil {
 		return fmt.Errorf("control-plane: --bundles=%s needs a loadable purpose=bundle signing key: %w", b.cfg.Mode, err)
 	}
 	id, err := b.state.cpID(ctx)
@@ -273,10 +413,10 @@ func (ps *policyServer) startBundles(ctx context.Context) error {
 		return fmt.Errorf("control-plane: %w", err)
 	}
 	b.cpID = id
-	if sha, ok, err := b.state.get(ctx, stateJWKSSHA); err != nil {
-		return fmt.Errorf("control-plane: %w", err)
-	} else if ok {
-		b.jwksSHA, b.jwksKnown = sha, true
+	for _, in := range []*trackedInput{&b.jwks, &b.issuer} {
+		if err := in.load(ctx, b.state); err != nil {
+			return fmt.Errorf("control-plane: %w", err)
+		}
 	}
 	if v, ok, err := b.state.get(ctx, stateSigned); err != nil {
 		return fmt.Errorf("control-plane: %w", err)
@@ -369,39 +509,35 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 	if b == nil || !b.active || head == 0 {
 		return
 	}
-	signer, err := b.keys.Active(keys.PurposeBundle)
+	signers, err := b.keys.Signers(keys.PurposeBundle)
 	if err != nil {
 		b.fail(ctx, 0, "", err)
 		return
 	}
-	jwks, jsha, err := tokenJWKSSection(b.keys)
+	kids := make([]string, len(signers))
+	for i, sg := range signers {
+		kids[i] = sg.KID()
+	}
+	kid := signers[0].KID() // the active key, for failure lines
+	jwks, jsha, tokenKIDs, err := tokenJWKSSection(b.keys)
 	if err != nil {
-		b.fail(ctx, 0, signer.KID(), err)
+		b.fail(ctx, 0, kid, err)
 		return
 	}
-	// The JWKS is signed content that moves no policy ETag, so a change takes
-	// a row of its own first; otherwise one seq would cover two JWKS.
-	if b.jwksKnown && jsha != b.jwksSHA {
-		if _, err := ps.versions.AppendMarker(ctx, head, etag, publishReasonTokenJWKS, publishActorBundle); err != nil {
-			b.fail(ctx, 0, signer.KID(), fmt.Errorf("append token_jwks row: %w", err))
-			return
-		}
-		b.logger.Info("policy publish logged", "version", head, "etag", etag, "reason", publishReasonTokenJWKS)
+	// The JWKS and the token issuer are signed content that moves no policy
+	// ETag, so a change takes a row of its own first; otherwise one seq would
+	// cover two contents.
+	if err := ps.cover(ctx, &b.jwks, jsha, head, etag); err != nil {
+		b.fail(ctx, 0, kid, err)
+		return
 	}
-	if !b.jwksKnown || jsha != b.jwksSHA {
-		// Row first, then the stored hash: a crash in between costs one extra
-		// row at the next start, never an uncovered change.
-		// A failed put is a sign failure: signing on would let a restart
-		// forget the change this row covered.
-		if err := b.state.put(ctx, stateJWKSSHA, jsha); err != nil {
-			b.fail(ctx, 0, signer.KID(), err)
-			return
-		}
-		b.jwksSHA, b.jwksKnown = jsha, true
+	if err := ps.cover(ctx, &b.issuer, hashOf(b.tokenIssuer), head, etag); err != nil {
+		b.fail(ctx, 0, kid, err)
+		return
 	}
 	last, ok, err := ps.versions.LatestPublish(ctx)
 	if err != nil {
-		b.fail(ctx, 0, signer.KID(), err)
+		b.fail(ctx, 0, kid, err)
 		return
 	}
 	if !ok || last.Version != head || last.ETag != etag {
@@ -413,10 +549,10 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 	}
 	policy, creds, err := bundlePolicy(wire)
 	if err != nil {
-		b.fail(ctx, last.Seq, signer.KID(), err)
+		b.fail(ctx, last.Seq, kid, err)
 		return
 	}
-	fp := contentFingerprint(policy, creds, jwks)
+	fp := contentFingerprint(policy, creds, jwks, b.tokenIssuer)
 	cur := b.cur
 	switch {
 	case b.signedSeq > last.Seq:
@@ -444,6 +580,7 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		ExpiresAt:     now.Add(b.cfg.maxAge()),
 		CPID:          b.cpID,
 		Policy:        policy,
+		TokenIssuer:   b.tokenIssuer,
 	}
 	// One section today. The ticket that adds a second one (for example the
 	// registry section, W-P4-MREG-05) should turn jwks into a section list, so
@@ -451,32 +588,32 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 	if jwks != nil {
 		bd.Sections = map[string]json.RawMessage{sectionTokenJWKS: jwks}
 	}
-	env, err := bundle.Sign(ctx, bd, creds, signer)
+	env, err := bundle.Sign(ctx, bd, creds, signers...)
 	if err != nil {
 		if errors.Is(err, bundle.ErrTooLarge) {
 			b.logger.Error("bundle too large; not published", "seq", last.Seq, "limit", bundle.MaxEnvelopeBytes)
 			b.degraded.Store(true)
 			return
 		}
-		b.fail(ctx, last.Seq, signer.KID(), err)
+		b.fail(ctx, last.Seq, kid, err)
 		return
 	}
 	sum := sha256.Sum256(env)
 	sb := &signedBundle{
-		env: env, etag: hex.EncodeToString(sum[:8]), seq: last.Seq, kid: signer.KID(),
-		issuedAt: now, expiresAt: bd.ExpiresAt, fp: fp,
+		env: env, etag: hex.EncodeToString(sum[:8]), seq: last.Seq, kids: kids,
+		issuedAt: now, expiresAt: bd.ExpiresAt, fp: fp, tokenKIDs: tokenKIDs,
 	}
 	// Persist before publishing: an envelope nobody can prove was recorded is
 	// never served.
 	if err := b.state.put(ctx, stateSigned, strconv.FormatInt(sb.seq, 10)+":"+fp); err != nil {
-		b.fail(ctx, last.Seq, signer.KID(), err)
+		b.fail(ctx, last.Seq, kid, err)
 		return
 	}
 	b.signedSeq, b.signedFP = sb.seq, fp
 	b.cur = sb
 	b.degraded.Store(false)
 	ps.watch.setBundle(sb)
-	b.logger.Info("bundle signed", "seq", sb.seq, "kids", []string{sb.kid}, "digest", payloadDigest(env), "bytes", len(env))
+	b.logger.Info("bundle signed", "seq", sb.seq, "kids", sb.kids, "digest", payloadDigest(env), "bytes", len(env))
 }
 
 // fail records a signing failure: the last envelope keeps being served, the
@@ -488,18 +625,40 @@ func (b *bundlePublisher) fail(_ context.Context, seq int64, kid string, err err
 }
 
 // tokenJWKSSection returns the token JWKS as the tokenJWKS section (nil when
-// no token key is published) and the SHA-256 of it, hex.
-func tokenJWKSSection(k bundleKeys) (json.RawMessage, string, error) {
+// no token key is published), the SHA-256 of it, hex, and the set of its kids.
+func tokenJWKSSection(k bundleKeys) (json.RawMessage, string, map[string]struct{}, error) {
 	set := k.JWKS(keys.PurposeToken)
 	if len(set.Keys) == 0 {
-		return nil, "", nil
+		return nil, "", nil, nil
 	}
 	raw, err := json.Marshal(set)
 	if err != nil {
-		return nil, "", fmt.Errorf("encode token jwks: %w", err)
+		return nil, "", nil, fmt.Errorf("encode token jwks: %w", err)
+	}
+	kids := make(map[string]struct{}, len(set.Keys))
+	for _, j := range set.Keys {
+		kids[j.Kid] = struct{}{}
 	}
 	sum := sha256.Sum256(raw)
-	return raw, hex.EncodeToString(sum[:]), nil
+	return raw, hex.EncodeToString(sum[:]), kids, nil
+}
+
+// servesBundleTokenKID is the bundle half of the token mint guard. With bundles
+// off it is true: workers do not take token keys from a bundle, so there is
+// nothing more to wait for. With bundles on it is true only when the envelope
+// served now (the last one signed, which stays served while the publisher is
+// degraded) carries kid in its tokenJWKS section, so a key is never used to
+// mint before a pinned worker can hold it. No envelope yet is false.
+func (ps *policyServer) servesBundleTokenKID(kid string) bool {
+	if ps.bundles == nil {
+		return true
+	}
+	sb, _ := ps.watch.bundleSnapshot()
+	if sb == nil {
+		return false
+	}
+	_, ok := sb.tokenKIDs[kid]
+	return ok
 }
 
 // bundlePolicy splits the served wire into the signed policy bytes and the
@@ -527,7 +686,7 @@ func bundlePolicy(wire policyWire) (json.RawMessage, *bundle.Credentials, error)
 // contentFingerprint is a hash over everything a seq's signed content is made
 // of. The credential goes in by its own hash, so the fingerprint is safe to
 // keep in memory.
-func contentFingerprint(policy json.RawMessage, creds *bundle.Credentials, jwks json.RawMessage) string {
+func contentFingerprint(policy json.RawMessage, creds *bundle.Credentials, jwks json.RawMessage, tokenIssuer string) string {
 	h := sha256.New()
 	for _, part := range [][]byte{policy, jwks} {
 		var n [8]byte
@@ -538,6 +697,11 @@ func contentFingerprint(policy json.RawMessage, creds *bundle.Credentials, jwks 
 	if creds != nil {
 		cs := sha256.Sum256([]byte(creds.AccessKeyID + "\x00" + creds.SecretAccessKey))
 		_, _ = h.Write(cs[:])
+	}
+	if tokenIssuer != "" {
+		// Only when set, so a control plane without a token service keeps the
+		// fingerprint it persisted before the issuer was signed.
+		_, _ = h.Write([]byte("tokenIssuer\x00" + tokenIssuer))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

@@ -716,6 +716,9 @@ func TestAuthzScopeClassification(t *testing.T) {
 		"PUT /dashboard/api/agents/{id}":              "agents:write",
 		"POST /dashboard/api/agents/{id}/disable":     "agents:write",
 		"POST /dashboard/api/agents/{id}/enable":      "agents:write",
+		// Enrollment tokens (W-P2-WCA-08): create stays none, it mints a credential.
+		"GET /dashboard/api/worker-enrollments":         "workers:admin",
+		"DELETE /dashboard/api/worker-enrollments/{id}": "workers:admin",
 		// Change drafts (W-P2-APPR-04): approve and reject stay none, so no
 		// API key can be the second person.
 		"GET /dashboard/api/changes":                "policy:read",

@@ -13,6 +13,7 @@ import (
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/identity/adapters/oidc"
 	"github.com/ethosagent/warden/internal/keys"
@@ -50,11 +51,35 @@ func resolveTokenService(logger *slog.Logger, configPath, stateDir string, id co
 		return config.TokenServiceConfig{}, errors.New("control-plane: tokenService.enabled needs a served identity block with issuer and audience (subject tokens are verified against the same IdP as workers)")
 	case !kc.Enabled:
 		return config.TokenServiceConfig{}, errors.New("control-plane: tokenService.enabled needs keys.enabled: true (issued tokens are signed with the token key)")
+	case sameIssuer(tc.Issuer, id.Issuer):
+		// A shared issuer would let a worker accept an IdP-issued token where a
+		// Warden token is expected (and the other way round): the two token
+		// kinds are told apart by their issuer.
+		return config.TokenServiceConfig{}, fmt.Errorf("control-plane: tokenService.issuer %q must differ from identity.issuer %q (Warden tokens and IdP tokens are told apart by their issuer)", tc.Issuer, id.Issuer)
 	}
 	if need := tc.TTL + tokenOverlapSlack; kc.Token.Overlap < need {
 		return config.TokenServiceConfig{}, fmt.Errorf("control-plane: keys.token.overlap %s is below tokenService.ttl + 2m (%s): a retired key must keep verifying until the last token it signed expires", kc.Token.Overlap, need)
 	}
 	return tc, nil
+}
+
+// checkIssuerCollision refuses identity settings whose issuer equals the issuer
+// this control plane mints Warden tokens with. resolveTokenService checks the
+// file at startup; this covers identity.issuer changing at runtime (settings
+// writes, versioned publishes, rollbacks, applied drafts). It is a no-op while
+// the token service is off.
+func (s *Server) checkIssuerCollision(id *config.IdentitySettings) error {
+	if id == nil || s.cfg.TokenIssuer == "" || !sameIssuer(s.cfg.TokenIssuer, id.Issuer) {
+		return nil
+	}
+	return &dashboard.InvalidPolicyError{Err: fmt.Errorf("identity.issuer %q must differ from tokenService.issuer %q (Warden tokens and IdP tokens are told apart by their issuer)", id.Issuer, s.cfg.TokenIssuer)}
+}
+
+// sameIssuer reports whether two issuer URLs name the same issuer, ignoring a
+// trailing slash and ASCII case (scheme and host are case-insensitive, and an
+// operator typing one with a slash must not slip past the collision check).
+func sameIssuer(a, b string) bool {
+	return strings.EqualFold(strings.TrimRight(strings.TrimSpace(a), "/"), strings.TrimRight(strings.TrimSpace(b), "/"))
 }
 
 // tokenKeyPublishWindow is how long a token key must have been published
@@ -72,13 +97,18 @@ const tokenKeyPublishWindow = maxLongPollWait + time.Minute
 // window comes from the persisted key metadata, so a restart does not reset it.
 //
 // served is the second hook: the kid must also be in the JWKS this server
-// serves. TODO(#96): also require the kid to be in the policy server's
-// last-served bundle tokenJWKS.
+// serves. bundled is the third: with signed bundles on, the kid must also be
+// in the tokenJWKS of the bundle served now (the last one signed), because a
+// pinned worker takes its token keys only from there. It stays false while the
+// bundle publisher is degraded and has not signed the key in, so a key that is
+// in the JWKS but in no served bundle is never used. nil skips it; with bundles
+// off the server's hook answers true.
 type servedSigners struct {
 	inner   tokensvc.Signers
 	records func(purpose string) []keys.Record
 	now     func() time.Time
 	served  func(kid string) bool
+	bundled func(kid string) bool
 }
 
 // Active implements tokensvc.Signers.
@@ -91,6 +121,9 @@ func (g servedSigners) Active(purpose string) (keys.Signer, error) {
 		return sg, nil
 	}
 	if g.served != nil && !g.served(sg.KID()) {
+		return nil, keys.ErrNoActiveKey
+	}
+	if g.bundled != nil && !g.bundled(sg.KID()) {
 		return nil, keys.ErrNoActiveKey
 	}
 	for _, r := range g.records(purpose) {
@@ -112,11 +145,20 @@ func (s *Server) servesTokenKID(kid string) bool {
 	return j != nil && j.serves(kid)
 }
 
+// servesBundleTokenKID reports whether the signed bundle served now carries kid
+// in its token JWKS; true when bundles are off (see policyServer).
+func (s *Server) servesBundleTokenKID(kid string) bool {
+	return s.policy.servesBundleTokenKID(kid)
+}
+
 // EnableTokens installs the token service and its edge (the pre-authentication
 // limits, the metrics and the retention purge) on the server. Run calls it
 // before Handler; once Handler has built the mux the routes are fixed.
 func (s *Server) EnableTokens(ex TokenExchanger, issuer string, edge TokenEdge) {
 	s.cfg.Tokens, s.cfg.TokenIssuer, s.cfg.TokenEdge = ex, issuer, edge
+	// The same value is the signed bundle's tokenIssuer (W-P2-WBND-06), so the
+	// issuer a worker verifies Warden tokens against is the one that mints them.
+	s.policy.setTokenIssuer(issuer)
 }
 
 // tokenRetentionInterval is how often expired token rows are purged.
@@ -286,7 +328,7 @@ func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, s
 		Clients:         assertions,
 		Agents:          agents,
 		Blocks:          NewTokenBlockChecker(srv.blocks),
-		Signers:         servedSigners{inner: km.KeySet(), records: km.KeySet().Records, now: clk.Now, served: srv.servesTokenKID},
+		Signers:         servedSigners{inner: km.KeySet(), records: km.KeySet().Records, now: clk.Now, served: srv.servesTokenKID, bundled: srv.servesBundleTokenKID},
 		Sessions:        sessions,
 		AgentLimiter:    agentLim,
 		UserLimiter:     userLim,

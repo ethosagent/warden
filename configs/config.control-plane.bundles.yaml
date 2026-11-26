@@ -1,0 +1,34 @@
+# Control-plane config for deploy/compose/docker-compose.bundles.yml: the stock
+# recipe's policy (configs/config.control-plane.yaml) plus the keys block that
+# makes the control plane sign bundles. Keep the policy in step with the stock file;
+# every other block of that file (identity, console, ...) works here unchanged.
+policy:
+  allowlist:
+    - domain: api.github.com
+    - domain: "~.*\\.githubusercontent\\.com$"
+  denylist:
+    - domain: evil.example.com
+
+logging:
+  level: info
+  format: json
+
+# keys.enabled creates the bundle signing key on first start; the compose overlay
+# exports its PUBLIC half into the cp-pins volume and every worker pins it
+# (controlPlane.bundleKeysFile). The bundle key never rotates on a schedule: workers
+# pin it, so a rotation is the staged rollout in docs/runbooks/key-rotation.md.
+keys:
+  enabled: true
+  bundle:
+    rotationInterval: 0     # must be 0: bundle keys rotate only by hand
+
+# Worker CA (CONTROL PLANE ONLY, never served to workers; docs/control-plane.md "Worker CA").
+# The compose recipe's cp-bootstrap service creates the chain and key below with
+# `warden control-plane ca init` into the cp-ca volume. keySource: file is DEVELOPMENT
+# ONLY (the intermediate key is a plain file); production uses keySource: keys.
+workerCA:
+  enabled: true
+  trustDomain: warden.local
+  certFile: /ca/intermediate-chain.pem
+  keySource: file
+  keyFile: /ca/intermediate.key

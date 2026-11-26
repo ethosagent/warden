@@ -252,6 +252,22 @@ type H struct {
 	// bundleMode (WithBundles) boots the control plane with --bundles set to
 	// it, on top of the versioned policy store and the signing keys.
 	bundleMode string
+	// bundleModeSet is true once WithBundles was applied (its mode may be the
+	// empty default); without it the harness control plane runs --bundles=off.
+	bundleModeSet bool
+	// bundlePins (WithBundlePins, WithUnrelatedBundlePins) are the bundle keys
+	// every worker pins; bundleExpiry (WithBundleExpiry) is its expiry mode.
+	bundlePins bundlePinSet
+	// workerPins are per-worker pin overrides by 1-based worker number
+	// (SetWorkerBundlePins), guarded by pinsMu.
+	pinsMu     sync.Mutex
+	workerPins map[int][]string
+	// bundleTamper (WithTamperingBundleProxy) is the proxy workers reach the
+	// control plane through; nil unless the option is set.
+	bundleTamper *tamperProxy
+	bundleExpiry config.BundleExpiry
+	// bundleCache (WithBundleCache) gives each pinned worker a state dir.
+	bundleCache bool
 
 	// tokenClients are the AgentWithProxyToken / AgentH2WithProxyToken clients,
 	// kept so cleanup can close their idle tunnels.
@@ -925,7 +941,7 @@ func (h *H) workerParams(i int) worker.Params {
 		Secrets:         mappings,
 		Observability:   config.ObservabilityConfig{Enabled: true, ServiceName: "warden-harness"},
 		ControlPlane: config.ControlPlaneConfig{
-			Endpoint:          "https://" + h.ControlPlaneAddr() + "/policy",
+			Endpoint:          "https://" + h.workerCPAddr() + "/policy",
 			TokenEnv:          cpTokenEnv,
 			CACert:            h.proxyCACertDst,
 			PollInterval:      time.Second,
@@ -975,6 +991,8 @@ func (h *H) workerParams(i int) worker.Params {
 			},
 		}
 	}
+	h.applyBundlePins(i, &policy)
+	h.applyBundleCache(i, &policy)
 	h.applyAuditLogs(i, &policy)
 	h.applyFakeJudge(&policy)
 	// The local allowlist mirrors the CP's. A managed worker ignores it (policy

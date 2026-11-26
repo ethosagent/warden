@@ -1744,9 +1744,9 @@ func TestWorkersWithoutCapOnlineSortedCapped(t *testing.T) {
 	now := time.Now()
 	r.now = func() time.Time { return now }
 	for i := 0; i < 120; i++ {
-		r.SeenHeartbeat(fmt.Sprintf("w%03d", i), "", nil, "", "")
+		r.SeenHeartbeat(fmt.Sprintf("w%03d", i), "", nil, "", "", WorkerBundle{})
 	}
-	r.SeenHeartbeat("has", "", []string{"blocklist/v1"}, "", "")
+	r.SeenHeartbeat("has", "", []string{"blocklist/v1"}, "", "", WorkerBundle{})
 	got := r.WorkersWithoutCap("blocklist/v1")
 	if len(got) != 100 || got[0] != "w000" || got[99] != "w099" {
 		t.Fatalf("len=%d first=%s last=%s", len(got), got[0], got[len(got)-1])

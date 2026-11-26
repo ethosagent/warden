@@ -54,6 +54,9 @@ a worker. There are exactly three calls:
    CP holds the request open and returns **200 + new policy the instant it
    changes**, or **304** at the timeout; the worker re-polls immediately. Policy
    edits reach workers in ~one round-trip, not after a fixed interval.
+   The same response carries `registeredAgents` (each registered agent's id, status and key
+   thumbprints), from which the worker takes the status of the agent it is bound to
+   ([the kill switch](#the-kill-switch)).
 2. **Heartbeat** — `POST /control/heartbeat` (~every 10s) so the CP lists the
    worker as online even when idle, and knows its current policy version and the
    capabilities it advertises (`caps`, e.g. `blocklist/v1`), so the console can flag
@@ -84,16 +87,38 @@ local-only/standalone worker still requires one.
 
 ## Pinning bundle keys (worker config)
 
-A worker pins the public keys that may sign the policy bundles it accepts. The
-keys are read at startup and have no runtime effect until signed-bundle
-verification lands (W-P2-SBND-04); with none pinned a managed worker behaves as
-before and logs one WARN, `bundle verification disabled (no controlPlane.bundleKeys)`.
+A worker pins the public keys that may sign the policy bundles it accepts. Since
+the Phase 2 release a CP-managed worker **requires** pins: with none pinned and
+no explicit opt-out the config fails to load, naming `controlPlane.bundleKeys`
+and `controlPlane.bundleKeysFile` and the opt-out; the worker never falls back to
+unsigned policy on its own. The opt-out is `controlPlane.requireSignedBundles:
+false` (a worker with that and no pins takes policy unverified and logs one WARN,
+`bundle verification disabled (no controlPlane.bundleKeys, controlPlane.requireSignedBundles: false)`).
+See [Upgrading to required signed bundles](#upgrading-to-required-signed-bundles).
+
+With pins the worker sends `Accept: application/vnd.warden.bundle.v1+json` on every
+policy pull and applies only a bundle that verifies (signature, seq, expiry,
+issuer, credential hash). It never applies the unsigned wire: a legacy 200 is
+rejected as `unsigned`. A rejected bundle changes nothing, so the worker keeps
+enforcing its last-known-good policy (and a disabled agent stays disabled); its
+ETag is sent as `If-None-Match` on the next long-poll so the bad bundle is not
+downloaded again (except `future` and `expired`, which depend on the clock and
+are fetched again). One WARN per distinct rejection names the reason, seq and
+kid, never payload or credential values. A bundle that is signed correctly but
+carries a policy the worker cannot enforce (for example an invalid
+`registeredAgents` list) is rejected whole as `invalid_policy`. `bundleExpiry`
+decides what happens when the held bundle passes `expiresAt` (plus skew) with no
+valid replacement: `keep` (default) keeps enforcing it and logs a WARN, `deny`
+denies all traffic until a valid bundle arrives. A control plane started with
+`--bundles=require` (the default when its prerequisites are present) answers a
+worker without pins `406 signed_bundle_required`; the worker logs a hint to pin
+the bundle keys.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `controlPlane.bundleKeys` | none | List of public JWKs (OKP/Ed25519 or EC/P-256). |
 | `controlPlane.bundleKeysFile` | none | JWKS JSON file `{"keys":[...]}`, merged with `bundleKeys`. |
-| `controlPlane.requireSignedBundles` | `false` | `true` makes config load fail when no keys are pinned (checked whenever the endpoint is set and `controlPlane.localOnly` is not true, so a worker started with `--local-only` is checked too, deliberately fail-closed). |
+| `controlPlane.requireSignedBundles` | `true` | A CP-managed worker (endpoint set, neither `controlPlane.localOnly` nor `--local-only`) with no keys pinned fails at startup. `false` is the explicit, temporary opt-out: the worker takes unsigned policy and logs a WARN at boot. Pins always verify, whatever this says. |
 | `controlPlane.bundleIssuer` | none | When set, a bundle's `cpId` must equal it. |
 | `controlPlane.bundleClockSkew` | `5m` | Tolerance on `issuedAt` and `expiresAt`, at most `1h`. |
 | `controlPlane.bundleExpiry` | `keep` | `keep` enforces the last-known-good past expiry, `deny` blocks. |
@@ -106,11 +131,217 @@ the new key while the control plane rotates its bundle key. Errors name
 include key material. `controlPlane.localOnly: true` ignores all of these keys
 and logs one INFO line.
 
+### Upgrading to required signed bundles
+
+**Breaking change in the Phase 2 release.** Two defaults flip together:
+
+| Side | Before | Now |
+|---|---|---|
+| Control plane `--bundles` | `off` | unset = `require` when `--state-dir`, `--policy-store=versioned` and `keys.enabled: true` are all present; otherwise the legacy unsigned policy and one startup WARN naming what is missing |
+| Worker `controlPlane.requireSignedBundles` | `false` | `true`: a CP-managed worker with no `bundleKeys` or `bundleKeysFile` fails to start |
+
+A worker never falls back to unsigned by itself: one that upgrades without pins
+stops at startup with an error that names the keys to pin and the opt-out. The
+control plane differs: with `--bundles` unset and a prerequisite missing it serves
+the unsigned policy and logs one WARN naming the gap. A pinned worker rejects that
+as `unsigned`, and an unpinned worker does not start without the opt-out.
+
+**Do these in order, before you upgrade any binary.**
+
+1. **Pin first.** The control plane needs the prerequisites (`--state-dir`,
+   `--policy-store=versioned`, `keys.enabled: true`). Start it once so it creates
+   its bundle key, with `--bundles=offer` set explicitly (offer serves the
+   envelope to workers that ask for it and the unsigned policy to the rest, so no
+   unpinned worker breaks), then export the public keys:
+
+   ```sh
+   warden control-plane keys export --purpose bundle --state-dir /var/lib/warden-cp \
+     > bundle-keys.json
+   ```
+
+   Put the file on every worker and set `controlPlane.bundleKeysFile` to it (or
+   inline `controlPlane.bundleKeys`). Pinning works on every release that has
+   signed bundles, so pin the old binaries now; the fleet view shows each pinned
+   worker's `bundleSeq`, `pinnedKids` and the `bundle/v1` capability. A worker too
+   old to pin must be upgraded to a release that can before anything else.
+2. **Upgrade the workers** (any order among themselves). A pinned worker sends
+   the bundle `Accept` header, applies only bundles that verify and never the
+   unsigned wire.
+3. **Upgrade the control plane**, keeping `--bundles=offer` until the fleet view
+   shows no worker without `bundle/v1`. Then remove the flag: the control plane
+   resolves to `require` and answers an unpinned request `406 signed_bundle_required`.
+   (`docker-compose.bundles.yml` is this path in compose: it exports the pins and
+   starts each worker pinned.)
+
+**Opting out, temporarily.** Both opt-outs are explicit and log a WARN (the
+control plane's unset-flag fallback above logs one too):
+
+- Control plane: `--bundles=off` serves the legacy unsigned policy and logs
+  `--bundles=off serves the legacy unsigned policy; this is a temporary opt-out`
+  (`--bundles=offer` also logs a WARN: it serves unsigned policy to unpinned workers).
+- Worker: `controlPlane.requireSignedBundles: false` (the WARN above). Pins, when
+  present, still verify. `warden run --local-only` ignores the control plane and
+  needs no pins; the check runs only for a worker that is CP-managed.
+
+**What a worker does when the control plane serves no signed envelope.** It fails
+closed, not open:
+
+- A pinned worker rejects an unsigned 200 as `unsigned` (a control plane with
+  `--bundles=off`, or one without the prerequisites, serves exactly that), counts
+  `warden_bundle_rejected_total{reason="unsigned"}` and keeps enforcing its
+  last-known-good policy. Booted with nothing applied it denies all traffic, as
+  it does before its first pull. With `controlPlane.stateDir` it may start from
+  the [last-known-good cache](#last-known-good-bundle-cache-opt-in) if that verifies.
+- `503 signed_bundle_unavailable` (the control plane is degraded and has no
+  envelope) is a failed pull: the same last-known-good, no fallback.
+- `406 signed_bundle_required` to a worker without pins (a control plane on
+  `require`, a worker on the opt-out) is a failed pull with a hint to pin.
+- An upgraded worker with no pins and no opt-out does not start.
+
+**Mixed-version fleets.** Mixed is safe only through `--bundles=offer`. Against a
+control plane on `require`, a worker without pins keeps its in-memory policy until
+it restarts, then denies all traffic. Against an old control plane (`--bundles`
+off), a pinned worker rejects its unsigned policy; keep the old workers on the
+opt-out until the control plane is upgraded and signing. The control plane serves
+a `bundle/v1` worker the envelope and an older worker the unsigned policy in
+`offer`; "N connected workers do not verify signed bundles" in the fleet view
+counts the rest.
+
+**Rollback.** Roll back one side at a time and keep the two consistent:
+
+- Control plane to the previous release, or to unsigned: start it with
+  `--bundles=offer` (pinned workers keep their verified envelopes, unpinned ones
+  keep the unsigned policy). Use `--bundles=off` only when no worker is pinned,
+  because a pinned worker rejects every unsigned policy and holds its last-known-good.
+- Worker to the previous release: its config still loads (the key is the same
+  boolean), and an old binary with pins still verifies. A worker that must run
+  without pins needs `controlPlane.requireSignedBundles: false` on the new
+  binary, or no pins on the old one.
+- A binary rollback moves no seq. A worker holding the
+  [last-known-good cache](#last-known-good-bundle-cache-opt-in) refuses a lower
+  seq until the cached bundle expires (about 24h by default), so after restoring
+  control-plane state from a backup set `--bundle-seq-floor` above the highest seq
+  any worker reports ([runbook](runbooks/key-rotation.md)).
+
+### Last-known-good bundle cache (opt-in)
+
+By default a CP-managed worker that boots while the control plane is down stays
+fail-closed (deny all) until its first successful pull. A pinned worker can
+instead keep its last verified bundle on disk and enforce it at boot.
+
+The cache is off unless `controlPlane.stateDir` is set **and** bundle keys are
+pinned. `stateDir` is the worker's one local state directory (an absolute path,
+created `0700`); each use gets a subdirectory: `cert/` for the worker
+certificate and `bundle/` for this cache. There is no separate cache directory
+key.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `controlPlane.stateDir` | none | Absolute path of the worker state directory. With pinned keys it turns the cache on. |
+| `controlPlane.bundleCacheMaxAge` | `24h` | A cached bundle is used only if it was issued at most this long ago. `0` disables the cache (nothing is written or read). |
+
+What is written. After every verified bundle, including a re-signed one with the
+same content (which moves `issuedAt`), the worker writes
+`<stateDir>/bundle/bundle.json`: the verified payload and signatures,
+re-marshalled in canonical form, with no `credentials` sidecar and no other
+envelope member. The write is atomic (temp file in the
+same directory, fsync, rename, directory fsync); the file is `0600` and the
+directory `0700`. A failed write logs one ERROR (until a write succeeds again)
+and never changes the policy being enforced. The file holds policy and
+signatures only: never `secretAccessKey` and never any other secret, and its
+content is never logged.
+
+When it is read. Only when the boot pull fails (control plane down, or serving a
+bundle the worker rejects). The cached envelope is verified again exactly like a
+live one: against the current pins, the issuer, `issuedAt` and `expiresAt` (with
+the skew), and additionally `issuedAt` must be within `bundleCacheMaxAge`. The
+only relaxation is that the missing credentials sidecar is allowed. A cache that
+is missing, corrupt, tampered with, signed by a key that is no longer pinned,
+expired or too old is refused: the worker logs one WARN, `starting FAIL-CLOSED`,
+with the reason in `bundleCache`, and denies all traffic as it does without a
+cache. A cache that passes seeds the applied bundle state, so a control plane
+that later serves an older seq is rejected as a rollback, and an equal seq with
+different content as equivocation. The worker logs one WARN that it is enforcing
+the cached bundle, and the long-poll then takes over as usual.
+
+Credentials. The sidecar (the AWS access key pair for the `aws` secret backend)
+is deliberately not cached. A worker running from the cache therefore has the
+`aws` selector (backend, region, name prefix) from the signed policy but no
+explicit key pair, so the secret backend resolves credentials from the worker's
+own environment (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) or the instance
+IAM role. If neither exists the worker still starts and enforces the cached
+allow/deny policy: it logs one ERROR, and every secret fetch fails (so requests
+that need a secret are not served) until a restart with the control plane
+reachable, when the credentials arrive again.
+
+Rollback floor. A control plane that is up at boot is not trusted blindly either:
+when the cache verifies (pins, issuer, not expired), its seq is the floor of the
+boot pull. A bundle with a lower seq is rejected as a rollback, and the same seq
+with different content as equivocation; the pull then fails and the worker
+enforces the cached bundle. The control plane serving the cached bundle itself is
+applied normally (credentials included). This goes beyond the "cache is read only
+when the boot pull fails" wording of the original ticket and is bounded: a control
+plane restored from an old backup that serves a lower seq is refused only until
+the cached bundle expires (about 24h by default; the bundle lifetime, not
+`bundleCacheMaxAge`), after which the cache stops being a floor and the worker
+accepts the control plane's bundles again. Use `--bundle-seq-floor` on the control
+plane to recover sooner.
+
+Key rotation. The cache is verified at boot under the pins the worker holds
+then, like any bundle, and it keeps every signature of the envelope it saved. A
+worker restarted mid-rotation therefore verifies a dual-signed cache under either
+the old or the new pin. A cache only the old key signed is refused once the old
+pin is dropped, which is why the runbook keeps the old pin until the overlap has
+passed and a new-key bundle has been applied everywhere; the worker then falls
+back to the control plane, and fails closed if that is down too.
+
+File safety. `stateDir` and `bundle/` must be real directories (a symlink is
+refused), owned by the worker user and not writable by group or others; a worse
+directory disables the cache with one ERROR. The cache file is opened without
+following symlinks and without blocking, must be a regular file, and must not be
+accessible by group or others (mode `0600`), otherwise it is refused and the
+worker boots fail-closed. The cache can only be loaded at boot, before the first
+long-poll. The parent of `stateDir` is not checked: put `stateDir` under a
+root-owned path such as `/var/lib/warden`. A `stateDir` that was pre-created
+under a group-writable umask (for example 002) is refused, which disables the
+cache with one ERROR.
+
+Operations. The state directory must not be readable or writable by the agent it
+guards: a writable cache cannot make the worker enforce a forged policy
+(signatures are checked), but it can be deleted or replaced by an older valid
+bundle within `bundleCacheMaxAge`, which is why the max age exists. Keep it short
+if a restart must not bring back an older block list.
+
+### Bundle state in metrics and the fleet view
+
+A pinned worker reports its bundle state three ways.
+
+- Metrics (when observability metrics are on): `warden_bundle_rejected_total{reason}`
+  (`reason` is one of the bundle rejection reasons or `invalid_policy`), and the
+  gauges `warden_bundle_seq` (the bundle in force; a rejected bundle leaves it
+  unchanged), `warden_bundle_age_seconds` and `warden_bundle_stale` (1 once the
+  bundle in force is past its expiry). Kids are never labels. The gauges refresh
+  every 10 seconds.
+- Heartbeat: the optional fields `bundleSeq`, `bundleKid`, `bundleIssuedAt`,
+  `pinnedKids` (at most 8), `bundleStale`, `lastRejectReason` and `lastRejectAt`,
+  and the capability `bundle/v1`. A worker without pins sends none of them, and a
+  control plane that does not know them ignores them.
+- Fleet view: the console shows each worker's bundle seq, a rejection badge with the
+  reason, and "N connected workers do not verify signed bundles" while the control
+  plane serves bundles. For a worker that advertises `bundle/v1`, `behind` means its
+  seq is below the control plane's newest signed seq. A worker that reports a seq
+  above it is flagged `bundleSeqAhead` and logged once as an ERROR: the control
+  plane was probably restored to older state. The control plane logs
+  `worker bundle rejected` (proxy id, `applied_seq` — the bundle the worker
+  still enforces, not the rejected one — and reason) once per change of reason.
+
 ## Run it
 
 ```sh
 # 1. Generate the bake-once proxy CA (the control plane mints its cert from it).
 OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
+#    The key is mode 0600 for you; the container's warden user (uid 100) must read it.
+#    Dev only: chmod 644 deploy/compose/certs/proxy-ca.key  (or chown 100:101 it with sudo).
 
 # 2. Bring up the control plane + two workers + two synthetic agents. The compose
 #    defaults are public dev placeholders (deploy/compose/.env.example); for
@@ -118,27 +349,56 @@ OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 docker compose -f deploy/compose/docker-compose.control-plane.yml up
 ```
 
-The recipe runs on [per-worker tokens](#worker-token-cli). A one-shot `cp-bootstrap` service
-registers each worker's token with `warden control-plane token create --from-env` on the control
-plane's state volume (`cp-data`) before the control plane and the workers start; running `up` again
-changes nothing. The control plane runs strict (`--require-worker-tokens`) with its own admin token
-(`--admin-token-env=WARDEN_CP_ADMIN_TOKEN`), TLS stays on, and no shared `WARDEN_CP_TOKEN` exists.
-Each worker container reads its own token (`WARDEN_WORKER_1_TOKEN`, `WARDEN_WORKER_2_TOKEN`)
-under the in-container name `WARDEN_WORKER_TOKEN`, which `configs/config.worker.yaml` names in both
-`controlPlane.tokenEnv` and `central.tokenEnv`, so the two workers share one config file and still
-hold different tokens.
+The recipe runs on [worker certificates](#worker-ca-workerca) and the control plane is strict
+(`--require-worker-certs`; its startup log shows `auth_mode=strict-certs` and `worker_ca=enabled
+key_source=file`, with the development-only warning). A one-shot `cp-bootstrap` service creates the
+worker CA with `warden control-plane ca init --key-source file` into its own `cp-ca` volume (never the
+control plane's state volume; skipped when the files exist, and `root.key` is deleted at once), and
+registers one enrollment token per worker with `warden control-plane enroll-token create --from-env`
+on the state volume (`cp-data`), before the control plane and the workers start. Each worker enrolls
+once with its token, keeps the 24h certificate renewed and persists it under `controlPlane.stateDir`
+(`/data/cp` on its own volume), so while that certificate is valid a restart or a second `up` neither
+re-enrolls nor creates a token row. The workers share `configs/config.worker.yaml`: `controlPlane.enrollment.tokenEnv` names
+`WARDEN_WORKER_ENROLL_TOKEN`, which each service fills from its own `WARDEN_WORKER_1_ENROLL` or
+`WARDEN_WORKER_2_ENROLL`, and there is no `tokenEnv` and no `WARDEN_CP_TOKEN`. The first run builds
+the image from the repo (the published image predates the worker CA commands). A `wwt_` bearer
+without a client certificate gets `401`. The e2e stack and the other recipes still run on per-worker
+`wwt_` tokens.
 
-To use your own values, generate a token per worker and export it (or put it in a git-ignored
-`deploy/compose/.env`) before `up`:
+**Recovery.** A certificate lives 24h and is renewed at about 12h, an enrollment token is good for one\
+use and one hour, and the CA for one year. A stack left stopped past a certificate's expiry, a first `up`\
+retried after the token's hour, or a CA past its year leaves workers unable to enroll, and `cp-bootstrap`\
+never revives a used or expired token or re-creates an existing CA. Two ways out:
 
 ```sh
-echo wwt_$(head -c32 /dev/urandom | base32 | tr -d = | tr A-Z a-z | head -c52)   # one per worker
-export WARDEN_WORKER_1_TOKEN=wwt_...  WARDEN_WORKER_2_TOKEN=wwt_...  WARDEN_CP_ADMIN_TOKEN=...
+# 1. Reset everything (dev data is disposable): new CA, new tokens, new certificates.
+docker compose -f deploy/compose/docker-compose.control-plane.yml down -v
+docker compose -f deploy/compose/docker-compose.control-plane.yml up -d
+
+# 2. Keep the state: mint a new token for the worker, then clear its old certificate.
+docker compose -f deploy/compose/docker-compose.control-plane.yml exec control-plane \
+  warden control-plane enroll-token create --name w1-2 --worker-id worker-1 \
+  --from-env WARDEN_WORKER_1_ENROLL --state-dir /data
+```
+
+For the second way, export a fresh `wet_` value as `WARDEN_WORKER_1_ENROLL` in your shell first (the
+`exec` runs in the container, so pass it with `exec -e WARDEN_WORKER_1_ENROLL`), then remove the worker's old
+pair, `/data/cp/cert/worker-cert.pem` and `worker-key.pem` in its `worker1-data` volume, and run
+`up -d` so the worker restarts with the new value. An expired CA needs way 1.
+
+To use your own values, generate one enrollment token per worker and export it (or put it in a
+git-ignored `deploy/compose/.env`) before `up`:
+
+```sh
+echo wet_$(head -c32 /dev/urandom | base32 | tr -d = | tr A-Z a-z | head -c52)   # one per worker
+export WARDEN_WORKER_1_ENROLL=wet_...  WARDEN_WORKER_2_ENROLL=wet_...  WARDEN_CP_ADMIN_TOKEN=...
 ```
 
 Never commit a real value. [`deploy/compose/.env.example`](../deploy/compose/.env.example) lists the
-variables with obviously fake dev placeholders. Dashboard writes (policy edits) need
-`Authorization: Bearer $WARDEN_CP_ADMIN_TOKEN`; a worker token never opens them.
+variables with obviously fake dev placeholders. An enrollment token is good for one enrollment and,
+by default, for one hour after `cp-bootstrap` registers it: a worker whose volume is lost later needs
+a new token ([re-enroll a worker](runbooks/worker-certs.md#re-enroll-a-worker)). Dashboard writes
+(policy edits) need `Authorization: Bearer $WARDEN_CP_ADMIN_TOKEN`; a worker credential never opens them.
 
 - Fleet dashboard: **https://localhost:7070/dashboard/** (cert signed by the
   proxy CA — trust it in your browser, or `curl --cacert deploy/compose/certs/proxy-ca.crt`).
@@ -670,11 +930,6 @@ Present a key as `Authorization: Bearer wak_...` on `/dashboard/api/*` only:
   owner no longer holds answers `403 {"error":"insufficient_scope","need":"<scope>"}`.
   A route with no table row is never reachable by a key, so a new route stays closed
   until it is classified.
-- Never keyable: `/central/secrets*` (403), settings, integrations, llmproviders and
-  secretstore writes, sessions, setup, backup, `query/generate`, worker-token create and
-  every route classified `none`. `/policy`, `/control/heartbeat` and `/central/ingest`
-  refuse a `wak_` bearer with 401 whatever the worker auth mode, and `/dashboard/` and
-  `/auth/me` answer a key 401.
 - A key whose owner is on the [block list](#block-list) is refused at once with the same
   403 (reads and writes), like the owner's sessions; lifting the block restores it.
 - A key may make `ratePerKey` requests per second (burst 2x); over that is `429` with
@@ -698,6 +953,318 @@ refused by the running control plane at the next poll. If the index cannot confi
 current for 30 seconds it refuses every key (fail closed) rather than risk accepting one
 revoked elsewhere. Last-use time and address are kept in memory and written every 60
 seconds and at shutdown.
+
+### Enabling, creating and expiring keys
+
+Add the block to the operator-owned `--config` file (a commented copy with the
+defaults is in `configs/config.control-plane.yaml`) and restart. Keys need
+`console.auth: oidc` and `--state-dir`; startup names whichever is missing.
+
+```yaml
+console:
+  auth: oidc
+  apiKeys:
+    enabled: true
+    defaultTTL: 2160h   # 90 days when the request names no expiry
+    maxTTL: 8760h       # hard ceiling; a longer request is 400
+    maxPerOwner: 25     # active keys one owner may hold; the 26th is 409
+    ratePerKey: 10      # requests per second per key (burst 2x)
+```
+
+A key has the form `wak_<16 hex id>_<52 character secret>`. Only a hash of the
+secret is stored, and the full key is shown once, in the `201` that creates it.
+Keys are created from a signed-in console session only: a key, a break-glass
+session and an unauthenticated caller cannot mint one (`403 session_required`).
+The console API Keys tab (#263) is the normal way to create, list and revoke keys;
+see that tab's own documentation (the console tab ships with #263). The same routes
+work from any HTTP client that holds a session.
+
+- **Scopes.** A key holds the scopes it was created with and nothing else. The
+  creator may only grant scopes their own role allows (`403 scope_exceeds_role`
+  lists the ones that exceed it). At request time the key also needs the owner's
+  *current* role to meet the route's minimum role. That role comes from the IdP
+  groups saved with the key when it was created, mapped through the live
+  `console.roles`: changing a group's mapping in `console.roles` (after a restart)
+  narrows the keys of its members, but later IdP group changes do not reach existing
+  keys, so offboarding someone needs a revoke by owner (`DELETE
+  /dashboard/api/api-keys?owner_sub=<sub>` or `warden control-plane api-key revoke
+  --owner-sub`).
+- **Expiry.** `expiresIn` is a Go duration between `1h` and `maxTTL`; omit it for
+  `defaultTTL`. A key cannot be extended: create a new one.
+- **Names.** A name is 1 to 64 characters and unique per owner, including revoked
+  keys (`409 name_taken`).
+
+#### API key scopes
+
+One row per scope a key can hold today. The table is pinned to the code by
+`TestScopesDocumented`. The routes each scope opens, and the minimum role of each
+route, are the **API key scope** column of the generated
+[role matrix](#console-roles-and-the-role-matrix); this table does not repeat it.
+A route's own minimum role can be higher than its scope's (for example the
+blocked-users reads need admin although they take `policy:read`).
+
+<!-- api-key-scopes:start -->
+| Scope | Minimum role | What it covers |
+|---|---|---|
+| `policy:read` | viewer | Read the policy, its versions and diffs, change drafts, detection config and the block list. |
+| `policy:draft` | editor | Create a change draft (`POST /dashboard/api/changes`). |
+| `policy:write` | editor | Write the policy and detection config, update, submit, withdraw, rebase and replay drafts, edit the block list. |
+| `settings:read` | viewer | Read settings (`GET /dashboard/api/settings`). Settings writes are session-only. |
+| `traffic:read` | viewer | Traffic, endpoints, analytics, MCP, workers, the query endpoints and alerts. |
+| `audit:read` | viewer | The traffic audit log and its verify call. |
+| `adminaudit:read` | admin | The admin audit log, its verify call and its public key. |
+| `agents:read` | admin | List and read agents in the registry. |
+| `agents:write` | admin | Create, update, enable and disable agents. |
+| `workers:admin` | admin | Revoke a worker certificate (`POST /dashboard/api/workers/{id}/revoke`). |
+<!-- api-key-scopes:end -->
+
+Scope names for later features (`mcp:read`, `mcp:write`, `grants:read`,
+`grants:write`) are reserved and cannot be requested until their feature ships.
+
+**Never keyable.** These answer a key `403 insufficient_scope` (with `need: none`),
+or `401` where noted, whatever scopes it holds:
+
+- key management itself (list, create, revoke; only `GET /dashboard/api/api-keys/self`
+  is open to a key), sessions, token sessions, setup, backup, break-glass;
+- policy rollback and the `PUT` variants of policy and detection (only `POST` is
+  scoped, as `policy:write`), signing-keys routes, `query/generate`;
+- change approve, reject, review and emergency apply;
+- `/central/secrets*` including `GET`, secret-store, integrations and llmproviders
+  reads and writes, and settings writes: these stay session-only in P2;
+- worker-token create, list and revoke;
+- every other route classified `none`.
+
+The worker routes (`/policy`, `/control/*`, `/central/ingest`) refuse a `wak_`
+bearer with `401`, and `/dashboard/` and `/auth/me` answer a key `401`. A route with
+no table row is closed to keys until someone classifies it. The **API key scope**
+column of the [role matrix](#console-roles-and-the-role-matrix) is the source of
+truth: `none` means never keyable.
+
+### Using a key in CI
+
+Keep the key in a CI secret named `WARDEN_API_KEY` and send it as a bearer token
+over HTTPS. Never put it in a URL (`400 api_key_in_query`). Later features (GitOps,
+the admin MCP) use the same variable name.
+
+```sh
+export WARDEN_CP=https://warden-cp.example.com   # the control plane's base URL
+```
+
+Each example shows the request, the status and the body. `$WARDEN_API_KEY` stands
+for a key like `wak_6127c9843b4791dd_kpvx…`; the examples use the key id
+`6127c9843b4791dd`.
+
+**200 read.** A `policy:read` key reads the policy.
+
+```sh
+curl -sS -i "$WARDEN_CP/dashboard/api/policy" -H "Authorization: Bearer $WARDEN_API_KEY"
+```
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"allowlist":[{"domain":"api.openai.com","port":0}],"denylist":[{"domain":"evil.example.com","port":0}],"lint":[],"editable":true,"drift":false}
+```
+
+**200 introspect.** Any valid key can ask what it is allowed to do.
+`effectiveScopes` is `scopes` capped by the owner's current role. The secret is
+never returned.
+
+```sh
+curl -sS -i "$WARDEN_CP/dashboard/api/api-keys/self" -H "Authorization: Bearer $WARDEN_API_KEY"
+```
+```
+HTTP/1.1 200 OK
+Cache-Control: no-store
+
+{"id":"6127c9843b4791dd","name":"ci","description":"deploys","scopes":["policy:read"],"effectiveScopes":["policy:read"],"ownerEmail":"eve@example.com","createdAt":"2027-01-15T08:00:00Z","expiresAt":"2027-02-14T08:00:00Z","lastUsedAt":"2027-01-15T08:00:00Z","status":"active"}
+```
+
+**201 create.** From a signed-in console session (cookie plus the CSRF header, as
+the console sends it; a key cannot do this).
+
+```sh
+curl -sS -i -X POST "$WARDEN_CP/dashboard/api/api-keys" \
+  -H "Cookie: $SESSION_COOKIE" -H "X-Warden-CSRF: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"name":"ci","description":"deploys","scopes":["policy:read"],"expiresIn":"720h"}'
+```
+```
+HTTP/1.1 201 Created
+Cache-Control: no-store
+
+{"id":"6127c9843b4791dd","name":"ci","scopes":["policy:read"],"createdAt":"2027-01-15T08:00:00Z","expiresAt":"2027-02-14T08:00:00Z","key":"wak_6127c9843b4791dd_kpvx…"}
+```
+
+**400 bad request.** Invalid input, an unknown scope, a key in the query string,
+two `Authorization` headers, or a key sent with a session cookie
+(`ambiguous_credentials`).
+
+```sh
+curl -sS -i "$WARDEN_CP/dashboard/api/policy?token=wak_0123456789abcdef_<redacted>"
+```
+```
+HTTP/1.1 400 Bad Request
+
+{"error":"api_key_in_query"}
+```
+
+A key that was ever sent in a URL is leaked (proxy and access logs keep URLs): revoke it and rotate.
+
+```sh
+curl -sS -i -X POST "$WARDEN_CP/dashboard/api/api-keys" -H "Cookie: $SESSION_COOKIE" \
+  -H "X-Warden-CSRF: $CSRF" -H 'Content-Type: application/json' -d '{"name":"ci","scopes":["bogus:scope"]}'
+```
+```
+HTTP/1.1 400 Bad Request
+
+{"detail":"apikeys: unknown scope: \"bogus:scope\"","error":"unknown_scope"}
+```
+
+**401 unauthorized.** Malformed, unknown, wrong secret, expired and revoked keys
+all look the same, so a caller learns nothing about which it was. The same applies
+to a key on a worker route (`/policy`), where the body is the worker plane's.
+
+```sh
+curl -sS -i "$WARDEN_CP/dashboard/api/policy" -H "Authorization: Bearer $WARDEN_API_KEY"
+```
+```
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer
+
+{"error":"unauthorized"}
+```
+
+**403 forbidden.** A valid key without the scope. `need` names it; for a route no
+key may reach it is `none`.
+
+```sh
+curl -sS -i -X POST "$WARDEN_CP/dashboard/api/policy" -H "Authorization: Bearer $WARDEN_API_KEY" \
+  -H 'Content-Type: application/json' -d '{"allowlist":[],"denylist":[]}'
+```
+```
+HTTP/1.1 403 Forbidden
+
+{"error":"insufficient_scope","need":"policy:write"}
+```
+
+```sh
+curl -sS -i "$WARDEN_CP/central/secrets" -H "Authorization: Bearer $WARDEN_API_KEY"
+```
+```
+HTTP/1.1 403 Forbidden
+
+{"error":"insufficient_scope","need":"none"}
+```
+
+**404 not found.** An unknown or malformed key id on revoke.
+
+```sh
+curl -sS -i -X DELETE "$WARDEN_CP/dashboard/api/api-keys/0123456789abcdef" \
+  -H "Cookie: $SESSION_COOKIE" -H "X-Warden-CSRF: $CSRF"
+```
+```
+HTTP/1.1 404 Not Found
+
+{"error":"api_key_not_found"}
+```
+
+**409 conflict.** A name already used by one of the owner's keys (`name_taken`), or
+the owner already holds `maxPerOwner` active keys (`too_many_keys`).
+
+```sh
+curl -sS -i -X POST "$WARDEN_CP/dashboard/api/api-keys" -H "Cookie: $SESSION_COOKIE" \
+  -H "X-Warden-CSRF: $CSRF" -H 'Content-Type: application/json' -d '{"name":"ci","scopes":["policy:read"]}'
+```
+```
+HTTP/1.1 409 Conflict
+
+{"error":"name_taken"}
+```
+
+**429 too many requests.** More than `ratePerKey` requests per second (burst 2x)
+on one key. Wait `Retry-After` seconds.
+
+```sh
+curl -sS -i "$WARDEN_CP/dashboard/api/policy" -H "Authorization: Bearer $WARDEN_API_KEY"
+```
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 1
+
+{"error":"rate_limited"}
+```
+
+### Rotating a key
+
+1. Create the new key (same scopes, new name, for example `ci-2027-02`) from the
+   console or the create call above.
+2. Put it in the CI secret store as `WARDEN_API_KEY` and redeploy or re-run the
+   jobs that use it.
+3. Check the old key is no longer in use: `GET /dashboard/api/api-keys` shows
+   each key's `lastUsedAt` (kept in memory and written every 60 seconds).
+4. Revoke the old key: `DELETE /dashboard/api/api-keys/{id}` from its owner's
+   session (or any admin's). The next request with it is `401`. Revoking twice is
+   `204` and changes nothing.
+
+An admin can revoke every key of one owner with `DELETE
+/dashboard/api/api-keys?owner_sub=<sub>`, for example when someone leaves. Blocking
+a user on the [block list](#block-list) also refuses their keys at once, and
+lifting the block restores them.
+
+### Incident: offline revoke and restore
+
+When the console is unavailable or a key has leaked, revoke from the host, with the
+control plane running or stopped. The command opens `<state-dir>/warden-cp.db`
+directly, creates no key and never prints a secret or hash. A running control plane
+refuses the key within 2 seconds.
+
+```sh
+warden control-plane api-key list --state-dir /data [--json]
+warden control-plane api-key revoke --state-dir /data --id 6127c9843b4791dd
+warden control-plane api-key revoke --state-dir /data --owner-sub <sub>
+```
+
+`--admin-audit-key-file` names the admin audit signing key when it is not at
+`<state-dir>/cp-audit.key`. Each revoke is one admin audit row (`api_key.revoke` or `api_key.revoke_owner`,
+auth method `cli`, actor `cli:<os user>`) when admin audit is enabled in the state
+dir. Exit codes: 0 done (including an already revoked key), 1 a refusal or an audit
+failure after the revoke, 2 usage.
+
+Restoring an older [backup](#scheduled-backups---backup-dir) brings back keys
+revoked after it was taken. Re-apply those revocations from the shipped
+`admin_audit` log, or restore with `--revoke-api-keys`, which revokes every key in
+the restored database before it is put in place and records the count as
+`api_keys_revoked` in the `cp.restore` audit row. Owners then create new keys. See
+[backup and restore](runbooks/backup-restore.md).
+
+```sh
+warden control-plane restore --from /backups/20270115T080000Z --state-dir /data --force --revoke-api-keys
+```
+
+### Expiry warnings
+
+With `console.apiKeys.enabled`, the control plane scans once an hour for unrevoked
+keys that expire within 7 days and publishes one `api_key_expiring` finding (medium
+severity) per key to the configured alert sinks. The finding carries the key id,
+name, owner email and expiry, never a secret. A key is reported once, and again only
+if its expiry changes; a control plane restart warns once more.
+
+### Known limits
+
+- **DLP scans request bodies only.** With `dlp.wardenTokens: true` (off by default) the egress detector flags a `wak_` or `wwt_`
+  token in a proxied request body to a third party. The same token in a header or
+  query string, or in an MCP call, is not flagged.
+- **Owner revokes do not record the owner.** The audit row of a revoke by owner
+  (console or CLI) names the actor, the count and the action, but not which
+  `owner_sub` was targeted. The list of keys before the revoke is the record.
+- **The expiry alert resolves itself.** The stored `api_key_expiring` alert is
+  auto-resolved 15 minutes after it is published, like every one-shot finding. The
+  notification is the warning; the key list shows the expiry for as long as the key
+  lives.
+- **Owner role changes need a restart.** The owner's role comes from the groups
+  saved with the key and the live `console.roles`, which are read at startup.
+- Rate limits on key create and revoke are not in place yet (tracked with the
+  session rate limits).
 
 ## Console roles and the role matrix
 
@@ -863,6 +1430,9 @@ fails when the two differ.
 | `/dashboard/api/token-sessions/revoke` | POST | admin | `token_sessions.revoke_all` | `none` |
 | `/dashboard/api/token-sessions/{sid}/revoke` | POST | admin | `token_sessions.revoke` | `none` |
 | `/dashboard/api/traffic` | GET | viewer | `traffic.read` | `traffic:read` |
+| `/dashboard/api/worker-enrollments` | GET | admin | `worker_enroll_token.read` | `workers:admin` |
+| `/dashboard/api/worker-enrollments` | POST | admin | `worker_enroll_token.create` | `none` |
+| `/dashboard/api/worker-enrollments/{id}` | DELETE | admin | `worker_enroll_token.revoke` | `workers:admin` |
 | `/dashboard/api/worker-tokens` | GET | viewer | `worker_token.read` | `none` |
 | `/dashboard/api/worker-tokens` | POST | admin | `worker_token.create` | `none` |
 | `/dashboard/api/worker-tokens/{id}` | DELETE | admin | `worker_token.revoke` | `none` |
@@ -1124,6 +1694,9 @@ YAML if the mirror is lost.
 
 ## Change drafts and the two-person rule (`console.approvals`)
 
+The operator guide, with the config keys, what is held, replay, the offline CLI and the
+known limits, is [approvals.md](approvals.md).
+
 With `console.approvals.enabled` (off by default; it needs `console.auth: oidc`, the
 versioned policy store and the admin audit log) the control plane serves the change
 draft API under `/dashboard/api/changes`. A draft is a proposed policy doc based on a
@@ -1144,13 +1717,21 @@ save time and the draft's required role is checked again at approve time.
 
 | Gated | Not gated |
 |---|---|
-| `POST`/`PUT /dashboard/api/policy`, `POST`/`PUT /dashboard/api/settings`, `POST`/`PUT /dashboard/api/llmproviders`, `POST /dashboard/api/policy/versions/{v}/rollback` (the draft's doc is version `v`, source `rollback`), and `warden policy import` | integrations, detection, the secret store (`/dashboard/api/secretstore`, `/central/secrets`; they write secret values, not a version), the block list, worker tokens, signing keys, sessions, backups, and the offline commands below |
+| `POST`/`PUT /dashboard/api/policy`, `POST`/`PUT /dashboard/api/settings`, `POST`/`PUT /dashboard/api/llmproviders`, `POST /dashboard/api/policy/versions/{v}/rollback` (the draft's doc is version `v`, source `rollback`), and `warden policy import`. Also, as drafts of their own target (they create no policy version): `DELETE /dashboard/api/blocked-users/{id}` and `warden control-plane block remove` (target `blocked_users`); registering an agent, adding an allowed group or scope, adding or replacing a key, and re-enabling an agent through `POST`/`PUT /dashboard/api/agents` and `POST /dashboard/api/agents/{id}/enable` (target `agents`) | integrations, detection, the secret store (`/dashboard/api/secretstore`, `/central/secrets`; they write secret values, not a version), adding a block (the incident kill switch), disabling an agent and agent edits that only narrow (a removed group, a display name), worker tokens, signing keys, sessions, backups, the offline `agent` commands, and the offline commands below |
+
+A `blocked_users` or `agents` draft publishes no policy version, so its approve
+and emergency-apply results carry no `version` or `applied_version`; an agent's
+new revision is on the agent (`GET /dashboard/api/agents/{id}`). The block list
+is admin-only, so a non-admin (a viewer, or a `policy:read` key whose owner is not
+an admin) reading such a draft sees `{id, has_sub, has_email}`, never who is blocked.
 
 Not gated, stated plainly for production use:
 
-- The offline `warden control-plane block remove` removes a block entry with one
-  admin's host access and no second person. Holding block-list removals for approval
-  is W-P2-APPR-08; until it lands, treat unblocking as a single-admin action.
+- With approvals enabled, `warden control-plane block remove` holds the removal as
+  a pending `blocked_users` draft (author `cli:<os user>`), prints the draft id and
+  leaves the user blocked until a second admin approves it in the console. The
+  offline `warden control-plane agent register|update|enable` commands are not yet
+  held: with host access they still widen the agent registry without a second person.
 - The offline `warden control-plane restore` can move the policy head back without
   approval.
 - The first-start import of the served YAML as version 1 is not gated: it is proven
@@ -1427,6 +2008,141 @@ and `warden_cp_agents{status}`.
 A write by another process (the offline registry CLI) is seen by the control plane within about
 2 seconds.
 
+## Operating the agent registry
+
+The [API above](#agent-registry-api) is how agents are written; this section is how the registry
+behaves once workers depend on it.
+
+**What the registry holds.** Per agent: the id, a display name, one or two public keys, the user
+groups that may delegate to it, the scopes a delegation may carry, a status (`active` or
+`disabled`) and a revision. An id matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$` and is never
+reused. A key is an `OKP`/`Ed25519` or `EC`/`P-256` public JWK; a private member, `jku`, `x5u`
+and `x5c` are refused. The registry holds at most 1000 agents. It does **not** hold the agent's
+identity mode: that stays in the settings field `agents[].identity` (and `identity.defaultMode`),
+so there is one source of truth for it and a registry write never changes how strictly a worker
+enforces identity.
+
+**Who may write it.** Every write is admin-only, because a key or group change decides who can
+mint tokens for the agent, and `PUT`, `disable` and `enable` need `If-Match: "r<revision>"`.
+The identity mode is admin-only as well: an editor may edit `agents` in the settings but not
+`agents[].identity` (see the [role matrix](#console-roles-and-the-role-matrix)). With
+`console.auth: none` a write through the API is `403 use_cli`; manage the registry with the
+offline CLI. With approvals on, registering an agent, adding a group, scope or key, and enabling
+an agent are held as `agents` change drafts, while disabling one and edits that only narrow apply
+at once (see [Change drafts](#change-drafts-and-the-two-person-rule-consoleapprovals)). The
+offline CLI is not held.
+
+### The offline CLI
+
+The CLI writes `<state-dir>/warden-cp.db` directly, with the control plane running or stopped; a
+running control plane serves the change within about 2 seconds. Only public keys are accepted, and
+output never includes a JWK coordinate. Each write is a `cli:<os user>` row in the admin audit
+log when admin audit is enabled.
+
+```sh
+warden control-plane agent register --state-dir /var/lib/warden-cp --id claude-code \
+  --display-name "Claude Code" --groups warden-agents --jwk-file claude-code.jwk.json
+warden control-plane agent list --state-dir /var/lib/warden-cp
+warden control-plane agent disable --state-dir /var/lib/warden-cp --id claude-code --revision 1
+warden control-plane agent enable --state-dir /var/lib/warden-cp --id claude-code --revision 2
+```
+
+`--revision` is the revision `agent list` shows; a stale one changes nothing and exits 1. Exit
+codes: 0 done, 1 refused with nothing changed (validation, conflict, key in use, unknown id),
+2 usage.
+
+### Rotating an agent's key
+
+An agent holds one or two keys, so a key is replaced without a gap. `agent update` replaces the
+agent's whole key set with the `--jwk-file` values it is given:
+
+1. Update to both keys (old and new) and restart the agent with the new private key. Both
+   thumbprints are accepted while the two are registered.
+2. Wait at least one Warden token lifetime (`tokenService.ttl`, default 15 minutes) plus the
+   clock skew after the agent last minted a token with the old key, then update to the new key
+   alone.
+
+```sh
+warden control-plane agent update --state-dir /var/lib/warden-cp --id claude-code --revision 3 \
+  --jwk-file claude-code-old.jwk.json --jwk-file claude-code-new.jwk.json
+```
+
+With approvals on, adding the new key through the API is held as an `agents` change draft, while
+removing the old one applies at once (the offline CLI is never held).
+
+Removing a key is not only a registry edit. A Warden token carries the thumbprint of the key it
+was minted for (`cnf.jkt`); once a worker applies the policy that no longer lists it, that token
+fails with `cnf_mismatch` and the worker closes the identified sessions that were opened under it.
+Keep both keys registered until the agent has switched, and allow one policy-wire cycle after the
+final update. (This is the agent's key; the control plane's own signing keys rotate with
+[`keys rotate`](#signing-keys-keys).)
+
+### Binding a worker to an agent
+
+A worker serves exactly one agent. It takes the id from the first of these that is set:
+
+1. `--agent-id` on `warden run`;
+2. `central.agentID` in the worker config;
+3. the derived default (`defaultAgentID`): the id of the one configured agent policy when there is
+   exactly one, else `agent:<port>` from the listen port.
+
+An explicit id (1 or 2) that is not a valid agent id stops the worker at startup. The derived id
+is used as it is and is never validated; it matches a registry entry only when the two ids are
+identical (`agent:8080` is a valid id shape, so it could be registered, but nobody does by
+accident). Name the worker explicitly with `--agent-id` or `central.agentID` so the registry
+governs it by design rather than by coincidence. The worker reports
+the id and its identity mode on every heartbeat so the Agents tab can join them with the registry.
+
+### The kill switch
+
+On every applied policy the worker finds its own agent in `registeredAgents` (id, status and key
+thumbprints, served on the `/policy` long-poll and inside signed bundles). While that agent is
+`disabled`, in **every** identity mode including `off`, the worker:
+
+- refuses each new CONNECT, request and HTTP/2 stream with `403 {"error":"agent_disabled"}`,
+  ahead of identity, the block list and policy, so nothing reaches a judge, a secret swap or an
+  upstream;
+- closes every open tunnel, keep-alive or HTTP/2 connection and WebSocket, and writes one
+  `agent_disabled` deny event for each (a request already in flight completes);
+- lifts all of it on the next applied policy after the agent is enabled again.
+
+An agent with no registry entry is not disabled: an unregistered id is not a registry agent (its
+Warden tokens fail the binding check with `agent_unregistered` instead). A disabled agent also
+cannot get a token: the token endpoint answers it `invalid_client`, the same as an unknown agent.
+
+### What survives what
+
+| Event | Effect on a disabled agent |
+|---|---|
+| A policy rollback or any settings save | None. The registry is overlaid on the served policy and is never part of a policy version, so a rollback can neither re-enable an agent nor restore a removed key. |
+| The control plane is down | Workers keep enforcing the last-known-good policy, so a disabled agent stays disabled. A worker that restarts during the outage uses its cached bundle only with the opt-in [last-known-good cache](#last-known-good-bundle-cache-opt-in) (`controlPlane.stateDir` with pinned bundle keys, and a bundle issued within `controlPlane.bundleCacheMaxAge`); otherwise it denies all until its first pull. |
+| The registry cannot be read | The control plane logs `agentreg_load_failed` once per failure episode (it logs again after a successful read and a later failure) and keeps serving the last-known-good list. |
+| A bundle is rejected (bad signature, expired) | The worker keeps its last-known-good bundle, so the agent stays in the state that bundle had. |
+| An old worker without the `agentreg/v1` capability | It decodes the list and ignores it: **it does not enforce disable.** The Agents tab warns that the disabled agent is still served by workers without `agentreg/v1`. Upgrade it before relying on the switch. |
+
+A disable reaches a worker within one policy long-poll: the control plane serves it within a few
+seconds of the write and the worker applies it at once.
+
+### Require mode and the registry
+
+Identity `require` mode (settings `agents[].identity: require`) is what makes the registry
+mandatory: every request must carry a Warden token bound to the worker's agent. The guard on the
+switch to `require` (a connected worker without `identity/require-v1` blocks it unless an admin
+forces it) is in [Moving an agent from attribute to require](#moving-an-agent-from-attribute-to-require).
+It is advisory outside token or certificate worker auth, because the agent id a worker reports is
+self-asserted. When an agent is disabled or a key removed, the identified sessions armed under the
+old binding are closed after the next applied policy; see
+[Agent binding of Warden tokens](identity-contract.md#agent-binding-of-warden-tokens).
+
+### The Agents tab
+
+With a state dir the console has an **Agents** tab: the registry list, an admin form to register,
+edit, disable and enable (writes send `If-Match`, a private JWK is refused in the browser, and only
+public JWKs are shown), and each agent's bound workers from the heartbeat. Warnings name a disabled
+agent still served by a worker without `agentreg/v1`, an active agent no worker serves, a worker
+reporting an unregistered agent id, and workers that cannot enforce `require`. The tab is hidden on
+a control plane without a state dir.
+
 ## Worker token CLI
 
 `warden control-plane token` creates, lists and revokes worker tokens straight on
@@ -1473,9 +2189,10 @@ repeat revoke) appends nothing.
 
 Until now every worker and the control plane shared one bearer token (`WARDEN_CP_TOKEN` in the
 compose recipes, named by `--token-env`). Per-worker tokens replace it: one revocable `wwt_...`
-token per worker, bound to one proxy id. The control-plane compose recipe and the e2e stack have
-already moved (see [Run it](#run-it)); the other recipes still use the shared token until they follow.
-The control plane has three auth modes, resolved once at
+token per worker, bound to one proxy id. The e2e stack and the compose recipes other than
+`docker-compose.control-plane.yml` run on them; the control-plane recipe has moved on to
+[worker certificates](#migrating-from-per-worker-tokens) (see [Run it](#run-it)).
+The control plane has four auth modes, resolved once at
 startup and logged as `auth_mode=...`:
 
 | `auth_mode` | When | Workers authenticate with |
@@ -1583,7 +2300,8 @@ stop the token working at once and give the worker a new one, with the worker ne
 
 P1 has no prefix binding: a token is bound to exactly one proxy id, compared exactly. Run each
 replica with its own token and its own stable `central.proxyID`. Autoscaled pools whose replicas
-cannot carry a stable id move to per-pod certificates with worker enrollment in P2 (W-P2-WCA).
+cannot carry a stable id use a prefix-bound enrollment token with worker certificates
+(W-P2-WCA): see [Replica pools](#replica-pools-prefix-tokens).
 
 ### A revoked worker
 
@@ -1706,6 +2424,9 @@ account.
 warden control-plane keys list --state-dir /var/lib/warden-cp [--purpose token] [--jwks] [--json]
 warden control-plane keys rotate --purpose token --state-dir /var/lib/warden-cp [--config F] \
   [--emergency --yes]
+warden control-plane keys rotate --purpose bundle --stage --state-dir /var/lib/warden-cp
+warden control-plane keys rotate --purpose bundle --activate --state-dir /var/lib/warden-cp \
+  --admin-url https://cp.example.internal:7070 --api-key-file rotate.key [--force]
 warden control-plane keys export --purpose bundle --state-dir /var/lib/warden-cp [--state next]
 warden control-plane keys reset --purpose token --yes --state-dir /var/lib/warden-cp
 ```
@@ -1721,19 +2442,35 @@ warden control-plane keys reset --purpose token --yes --state-dir /var/lib/warde
   An emergency whose revocation committed but whose fresh `next` could not be
   written still stands: the command exits **3** and says the old key is
   revoked — the error names only the missing `next` — and its audit row has
-  outcome `error`. The `bundle` purpose refuses here: it rotates only through
-  the staged rollout of [the key rotation runbook](runbooks/key-rotation.md),
-  and the refusal names the `next` kid to pin.
+  outcome `error`. The `bundle` purpose rotates only in two steps, because workers
+  pin its keys: `--stage` makes the control plane sign every envelope with both
+  the active and the next key (a worker pinning either verifies it), and
+  `--activate` makes the next key the only signer, keeping the old one published
+  for `keys.bundle.overlap`. `--activate` is refused, naming the proxy ids,
+  unless every online worker reports the next kid in its heartbeat `pinnedKids`;
+  it reads them from the running control plane (`--admin-url` and an API key with
+  the `traffic:read` scope in `--api-key-file` or `$WARDEN_API_KEY`) and refuses
+  when it cannot. `--force` overrides the check and records the missing ids in
+  the one audit row it writes; `--activate --emergency --yes` promotes at once
+  and revokes the old key; `--unstage` takes the staged key back out of signing and
+  is the recovery when its material is lost (`/readyz` then answers
+  `staged_key_unavailable`). `--admin-url` must be https (http only for loopback). Without a step the bundle purpose is refused and the
+  `next` kid to pin is named. The scheduler never rotates the bundle purpose
+  (`keys.bundle.rotationInterval` must be `0`). The whole flow, the emergency
+  drill and the restore step are in
+  [the key rotation runbook](runbooks/key-rotation.md#6-staged-bundle-rotation).
 - **export** prints one key's public JWK (`--state next` or `active`) or, by
-  default, the active + next JWKS — the exact document a worker pins in
-  `controlPlane.bundleKeysFile`.
+  default, the published JWKS (active, next, and a retired key inside its
+  overlap) — the exact document a worker pins in `controlPlane.bundleKeysFile`.
+  It never prints private material.
 - **reset** deletes every key of the purpose (rows and PEM files) and
   regenerates `token`/`bundle`; `--purpose ca` only clears, the CA key is
   imported, not generated. It needs `--yes`.
 
 When admin audit is on in the state dir, `rotate` and `reset` append one row
 (`keys.rotate_requested`, `keys.reset`; `auth_method` `cli`, actor
-`cli:<os user>`) and the transitions the request causes carry the same actor.
+`cli:<os user>`; a bundle `--stage` or `--activate` carries `op=stage` or
+`op=activate`, and a forced activation `forced=true` with the missing proxy ids) and the transitions the request causes carry the same actor.
 With no audit table a log line names the action instead; with rows present and
 the audit key missing or mismatched the command refuses and changes nothing.
 
@@ -1742,7 +2479,7 @@ Exit codes:
 | Code | Meaning |
 |---|---|
 | 0 | Applied. |
-| 1 | Nothing changed — a refusal: no or too-young `next` key, a staged bundle rotation, or `reset` under the running control plane's state-dir lock. A reset that partially applied also exits 1: its rows are gone and its audit row has outcome `error` with the removed count. |
+| 1 | Nothing changed — a refusal: no or too-young `next` key, a bundle rotation without `--stage` or `--activate`, an `--activate` the pin check refused, or `reset` under the running control plane's state-dir lock. A reset that partially applied also exits 1: its rows are gone and its audit row has outcome `error` with the removed count. |
 | 2 | Usage error: a bad flag, a missing or unopenable state dir or audit key, a missing `--yes` or a declined confirmation, or `rotate --purpose ca`. |
 | 3 | A stood rotation: the promotion committed, so the old key is out of the signing slot — revoked under `--emergency`, retired otherwise — and only the fresh `next` key is missing. |
 
@@ -1991,6 +2728,25 @@ Re-running `create` with the same name, value and binding is always a no-op,
 even after the token was used up, expired or revoked: it is never revived or
 extended, and the command prints its state.
 
+#### Enrollment tokens API and console panel
+
+Admins can do the same without shell access to the state dir, under
+`/dashboard/api/worker-enrollments` (404 unless `workerCA.enabled` with a state
+dir; the console's Fleet page shows a "Worker enrollment tokens" panel for admins):
+
+| Request | Role, API key scope | Result |
+|---|---|---|
+| `GET /dashboard/api/worker-enrollments` | admin, `workers:admin` | 200, every token (revoked included): `id`, `name`, `workerId` or `workerIdPrefix`, `maxUses`, `uses`, `createdBy`, `createdAt`, `expiresAt`, `revokedAt`. Never the token or its hash. |
+| `POST /dashboard/api/worker-enrollments` `{name, workerId or workerIdPrefix, maxUses?, expiresIn?}` | admin, session only (`none`) | 201 with the metadata and `token`, the only time the plaintext is shown (`Cache-Control: no-store`). 400 for invalid input, an unknown field or an `expiresIn` above `workerCA.enrollTokenMaxTTL`, 409 for a taken name, 413 over 8 KiB. |
+| `DELETE /dashboard/api/worker-enrollments/{id}` | admin, `workers:admin` | 204, idempotent: the token's next `POST /control/enroll` is a 401. 404 for an unknown id. |
+
+Minting a credential is never available to an API key. With `console.auth: none`
+a POST or DELETE answers 403 `{"error":"use_cli"}` and GET still lists. Create
+and revoke are admin-audited as `worker_enroll_token.create` and
+`worker_enroll_token.revoke` (target `worker_enrollments`, target_ref
+`enroll_token:<id>`); the audit state hash covers token metadata only, so no row
+holds the token or its hash.
+
 ### Worker certificate authentication and `POST /control/renew`
 
 With `workerCA.enabled` and TLS (`--ca-cert`/`--ca-key`), the listener asks every
@@ -2073,18 +2829,169 @@ surviving certificate names as `prev_serial` stays with it).
 certificates never travel over plain HTTP, and the control plane exits before
 listening otherwise.
 
+## Migrating from per-worker tokens
+
+Per-worker `wwt_` tokens are long-lived bearers. [Worker certificates](#worker-ca-workerca) replace
+them with an mTLS client certificate that lives 24 hours, is renewed by the worker itself and can be
+revoked at once. Nothing changes by default: `workerCA.enabled` and `--require-worker-certs` stay off
+until you opt in, and a control plane with the worker CA enabled accepts a certificate next to the
+tokens it already holds, so workers can move one at a time. The operations runbook is
+[docs/runbooks/worker-certs.md](runbooks/worker-certs.md).
+
+The compose recipe `deploy/compose/docker-compose.control-plane.yml` (and its signed-bundles overlay) is
+already on certificates; the e2e stack, `docker-compose.yml`, the Claude Code and Codex recipes and the
+other `configs/config*-worker.yaml` files keep per-worker tokens and follow the steps below when you
+want them to move.
+
+### Certificate lifecycle
+
+- A certificate lives `workerCA.certTTL` (default 24h, 1h to 7d) and carries one SAN,
+  `spiffe://<trustDomain>/warden/worker/<id>`; the id is the worker's identity everywhere (a
+  different `X-Warden-Proxy-ID` is a `403`).
+- The worker renews at about 50% of the lifetime (plus or minus 10%, measured on its own monotonic
+  clock, so clock skew does not move it) with a fresh key, swaps the certificate in, rotates its
+  connections to the control plane (a held long-poll presents the new certificate too) and persists it under `controlPlane.stateDir`. A failed renewal retries from 5 seconds up
+  to 5 minutes. With the 24h default the worker tolerates a control plane outage of about 12 hours.
+- An expired certificate gets no grace: the worker keeps its last-known-good (default-deny) policy,
+  logs `worker cert expired` and must re-enroll. Watch `warden_worker_cert_expiry_seconds` and
+  `warden_worker_cert_renewals_total{outcome}` (see the runbook).
+- A restart reuses the persisted certificate: no new `worker.enrolled` audit row, no token read.
+
+### Replica pools (prefix tokens)
+
+A pool whose replicas cannot carry a stable id enrolls with one token bound to an id prefix:
+
+```sh
+warden control-plane enroll-token create --name pool-a --worker-id-prefix pool-a- --max-uses 20 \
+  --config F --state-dir D --out ./pool-a.enroll
+```
+
+Every replica gets the same token value and a persistent `controlPlane.stateDir` of its own. It sends
+a suffix (the host name, or the variable named by `controlPlane.enrollment.workerIdSuffixEnv`) and
+becomes `pool-a-<suffix>`, which must match `^[A-Za-z0-9._-]{1,128}$`. The token is single-use per
+replica up to `--max-uses` (at most 100) and expires after `workerCA.enrollTokenTTL`, so create it
+when the pool scales up. Leave `central.proxyID` unset (or equal to the final id). A replica without a
+persistent state directory enrolls again at every start and uses up a slot each time.
+
+### TLS passthrough
+
+The control plane reads the worker's certificate from the TLS handshake. A load balancer or ingress
+that terminates TLS in front of it breaks worker mTLS: it must pass TLS through (layer 4, with
+`--ca-cert` and `--ca-key` on the control plane itself). Forwarded client-certificate headers
+(`X-Forwarded-Client-Cert`, `X-SSL-Client-Cert` and the like) are never trusted. Only the worker routes need
+passthrough: give workers their own passed-through address if a terminating proxy fronts the console.
+
+### Migration steps (no downtime)
+
+Run them in order. Each step leaves every worker working, and a control plane restart is not an
+egress outage: workers keep enforcing the last policy they pulled and reconnect when it is back.
+`D` is the control plane's `--state-dir` and `F` its `--config` file.
+
+1. **Create the worker CA** (production: `--key-source keys`, which needs `keys.enabled: true` and a
+   state dir that has run once; development: `--key-source file`):
+
+   ```sh
+   warden control-plane ca init --out-dir ./worker-ca --trust-domain warden.example \
+     --key-source keys --config F --state-dir D
+   ```
+
+   Move `./worker-ca/root.key` to offline storage and delete it from this host. The control plane
+   only needs `intermediate-chain.pem`.
+2. **Enable `workerCA` and restart the control plane with the token mode it already has.** Add to
+   `F`:
+
+   ```yaml
+   workerCA:
+     enabled: true
+     trustDomain: warden.example
+     certFile: /etc/warden/worker-ca/intermediate-chain.pem
+     keySource: keys
+   ```
+
+   Copy `intermediate-chain.pem` from step 1's `--out-dir` (`./worker-ca`) to that `certFile` path
+   on the control plane host.
+
+   Keep `--require-worker-tokens` (or `--legacy-token-env`) as it is, and keep `--ca-cert` and
+   `--ca-key` (the worker CA needs TLS). The startup line now also shows `worker_ca=enabled` and
+   the tokens still work. Enrollment answers `503` until the key loads.
+3. **Mint one enrollment token per worker** (the id is the worker's proxy id; a pool uses a prefix
+   token, above):
+
+   ```sh
+   warden control-plane enroll-token create --name worker-1 --worker-id worker-1 \
+     --config F --state-dir D --out ./worker-1.enroll
+   ```
+
+   Hand each worker its token through your secret mechanism (an environment variable), never in
+   the config file. A token expires after `workerCA.enrollTokenTTL` (1h by default; the longest an
+   operator may ask for is `enrollTokenMaxTTL`), so mint them just before the rollout, or pass
+   `--expires-in`.
+4. **Enroll the workers one at a time, while their tokens still work.** In the worker's config
+   replace `controlPlane.tokenEnv` and `central.tokenEnv` with a persistent state directory and the
+   enrollment variable, then restart that worker:
+
+   ```yaml
+   controlPlane:
+     stateDir: /var/lib/warden-worker      # absolute path on a persistent volume
+     enrollment:
+       tokenEnv: WARDEN_WORKER_ENROLL_TOKEN
+   ```
+
+   Leave `central.proxyID` as it is (it must equal the worker id) and the endpoints unchanged. The
+   worker enrolls on start, then pulls policy and ingests with its certificate.
+5. **Confirm every worker is on a certificate.** `GET /dashboard/api/workers` (or the console's Fleet
+   page) must show `authKind: cert` for every worker, with a `certSerial` and a `certNotAfter`
+   about a day out. Wait for one renewal on one worker (`certSerial` changes after about 12
+   hours, or watch `warden_worker_cert_renewals_total{outcome="ok"}`). A worker still showing `token`
+   or `legacy` is not migrated yet: do not continue.
+6. **Restart the control plane with `--require-worker-certs`**, replacing `--require-worker-tokens`
+   (and without `--legacy-token-env`). The startup line says `auth_mode=strict-certs`. From now on
+   a `wwt_` bearer, the shared token or an anonymous caller gets `401` on `/policy`,
+   `/control/heartbeat` and `/central/ingest`. Only do this once step 5 is true for every worker,
+   including workers that are rarely restarted: a worker you missed loses its policy updates and
+   ingest and keeps only its last-known-good policy.
+7. **Revoke the `wwt_` tokens**, after a soak period (see Rollback) in which nothing needed them:
+
+   ```sh
+   warden control-plane token list --state-dir D
+   warden control-plane token revoke --id wt_... --state-dir D
+   ```
+
+   Then unset the old token variables everywhere they were distributed.
+
+### Rollback
+
+- **Before step 6** (tokens are still accepted): put `tokenEnv` back in the worker config, remove
+  `enrollment`, restart the worker. Nothing else changes; its certificate is simply not used.
+- **After step 6 but before step 7**: restart the control plane with `--require-worker-tokens`
+  instead of `--require-worker-certs`. Workers on certificates keep working (a certificate is
+  accepted next to the tokens) and workers can be switched back one at a time as above. This is why
+  step 7 comes after a soak: revoked tokens cannot be un-revoked, and a replacement needs `warden
+  control-plane token create`.
+- **After step 7**: mint new tokens with `warden control-plane token create`, switch the workers
+  back, and restart the control plane with `--require-worker-tokens`.
+- A worker whose certificate was revoked or expired re-enrolls with a new token
+  ([runbook](runbooks/worker-certs.md#re-enroll-a-worker)).
+
 ## Signed bundles (`--bundles`)
 
-`warden control-plane --bundles=off|offer|require` (default `off`) lets the
-control plane sign what it serves on `GET /policy` with its `purpose=bundle`
-signing key (see Signing keys above). `off` keeps `/policy` byte-identical: same
-body, same ETag, no signing, no extra work. This section is the serving side;
-a worker that pins the key and verifies the envelope is a later ticket, so
-today the workers keep pulling the unsigned policy.
+`warden control-plane --bundles=off|offer|require` lets the control plane sign
+what it serves on `GET /policy` with its `purpose=bundle` signing key (see
+Signing keys above). Unset it is `require` when `--state-dir`,
+`--policy-store=versioned` and `keys.enabled: true` are present, and the legacy
+unsigned policy with one startup WARN naming the missing piece when not (it never
+stops a control plane that could not sign anyway); an explicit `offer` or
+`require` without them refuses to start. `--bundles=off` is the explicit,
+temporary opt-out and logs a WARN: `/policy` is byte-identical to before (same
+body, same ETag, no signing, no extra work). Upgrade steps, mixed fleets and
+rollback are in [Upgrading to required signed bundles](#upgrading-to-required-signed-bundles).
+A worker that pins the key and verifies the envelope is described in
+[Pinning bundle keys](#pinning-bundle-keys-worker-config).
 
 - **Prerequisites.** `offer` and `require` need `--state-dir`,
   `--policy-store=versioned` and `keys.enabled: true`; startup fails with an
-  error naming each missing piece, and also when no bundle key can be loaded.
+  error naming each missing piece, and also when no bundle key can be loaded. An
+  unset `--bundles` is not an error: it is the legacy wire plus a WARN.
 - **Negotiation.** A request with `Accept: application/vnd.warden.bundle.v1+json`
   gets the envelope with that `Content-Type`. Other requests get the legacy
   policy in `offer` and `406 {"error":"signed_bundle_required"}` in `require`.
@@ -2097,6 +3004,21 @@ today the workers keep pulling the unsigned policy.
   appends a row with reason `token_jwks` first, then signs. A bundle key change
   appends nothing: the same content is re-signed under the same seq, which a
   verifier treats as a refresh. The signed content for a seq never changes.
+- **Token issuer.** With `tokenService.enabled`, the payload carries a top-level
+  `tokenIssuer` (the value of `tokenService.issuer`) and `contentSha256` covers
+  it, so a worker verifies Warden tokens against an issuer the signer vouched
+  for and never against `cpID`. The member is omitted when the control plane
+  mints no tokens. A change of it (an edited issuer, the token service switched
+  on or off, also while the control plane was down) appends a row with reason
+  `token_issuer` first, like a JWKS change, so one seq never covers two issuers.
+  The agent key thumbprints a worker compares with a token's `cnf.jkt` are the
+  `registeredAgents[].jkt` already inside the signed policy; a registry change
+  appends an `agent_registry` row and moves the seq. `tokenService.issuer` must
+  differ from `identity.issuer` (startup fails naming both keys, and while the token
+  service is on a settings write or policy publish that sets `identity.issuer` to the token
+  issuer is refused the same way), because the
+  two token kinds are told apart by their issuer. Nothing but the issuer URL and
+  public thumbprints is added: no key material reaches the bundle, logs or audit.
 - **Credential.** `settings.secrets.accessKeyId` and `secretAccessKey` are not in
   the signed payload. They travel in the envelope's unsigned `credentials`
   sidecar and the payload carries their SHA-256. Nothing logs either.
@@ -2105,6 +3027,18 @@ today the workers keep pulling the unsigned policy.
   seq. `--bundle-seq-floor N` appends one `restore` row at seq N at startup when
   the publish log is below it: set it above the highest seq any worker reports
   after restoring a backup, or pinned workers reject new bundles as rollbacks.
+- **Key rotation.** Workers pin the bundle key, so it rotates only by command and
+  in steps (`keys rotate --purpose bundle --stage`, then `--activate`; see Keys
+  CLI). While a key is staged every envelope carries two signatures, one per key,
+  and a worker that pins either key verifies it; the log line `bundle signed`
+  lists both kids. A key change re-signs the same seq, so it is a refresh to a
+  worker. The activation checks the workers' reported `pinnedKids` first. Rollout
+  order (offer, pin every worker, require), emergency rotation and
+  `--bundle-seq-floor` after a restore are in the
+  [key rotation runbook](runbooks/key-rotation.md#6-staged-bundle-rotation); the
+  compose recipe
+  [`deploy/compose/docker-compose.bundles.yml`](../deploy/compose/docker-compose.bundles.yml)
+  exports the public JWKS and pins every worker to it.
 - **Failure.** If signing fails, the control plane keeps serving the last
   envelope until it expires, logs `bundle sign failed` with the seq and kid, and
   `/healthz` answers `200 degraded: bundle signing failed`. With no envelope,
@@ -2119,6 +3053,10 @@ today the workers keep pulling the unsigned policy.
 absent or disabled both answer 404, no `tokensvc` table is created and `/policy` is
 byte-identical; the block is the only switch (no flag) and never reaches a worker. See the
 commented block in `configs/config.example.yaml` for every key and default.
+
+The operator and harness-author guide (the flow, request and error examples, the reason enum, rate
+limits, records and degraded modes) is [token-service.md](token-service.md); this section is the
+route-level reference.
 
 - **Startup checks.** Enabling needs `--state-dir`, a served `identity:` block with an issuer
   and audience (subject tokens are verified against the same IdP as workers, narrowed to
@@ -2138,7 +3076,10 @@ commented block in `configs/config.example.yaml` for every key and default.
   scope?}` with `expires_in` equal to `exp - iat`. Errors are RFC 6749 section 5.2 JSON
   `{error, error_description}`: 400 for `invalid_request`, `invalid_grant`,
   `unauthorized_client`, `invalid_scope`, `invalid_target` and `unsupported_grant_type`, 401
-  `invalid_client`, 503 `temporarily_unavailable` with `Retry-After`. `error_description` is a
+  `invalid_client`, 503 `temporarily_unavailable` with `Retry-After`. With the IdP unreachable,
+  a subject token under a cached kid still verifies, and a cold key cache or a kid missing from
+  the cache gives 503 `idp_unavailable` (retry), never `invalid_grant`/`subject_invalid`, so an
+  IdP outage during a key rotation does not force a new sign-in. `error_description` is a
   fixed word from a closed set and never echoes a token, assertion or claim; every
   `invalid_client` answers the same `client_authentication_failed`, so an unknown agent, an
   unknown key, a bad signature, a replay and a disabled agent cannot be told apart. Every reply
@@ -2150,8 +3091,11 @@ commented block in `configs/config.example.yaml` for every key and default.
   published key, answer 503 `signer_unavailable` with `Retry-After` for about 2 minutes.
   Consumers of `/.well-known/jwks.json` must refetch on an unknown kid (rate-limited); Warden
   workers never use it (they take token keys from signed bundles). The key must also be in the
-  JWKS the control plane serves. Once signed bundles land (#96)
-  the kid must also be in the last-served bundle token JWKS.
+  JWKS the control plane serves. With signed bundles on (`--bundles=offer|require`, or unset with the prerequisites) it must also
+  be in the token JWKS of the bundle served now (the last one signed, which stays served while
+  the publisher is degraded), because a pinned worker holds token keys only from there; until
+  that bundle is signed the service answers `signer_unavailable`. This covers the first key and
+  an emergency rotation, and a degraded bundle publisher. With bundles off the check is skipped.
 - **Agent registry cache.** The control plane has one registry store; it serves reads from a
   snapshot that its own writes invalidate at once and that a 2 s watch refreshes for other
   processes, so an agent disabled with the offline CLI stops authenticating within about 2 s.
@@ -2204,7 +3148,10 @@ warden control-plane block list --state-dir D [--json]
   duplicate sub or email is refused, the reason is at most 512 bytes with no
   control characters, and the count and size limits apply. A validation error
   exits 1 with the API's message.
-- `remove` exits 2 for an id that is not on the list.
+- `remove` exits 2 for an id that is not on the list. With approvals enabled on
+  the state dir it exits 0, prints the id of a pending change draft and removes
+  nothing; the row it appends is a `blocked_users.remove` row targeting
+  `change_draft` (`draft:<id>@r1`, op `held`). `add` is always immediate.
 - `list` opens the database read-only.
 - `--admin-audit-key-file` (add and remove) defaults to `<state-dir>/cp-audit.key`.
 
@@ -2309,7 +3256,16 @@ agents:
   `agent:<port>`), then `identity.defaultMode`, then off. `require` is a Phase 2
   mode: config validation rejects it, and a worker that is served it (a newer
   control plane) keeps its previous identity config and logs one warning.
-- `issuer` and `audience` are required once any mode is `attribute` or `challenge`. An `http`
+- `acceptDexTokens` (optional boolean) says whether the worker accepts a user token straight
+  from the IdP next to the Warden tokens the control plane mints: unset is true when `issuer` is
+  set and false otherwise; `false` refuses each IdP token as `unbound_token`, and then `attribute`
+  needs no `issuer` or `audience` (challenge still does). `true` needs an `issuer`. See
+  [identity-contract.md](identity-contract.md#warden-tokens-phase-2).
+- `acceptDexTokens: false` with `challenge` mode is valid but logs a warning: the device
+  sign-in hands out IdP tokens that the worker then refuses (`unbound_token`), so clients must
+  exchange them for Warden tokens at the token endpoint.
+- `issuer` and `audience` are required once any mode is `attribute` or `challenge`, unless
+  `acceptDexTokens` is `false` in `attribute` mode. An `http`
   issuer is rejected unless `internalIssuerURL` is set; use `internalIssuerURL`
   when workers reach the issuer on a container network (`http://dex:5556`) while
   tokens carry the public issuer.
@@ -2320,7 +3276,7 @@ agents:
   serves, and tokens it cannot verify are recorded as unverified and allowed.
 - A settings change hot-reloads with no restart. The verifier is rebuilt only when
   `issuer`, `internalIssuerURL`, `audience`, `jwksURL`, `allowedAZP`, `groupsClaim`,
-  `clockSkewSeconds` or `maxTokenTTLSeconds` change; a mode-only change swaps the
+  `clockSkewSeconds`, `maxTokenTTLSeconds` or `acceptDexTokens` change; a mode-only change swaps the
   mode and keeps the verifier. A failed rebuild keeps the previous config and logs
   one warning (no token data).
 
@@ -2379,6 +3335,60 @@ served settings turn challenge mode on, the fleet view marks each connected
 worker without it with *identity: challenge not supported, still allowing*, and
 the control plane logs `worker_lacks_identity_challenge` once per worker per
 policy version. Do not rely on challenge mode until no worker carries that mark.
+
+### Moving an agent from attribute to require
+
+A worker that does not know `require` keeps its previous identity config, which is
+attribute mode: it would let token-less traffic through for an agent you believe is
+enforced. So the control plane guards the switch.
+
+1. **Name every worker's agent.** Start each worker with `--agent-id` or set
+   `central.agentID`. A worker that sends no agent id is shown as *agent unknown*
+   and does **not** block a per-agent switch (the control plane cannot tell which
+   agent it serves), but it does block `identity.defaultMode: require`.
+2. **Upgrade the workers.** Workers on this build advertise `identity/require-v1` in
+   every heartbeat. The Agents tab and the worker list show *N connected workers
+   for this agent do not enforce require mode* (and *identity: require not
+   supported, still allowing*) for any that do not.
+3. **Save the mode.** `POST`/`PUT /dashboard/api/settings` (or applying a held
+   change draft) that newly sets `agents[].identity` or `identity.defaultMode` to
+   `require` is refused with `409 {"error":"workers_lack_capability","workers":[ids]}`
+   while a connected worker serving that agent (any connected worker, for the
+   default) lacks the capability. Nothing is written. "Connected" means a heartbeat
+   or poll in the last 45 seconds; a worker that is offline is not listed, so a
+   worker that reappears later without the capability is only flagged in the fleet
+   view and logged once per policy version as `worker_lacks_identity_require`.
+   Re-check the fleet view after every worker restart. An unrelated settings save
+   while `require` is already in force is never refused for this reason.
+4. **Force, if you must.** `?force=true` on the same request overrides the refusal.
+   Only an admin may force; the admin audit row of the write records
+   `force=true` and the refused worker ids (`workersLacking`, with the full
+   `workersLackingCount`; the id list is cut at 100). The same parameter works on a
+   policy rollback, on change draft submit and approve, and on a break-glass
+   emergency apply, because each of them can newly set `require`. Applying a held
+   draft re-runs the check, so force it on the approve (or emergency-apply) request.
+5. **Roll back.** Set the agent's identity back to `attribute` (or `off`) in the same
+   settings form; leaving require is never refused. If `identity.defaultMode` is
+   `require`, clearing an agent's override does **not** leave require: the agent then
+   inherits the default (and clearing it is guarded like any switch to require). Set
+   the override to `attribute`, or change the default.
+
+The guard decides per worker from the mode that worker would resolve (the agent's own
+`identity`, else `identity.defaultMode`), so a new `require` default does not count a
+worker whose agent keeps its own override, and clearing or removing an override under a
+`require` default counts the workers of that agent.
+
+**What the guard cannot see.** A worker's agent id and capabilities are what the worker
+says in its heartbeat. With legacy shared-token or no worker authentication they are
+unauthenticated claims, so the guard is advisory; it is binding only when workers
+authenticate with worker tokens or mTLS certificates. The guard also lives only on the
+control plane's write paths. Editing the served policy file directly and the offline
+`warden policy import` bypass it; both are only caught afterwards, by the fleet view
+flag and the `worker_lacks_identity_require` log line.
+
+`agents[].identity` and `identity.defaultMode` are admin-only settings fields, so an
+editor gets `403 role_required` for them, including through a policy rollback that
+would change them.
 
 ### Where the token travels
 
@@ -2443,6 +3453,18 @@ diagnose mass `expired` or not-yet-valid failures.
 `identity_reason` values in the range). It is omitted when no event in the range
 carries identity fields.
 
+Agent binding (W-P2-WBND-02): a worker serves exactly one agent, and every
+Warden token it verifies is checked on every request against the registered
+agents of the bundle currently applied: the token's `act.sub` must be that agent,
+the agent must be active, and `cnf.jkt` must be one of its registered key
+thumbprints (`agent_unregistered`, `agent_disabled`, `agent_mismatch`,
+`cnf_mismatch`, in that order). This is agent match plus key liveness within one
+long-poll cycle, **not** proof of possession: a token is a bearer credential. A
+derived worker id such as `agent:8080` matches a registry id only when identical, so bind
+the worker with `--agent-id`. Events and decision lines of a valid Warden
+identity carry the agent (`user_act` on events, `user.act` on the decision line)
+and `identity_token_type`; no token or `cnf` value is ever logged.
+
 Recommended alerts:
 
 - The non-valid share per worker, for example
@@ -2452,6 +3474,37 @@ Recommended alerts:
 - `warden_identity_verify_total{result="expired"}` rising during a control plane
   outage (tokens cannot be renewed); check `warden_controlplane_clock_skew_seconds`
   before blaming the outage.
+
+### Require mode: session closing and degraded modes
+
+In `require` mode (W-P2-WBND-09) the worker registers each session that holds a
+verified Warden token in the block list's session registry and closes it at the
+token's `exp` (raw tunnels and WebSockets at `exp` plus `identity.clockSkewSeconds`;
+see [the identity contract](identity-contract.md#closing-sessions-at-token-expiry-w-p2-wbnd-09)).
+It also re-checks them after each applied bundle, so a removed key, a disabled
+agent or a rotated-out signing key ends open tunnels at the apply instead of at
+token expiry. Each cut is one deny event (`identity_expired`, or `identity_required`
+with the verifier reason in the decision log) and one `warden.blocked.total` count.
+
+Degraded modes:
+
+- **Control plane down:** a require-mode agent keeps working until its current
+  token expires (at most 15 minutes, one token TTL), then its sessions are closed
+  and new CONNECTs get the 407, so it fails closed one TTL later. Tokens cannot be
+  renewed while the control plane (and its token service) is unreachable.
+- **Dex down:** only new exchanges fail (`login_required` once the cached ID token
+  ends). Existing Warden tokens and sessions are unaffected until their `exp`.
+- **Restart with the control plane down:** the worker reloads its bundle only from
+  the opt-in [last-known-good cache](#last-known-good-bundle-cache-opt-in) (`controlPlane.stateDir` with pinned keys); without it the
+  worker has no token keys and stays fail-closed (`jwks_unavailable`).
+
+Runbook: after a scheduled signing-key rotation the control plane refuses to mint
+with a new key until the bundle that publishes it is signed. If the bundle
+publisher is degraded at that moment (`/healthz` answers `200 degraded: bundle
+signing failed`), minting stops (`503 signer_unavailable`) until the next
+successful bundle sign, while tokens already minted keep working until `exp`.
+Fix the publisher (signer key, bundle store) and the next sign lifts the guard; do
+not disable bundles to get around it.
 
 ### Block list enforcement
 
@@ -2469,6 +3522,9 @@ expired, bad signature): a match can only deny. Gaps:
 
 - A request that carries **no token** is anonymous in attribute mode and is not
   matched (P2 require mode closes this).
+- A token whose key cannot be checked (`unverified`, `jwks_unavailable`: a cold
+  key cache, or a kid absent from the cache while the IdP is unreachable)
+  carries no claims and is not matched, the same as no token.
 - With `identity` mode off the worker parses no token, so there are no claims to
   match: the block list needs attribute mode.
 - In transparent mode there is no `CONNECT` and no `Proxy-Authorization`, so the

@@ -98,6 +98,9 @@ func (f *FakeAnalyticsStore) GetEvents(filter analytics.EventFilter) ([]analytic
 		if !filter.MatchesUser(e) {
 			continue
 		}
+		if !filter.MatchesAct(e) {
+			continue
+		}
 		out = append(out, e)
 		if filter.Limit > 0 && len(out) >= filter.Limit {
 			break

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ethosagent/warden/internal/agentid"
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/integration"
@@ -69,17 +71,22 @@ type Server struct {
 	// changeDrafts serves the change draft routes; nil = they answer 404
 	// (W-P2-APPR-04).
 	changeDrafts ChangeDrafts
+	// approvalsReplayTimeout is console.approvals.replayTimeout, for the setup response.
+	approvalsReplayTimeout time.Duration
 	// liveSettings returns the behavioral settings currently in force (nil = none);
 	// settingsWriter applies an edited settings document. Both are control-plane-
 	// only: a worker leaves settingsWriter nil so its settings panel is read-only.
 	liveSettings   func() *config.SettingsWire
 	settingsWriter func(context.Context, config.SettingsWire, WriteMeta) error
 	workersFn      func() []WorkerView // nil = no fleet worker registry
+	bundlesServed  func() bool         // nil = the control plane serves no signed bundles
 	// workerTokens serves the worker token admin routes; nil = they answer 404
 	// (a worker, or a control plane without a state dir).
 	workerTokens WorkerTokenAdmin
 	// workerCerts backs the worker certificate revoke route (nil: 404).
 	workerCerts WorkerCertAdmin
+	// enrollments serves the enrollment token admin routes (nil: 404).
+	enrollments EnrollmentAdmin
 	// keys serves the signing-key admin routes; nil = they answer 404 (a
 	// worker, or a control plane without keys.enabled).
 	keys KeysSource
@@ -301,11 +308,44 @@ type WorkerView struct {
 	// it cannot apply the mode and keeps allowing callers it should challenge.
 	// Set by the control plane per snapshot.
 	NoIdentityChallenge bool `json:"noIdentityChallenge"`
+	// NoIdentityRequire is true when the served settings put the worker's agent
+	// (or, for a worker with no agent id, the default mode) in require mode and
+	// the worker does not advertise identity/require-v1: it keeps attribute mode
+	// and lets token-less traffic through. Set by the control plane per snapshot.
+	NoIdentityRequire bool `json:"noIdentityRequire"`
 	// AgentID is the registered agent the worker's latest heartbeat says it
 	// serves, and IdentityMode the identity mode it says it runs. Both are
 	// validated by the control plane and empty for a worker that reports none.
 	AgentID      string `json:"agentID,omitempty"`
 	IdentityMode string `json:"identityMode,omitempty"`
+	// The signed-bundle state the worker's latest heartbeat reported
+	// (W-P2-SBND-05), validated by the control plane. All empty for a worker
+	// that sends none (no pins, or an old worker). BundleSeq is the seq of the
+	// bundle it enforces; PinnedKIDs the key ids it trusts; LastRejectReason
+	// (a closed set) and LastRejectAt describe its newest rejection since its
+	// last apply. Behind then compares BundleSeq with the control plane's head
+	// seq, and BundleSeqAhead is set when the worker reports a seq above it
+	// (the control plane was restored to an older state).
+	BundleSeq        int64    `json:"bundleSeq,omitempty"`
+	BundleKID        string   `json:"bundleKid,omitempty"`
+	BundleIssuedAt   string   `json:"bundleIssuedAt,omitempty"`
+	PinnedKIDs       []string `json:"pinnedKids,omitempty"`
+	BundleStale      bool     `json:"bundleStale,omitempty"`
+	LastRejectReason string   `json:"lastRejectReason,omitempty"`
+	LastRejectAt     string   `json:"lastRejectAt,omitempty"`
+	BundleSeqAhead   bool     `json:"bundleSeqAhead,omitempty"`
+}
+
+// WorkersMissingBundleCap counts the online workers that do not advertise
+// config.CapBundleV1, so they apply the unsigned wire.
+func WorkersMissingBundleCap(ws []WorkerView) int {
+	n := 0
+	for _, w := range ws {
+		if w.Online && !slices.Contains(w.Caps, config.CapBundleV1) {
+			n++
+		}
+	}
+	return n
 }
 
 // NewServer constructs a dashboard Server. The policy argument is the static
@@ -409,6 +449,13 @@ type roleRequiredResponse struct {
 // and the UI hides the panel.
 func (s *Server) SetWorkers(fn func() []WorkerView) {
 	s.workersFn = fn
+}
+
+// SetBundlesServed tells the dashboard whether the control plane is serving
+// signed bundles. Only then does the setup status count connected workers that
+// do not verify them; without it the count is always 0.
+func (s *Server) SetBundlesServed(fn func() bool) {
+	s.bundlesServed = fn
 }
 
 // SetMCPFleet supplies a per-worker MCP source for the control-plane fleet view:
@@ -696,6 +743,9 @@ func Routes() []Route {
 		{post, "/dashboard/api/policy/versions/{v}/rollback", "policy.rollback"},
 		{post, "/dashboard/api/backup", "backup.run"},
 		{post, "/dashboard/api/workers/{id}/revoke", "worker.revoked"},
+		{get, "/dashboard/api/worker-enrollments", "worker_enroll_token.read"},
+		{post, "/dashboard/api/worker-enrollments", "worker_enroll_token.create"},
+		{del, "/dashboard/api/worker-enrollments/{id}", "worker_enroll_token.revoke"},
 		{get, "/dashboard/api/worker-tokens", "worker_token.read"},
 		{post, "/dashboard/api/worker-tokens", "worker_token.create"},
 		{del, "/dashboard/api/worker-tokens/{id}", "worker_token.revoke"},
@@ -878,6 +928,21 @@ func userParam(q url.Values) (user string, ok bool) {
 	return user, true
 }
 
+// actParam reads the optional ?act= filter (an agent id): trimmed, then
+// rejected (ok false, the caller answers 400) when non-empty and not a valid
+// agent id (agentid.ValidID, at most 64 characters). A NUL byte, the analytics
+// cache-key separator, is rejected the same way. Empty means no filter.
+func actParam(q url.Values) (act string, ok bool) {
+	act = strings.TrimSpace(q.Get("act"))
+	if act == "" {
+		return "", true
+	}
+	if strings.ContainsRune(act, 0) || agentid.ValidID(act) != nil {
+		return "", false
+	}
+	return act, true
+}
+
 // handleTraffic serves GET /dashboard/api/traffic.
 func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -891,10 +956,16 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid user parameter")
 		return
 	}
+	act, ok := actParam(q)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid act parameter")
+		return
+	}
 	filter := analytics.EventFilter{
 		Domain:   q.Get("domain"),
 		Decision: q.Get("decision"),
 		User:     user,
+		Act:      act,
 	}
 	if v := q.Get("since"); v != "" {
 		t, err := time.Parse(time.RFC3339, v)
@@ -1048,7 +1119,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.settingsWriter(r.Context(), settings, meta); err != nil {
+	if err := s.settingsWriter(withForce(r.Context(), r), settings, meta); err != nil {
 		writeWriterError(w, err)
 		return
 	}

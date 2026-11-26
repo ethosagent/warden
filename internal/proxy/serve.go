@@ -104,6 +104,9 @@ func (p *Proxy) Serve(ctx context.Context) error {
 		}
 	}
 
+	// The require-mode session expiry loop lives as long as Serve (expiry.go).
+	go p.runSessionExpiry(ctx)
+
 	// ctx done closes every listener — injected and self-bound alike.
 	done := make(chan struct{})
 	go func() {
@@ -313,6 +316,12 @@ func (p *Proxy) handleConn(conn net.Conn) {
 		return
 	}
 
+	// Require mode: no valid Warden token bound to this agent gets a 407 (no
+	// sign-in), before the block-list check, the policy and any dial.
+	if p.requireConnect(conn, ci, domain, port) {
+		return
+	}
+
 	// A blocked user is refused before the policy check, any dial and the 200,
 	// on both the TLS-terminating and the raw-tunnel path.
 	if p.connectBlocked(conn, ci, domain, port) {
@@ -365,7 +374,7 @@ func (p *Proxy) handleConn(conn net.Conn) {
 			p.denyConnect(conn, ci, domain, port, denyreason.IdentityRequired)
 			return
 		}
-		d := ci.Expiry.Sub(p.clock())
+		d := ci.Expiry.Sub(p.validityClock())
 		if d <= 0 {
 			p.denyConnect(conn, ci, domain, port, denyreason.IdentityRequired)
 			return
@@ -494,9 +503,10 @@ func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port in
 	var sess *session
 	if p.trackSession(ci) {
 		sess = p.sessions.newSession("tcp", domain, port, true, client)
-		sess.bind(ci)
+		cut := sess.bind(ci)
+		cut = p.armExpiry(sess, ci, !cut) || cut
 		defer sess.release()
-		if p.refusedAtCreate(sess, ci, domain, port, "tcp") {
+		if p.refusedAtCreate(sess, ci, domain, port, "tcp") || cut {
 			return
 		}
 	}

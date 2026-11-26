@@ -170,6 +170,11 @@ var All = slices.Concat(
 		// before and after, with a critical approval_bypassed Finding; an OIDC
 		// admin then reviews it. In-process only (console, break-glass, state dir).
 		{Name: "approvals_emergency_apply", Opts: approvalsEmergencyOpts(), Run: approvalsEmergencyApply},
+		// Block-list removals and widening agent edits are held for a second
+		// admin (W-P2-APPR-08); adds, disables and narrowing edits stay direct.
+		// In-process only (console, admin audit, state dir).
+		{Name: "approvals_hold_removals", Opts: approvalsTargetsOpts(), Run: approvalsHoldRemovals},
+		{Name: "approvals_block_enforcement", Opts: approvalsBlockEnforcementOpts(), Run: approvalsBlockEnforcement},
 		// Scoped policy (W-P1-GPOL-10): with identity off a scoped entry loads
 		// but allows nobody (identity_required); an unscoped entry still applies.
 		{Name: "scoped_policy_fail_closed", Run: scopedPolicyFailClosed},
@@ -280,6 +285,9 @@ var All = slices.Concat(
 		// 2s poll of its Index, with no audit row; a key reaches only the routes
 		// whose scope it holds and never a worker route. In-process only.
 		{Name: "apikey_offline_revoke", Opts: apiKeyOpts(), Run: apiKeyOfflineRevoke},
+		{Name: "apikey_cli_revoke", Opts: apiKeyOpts(), Run: apiKeyCLIRevoke},
+		{Name: "apikey_expiry_warning", Opts: apiKeyOpts(), Run: apiKeyExpiryWarning},
+		{Name: "apikey_expiry_off", Opts: []harness.Option{harness.WithConsoleOIDC(), harness.WithAdminAudit()}, Run: apiKeyExpiryOff},
 		{Name: "apikey_scopes", Opts: apiKeyOpts(), Run: apiKeyScopes},
 		// Scoped API keys (W-P2-APIK-03): a console admin creates a key (the
 		// plaintext once), the key reads, introspects and is refused a write,
@@ -359,6 +367,12 @@ var All = slices.Concat(
 		{Name: "token_exchange_events_recorded", Opts: tokenLimitsOpts(harness.WithAdminAudit()), Run: tokenExchangeEventsRecorded},
 		{Name: "token_retention_purges", Opts: tokenLimitsOpts(harness.WithTokenEventRetention("24h")), Run: tokenRetentionPurges},
 		{Name: "token_exchange_dashboard_disable", Opts: tokenServiceDashboardOpts(), Run: tokenExchangeDashboardDisable},
+		// The identity client's agent mode (W-P2-RCP-01) against that endpoint.
+		{Name: "identity_agent_exchange", Opts: tokenServiceOpts(), Run: identityAgentExchange},
+		// The token-injecting forwarder (W-P2-RCP-02) in front of the real worker in require mode
+		// against that endpoint: token injected, 407 -> refresh -> retry, rotation
+		// drain, signer window and a disabled agent on /healthz.
+		{Name: "identity_forwarder", Opts: identityForwarderOpts(), Run: identityForwarder},
 		{Name: "token_service_disabled_by_default", Opts: tokenServiceDisabledOpts(), Run: tokenServiceDisabledByDefault},
 		// Admin revocation of token sessions (W-P2-TOKX-07).
 		{Name: "token_session_revoke_one", Opts: tokenLimitsOpts(harness.WithAdminAudit()), Run: tokenSessionRevokeOne},
@@ -367,6 +381,7 @@ var All = slices.Concat(
 		{Name: "token_session_routes_disabled", Opts: append(tokenServiceDisabledOpts(), harness.WithControlPlaneAdminToken()), Run: tokenSessionRoutesDisabled},
 		{Name: "token_exchange_signer_unavailable", Opts: tokenServiceOpts(harness.WithFlakyKeyStore()), Run: tokenExchangeSignerUnavailable},
 		{Name: "token_exchange_idp_unavailable", Opts: tokenServiceOpts(harness.WithOIDCIssuerDown()), Run: tokenExchangeIdPUnavailable},
+		{Name: "token_exchange_idp_outage_during_rotation", Opts: tokenServiceOpts(), Run: tokenExchangeIdPOutageDuringRotation},
 		{Name: "keys_cli_rotates_and_resets", Opts: keysRotationOpts(), Run: keysCLIRotatesAndResets},
 		{Name: "workerca_degraded_then_ready", Opts: workerCAOpts(), Run: workerCADegradedThenReady},
 		{Name: "workerca_enroll", Opts: workerCAEnrollOpts(), Run: workerCAEnroll},
@@ -377,6 +392,7 @@ var All = slices.Concat(
 		// renewal lineage rule, and --require-worker-certs. In-process only.
 		{Name: "workerca_cert_auth", Opts: workerCACertAuthOpts(), Run: workerCACertAuth},
 		{Name: "workerca_renew", Opts: workerCACertAuthOpts(), Run: workerCARenew},
+		{Name: "workerca_client", Opts: workerCACertAuthOpts(), Run: workerCAClient},
 		{Name: "workerca_strict_certs", Opts: workerCAStrictCertsOpts(), Run: workerCAStrictCerts},
 		// Worker certificate revocation (W-P2-WCA-05): the console route and the
 		// offline CLI cut a worker off (401 on every worker route and renew, held
@@ -384,6 +400,10 @@ var All = slices.Concat(
 		{Name: "workerca_revoke_api", Opts: workerCARevokeOpts(), Run: workerCARevokeAPI},
 		{Name: "workerca_revoke_cli", Opts: workerCARevokeOpts(), Run: workerCARevokeCLI},
 		{Name: "workerca_prune", Opts: workerCARevokeOpts(), Run: workerCAPrune},
+		// Enrollment token admin API (W-P2-WCA-08): an admin mints a wet_ token
+		// from the console, a worker enrolls once, and the token is never listed,
+		// audited or logged in plaintext. In-process only (CP state dir).
+		{Name: "workerca_enroll_admin", Opts: workerCAEnrollAdminOpts(), Run: workerCAEnrollAdmin},
 		{Name: "keys_disabled_creates_nothing", Opts: []harness.Option{harness.WithBackup()}, Run: keysDisabledCreatesNothing},
 		// Key rotation (W-P2-KEYS-06): rotate-key is refused while the control
 		// plane runs, rotates offline once it is stopped (signed handover, new
@@ -409,6 +429,65 @@ var All = slices.Concat(
 		// legacy wire. In-process only (versioned store, keys, CP restart).
 		{Name: "bundles_off_legacy_wire", Opts: bundlesOffOpts(), Run: bundlesOffLegacyWire},
 		{Name: "bundles_offer_serves", Opts: bundlesOfferOpts(), Run: bundlesOfferServes},
+		{Name: "bundles_default_requires", Opts: bundlesDefaultOpts(), Run: bundlesDefaultRequires},
+		// Agent binding, CP half (W-P2-WBND-06): the signed bundle names the token
+		// issuer (never cpID), the served jkt equals the minted token's cnf.jkt,
+		// and a registry change moves the bundle. In-process only.
+		{Name: "bundle_token_binding", Opts: bundleTokenBindingOpts(), Run: bundleTokenBinding},
+		{Name: "bundle_no_token_issuer_without_service", Opts: bundlesOfferOpts(), Run: bundleNoTokenIssuerWithoutService},
+		// Signed bundles on the worker (W-P2-SBND-04): a pinned worker applies
+		// only verified bundles and keeps the last one when the control plane
+		// goes away; a pin that does not match the signer leaves it fail-closed
+		// (never the unsigned wire); bundleExpiry=deny stops traffic once the
+		// held bundle expires and a fresh bundle restores it. In-process only.
+		{Name: "bundles_pinned_worker_enforces", Opts: pinnedWorkerEnforcesOpts(), Run: pinnedWorkerEnforces},
+		{Name: "bundles_pinned_worker_unrelated_key_fails_closed", Opts: unrelatedPinsOpts(), Run: pinnedWorkerUnrelatedKeyFailsClosed},
+		{Name: "bundles_pinned_worker_expiry_deny", Opts: pinnedWorkerDenyOpts(), Run: pinnedWorkerExpiryDeny},
+		{Name: "bundles_pinned_worker_tampered_bundle", Opts: tamperedOpts(), Run: pinnedWorkerTamperedBundleKeepsLastKnownGood},
+		// Warden token verification on the worker (W-P2-WBND-01): a pinned worker
+		// takes token keys and issuer only from the verified bundle, so a minted
+		// token verifies while a foreign key, a forged signature and a wrong
+		// issuer are refused; a legacy-wire worker has no keys. In-process only.
+		{Name: "warden_token_verify", Opts: wardenTokenVerifyOpts(), Run: wardenTokenVerify},
+		{Name: "warden_token_legacy_wire", Opts: wardenTokenLegacyOpts(), Run: wardenTokenLegacyWire},
+		// Agent binding of Warden tokens (W-P2-WBND-02): a token for the worker's
+		// own agent is accepted, another agent's token and a rotated-away key are
+		// refused (also on a tunnel already open), and a disabled agent is refused
+		// on the next request of an open tunnel. In-process only.
+		{Name: "warden_agent_binding", Opts: wardenAgentBindingOpts(), Run: wardenAgentBinding},
+		{Name: "warden_agent_binding_challenge", Opts: wardenAgentBindingChallengeOpts(), Run: wardenAgentBindingChallenge},
+		{Name: "warden_agent_binding_disabled", Opts: wardenAgentBindingOpts(), Run: wardenAgentBindingDisabled},
+		// The boot pull's identity settings are in force from the first request
+		// after a restart (identity block and this agent's agents entry), with
+		// the boot bundle's token keys. In-process only (worker restart).
+		{Name: "identity_boot_distributed_mode", Opts: identityBootOpts(), Run: identityBootDistributedMode},
+		{Name: "identity_boot_distributed_agent", Opts: identityBootOpts(), Run: identityBootDistributedAgent},
+		{Name: "identity_boot_from_cache", Opts: identityBootCacheOpts(), Run: identityBootFromCache},
+		// Identity require mode (W-P2-WBND-03): only the agent's Warden token is
+		// admitted; no token and an IdP token get the 407, a header naming another
+		// subject or agent is a 403 identity_conflict, and a restarted worker
+		// enforces it from its first request.
+		{Name: "identity_require_connect", Opts: identityBootOpts(), Run: identityRequireConnect},
+		{Name: "identity_require_header_conflict", Opts: identityBootOpts(), Run: identityRequireHeaderConflict},
+		{Name: "identity_require_boot", Opts: identityBootOpts(), Run: identityRequireBoot},
+		{Name: "identity_require_session_expiry", Opts: identityBootOpts(), Run: identityRequireSessionExpiry},
+		// Rollout guard (W-P2-WBND-07): a connected worker bound to the agent that
+		// lacks identity/require-v1 makes the require save a 409 naming it; an
+		// admin force goes through and the capable worker enforces.
+		{Name: "identity_require_rollout_guard", Opts: append(identityBootOpts(), harness.WithAdminAudit()), Run: identityRequireRolloutGuard},
+		// Bundle state in the fleet view and the worker's metrics (W-P2-SBND-05):
+		// a pinned worker shows its bundle seq and pins and is not behind; a
+		// tampered bundle shows as a rejection reason with the seq unchanged.
+		{Name: "bundles_pinned_worker_fleet_state", Opts: tamperedOpts(), Run: pinnedWorkerFleetState},
+		// Staged bundle key rotation (W-P2-SBND-07): stage, pin, activate and
+		// retire against two workers with no rejected bundle, a mid-rotation
+		// restart from the cache, and an activate gate that holds.
+		{Name: "bundles_key_rotation_staged", Opts: bundleKeyRotationOpts(), Run: bundleKeyRotationStaged},
+		// Last-known-good bundle cache (W-P2-SBND-06): a pinned worker restarted
+		// with the control plane down enforces its cached bundle; a tampered
+		// cache file leaves it fail-closed. In-process only.
+		{Name: "bundles_cache_boots_from_cache", Opts: bundleCacheOpts(), Run: bundleCacheBootsFromCache},
+		{Name: "bundles_cache_tampered_fails_closed", Opts: bundleCacheOpts(), Run: bundleCacheTamperedFailsClosed},
 		// Warden credentials in agent egress (W-P2-APIK-06): a wak_ key or wwt_
 		// token in a request body is flagged as credentials only with
 		// dlp.wardenTokens on, and blocked only in enforce mode with a rule.

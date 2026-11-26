@@ -4,6 +4,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
@@ -18,7 +19,10 @@ import (
 // (CONNECT, or a request carrying a header identity) and deregisters when it
 // ends. Anonymous sessions never register, so anonymous traffic pays one nil
 // check. After each applied policy change CloseBlockedSessions closes the
-// sessions the new list matches.
+// sessions the new list matches. A session that registers after that scan (its
+// admission check ran under the old list, the block landed before it
+// registered) is checked against the live list by its own bind, under the same
+// lock, so no session escapes the cut by registering late.
 //
 // Semantics: a request that ARRIVED under the old policy completes under it. An
 // HTTP/1 session that is mid-request is cut as soon as that request completes;
@@ -38,6 +42,22 @@ type sessionRegistry struct {
 	// outlive the cut.
 	all    map[*session]struct{}
 	refuse bool
+
+	// blocked reports whether claims name a user on the live block list, and
+	// onCut writes the deny events and runs the closers of sessions it marked.
+	// bind checks a newly registered identity against blocked under mu, the
+	// lock takeBlocked holds while it scans, so a session that registers just
+	// after a block's CloseBlockedSessions is cut by its own bind: every
+	// admission check (CONNECT, blockStage) runs before registration, and a
+	// block applied in between would otherwise never reach the session. Nil in
+	// registry-only tests.
+	blocked func(identity.Claims) bool
+	onCut   func([]closedSession)
+
+	// expiry is the min-heap of require-mode sessions by next due time and wake
+	// tells the expiry loop it changed (expiry.go).
+	expiry expiryHeap
+	wake   chan struct{}
 }
 
 func newSessionRegistry() *sessionRegistry {
@@ -45,6 +65,7 @@ func newSessionRegistry() *sessionRegistry {
 		bySub:   make(map[string]map[*session]struct{}),
 		byEmail: make(map[string]map[*session]struct{}),
 		all:     make(map[*session]struct{}),
+		wake:    make(chan struct{}, 1),
 	}
 }
 
@@ -68,12 +89,33 @@ type session struct {
 	closed        bool // the closers have run
 	released      bool
 	refused       bool // created while the registry refused sessions: already closed
+
+	// Require-mode expiry (expiry.go). heapIdx is -1 while the session is not in
+	// the registry's expiry heap. tracked is the CONNECT identity it was armed
+	// with (its exp and kid), re-checked after each bundle apply. graceful sends
+	// GOAWAY on an h2 connection; goaway records that it did.
+	exp      time.Time
+	skew     time.Duration
+	due      time.Time
+	heapIdx  int
+	tracked  connIdentity
+	graceful func()
+	goaway   bool
+	late     bool
+	// hard marks a busy HTTP/1 session already reported: its next due time is the
+	// forced close. reported means its identity deny event is written.
+	hard     bool
+	reported bool
+	armed    atomic.Bool
+	// pending is set from newSession until the creator has bound the identity
+	// and called armExpiry; the recheck sweep leaves a pending session alone.
+	pending bool
 }
 
 // newSession builds an unregistered session; it joins the registry when bind
 // sees the first identity.
 func (r *sessionRegistry) newSession(proto, domain string, port int, interruptible bool, c io.Closer) *session {
-	s := &session{reg: r, proto: proto, domain: domain, port: port, interruptible: interruptible, closers: []io.Closer{c}}
+	s := &session{reg: r, proto: proto, domain: domain, port: port, interruptible: interruptible, closers: []io.Closer{c}, heapIdx: -1, pending: true}
 	r.mu.Lock()
 	r.all[s] = struct{}{}
 	refused := r.refuse
@@ -89,17 +131,35 @@ func (r *sessionRegistry) newSession(proto, domain string, port int, interruptib
 
 // bind registers the session under the identity's sub and email. It is a no-op
 // for an identity with neither, and for keys already registered, so calling it
-// on every request costs one short critical section.
-func (s *session) bind(ci connIdentity) {
+// on every request costs one short critical section. When it registers a new
+// key it checks the identity against the live block list under the registry
+// lock: a block that landed after the caller's admission check, and whose
+// CloseBlockedSessions ran before this registration, cuts the session here
+// (deny event and closers, as CloseBlockedSessions would). It reports whether
+// the session is now cut; the caller must not dial or forward for it.
+//
+// Every caller whose admission check ran before the registration uses bind:
+// the tunnels (checked once at CONNECT, never again) and blockStage (checked
+// just before it binds).
+func (s *session) bind(ci connIdentity) (cut bool) { return s.register(ci, true) }
+
+// bindForRequests registers the session like bind but never cuts it. It is for
+// an HTTP/1 or HTTP/2 session at creation: nothing is forwarded on it before a
+// request passes blockStage, which reads the live list after this registration,
+// so a block that landed earlier is answered with a user_blocked 403 on the
+// first request rather than a bare close.
+func (s *session) bindForRequests(ci connIdentity) { s.register(ci, false) }
+
+func (s *session) register(ci connIdentity, enforce bool) (cut bool) {
 	if s == nil || (ci.Claims.Sub == "" && ci.Claims.Email == "") {
-		return
+		return false
 	}
 	email := strings.ToLower(ci.Claims.Email)
 	r := s.reg
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if s.released {
-		return
+		r.mu.Unlock()
+		return false
 	}
 	added := false
 	if sub := ci.Claims.Sub; sub != "" && !contains(s.subs, sub) {
@@ -112,9 +172,19 @@ func (s *session) bind(ci connIdentity) {
 		add(r.byEmail, email, s)
 		added = true
 	}
+	var hit []closedSession
 	if added {
 		s.ids = append(s.ids, ci)
+		if enforce && !s.closing && r.blocked != nil && r.blocked(ci.Claims) {
+			hit = r.markLocked(map[*session]struct{}{s: {}}, false, func(id connIdentity) bool { return r.blocked(id.Claims) })
+		}
 	}
+	cut = s.closing
+	r.mu.Unlock()
+	if len(hit) > 0 && r.onCut != nil {
+		r.onCut(hit)
+	}
+	return cut
 }
 
 func contains(xs []string, x string) bool {
@@ -153,6 +223,7 @@ func (s *session) release() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s.released = true
+	r.untrackLocked(s)
 	delete(r.all, s)
 	for _, k := range s.subs {
 		remove(r.bySub, k, s)
@@ -193,6 +264,7 @@ func (s *session) upgrade(proto string, c io.Closer) bool {
 	}
 	s.proto, s.interruptible = proto, true
 	s.closers = append(s.closers, c)
+	s.reg.refreshDueLocked(s) // a WebSocket is cut at exp+skew, not at exp
 	return true
 }
 
@@ -226,6 +298,13 @@ type closedSession struct {
 	domain  string
 	port    int
 	closers []io.Closer
+	// silent marks a step whose deny event was already written (the hard close
+	// after an h2 GOAWAY).
+	silent bool
+	// reason and detail are the identity deny reason of an expiry-loop or
+	// recheck cut (expiry.go); empty for a block-list cut.
+	reason denyreason.Reason
+	detail string
 }
 
 // takeBlocked marks and returns the sessions whose registered sub or email the
@@ -262,7 +341,7 @@ func (r *sessionRegistry) takeBlocked(subBlocked, emailBlocked func(string) bool
 func (r *sessionRegistry) markLocked(hit map[*session]struct{}, force bool, pick func(connIdentity) bool) []closedSession {
 	var out []closedSession
 	for s := range hit {
-		if s.closing {
+		if s.closing || s.released {
 			continue
 		}
 		s.closing = true
@@ -271,7 +350,7 @@ func (r *sessionRegistry) markLocked(hit map[*session]struct{}, force bool, pick
 			if i == 0 {
 				cs.ci = id
 			}
-			if pick(id) {
+			if pick != nil && pick(id) {
 				cs.ci = id
 				break
 			}
@@ -318,11 +397,22 @@ func (p *Proxy) CloseBlockedSessions() {
 	if bc, ok := p.cfg.Policy.(interface{ BlockedCount() int }); ok {
 		p.cfg.Metrics.RecordBlocklistEntries(bc.BlockedCount())
 	}
-	cut := p.sessions.takeBlocked(
+	p.finishBlockedCut(p.sessions.takeBlocked(
 		func(sub string) bool { return p.cfg.Policy.IsBlocked(sub, "") },
 		func(email string) bool { return p.cfg.Policy.IsBlocked("", email) },
 		p.claimsBlocked,
-	)
+	))
+}
+
+// finishBlockedCut writes one user_blocked deny event for each session a block
+// marked, counts the sessions and then runs the closers it may run now, so a
+// client that sees its connection cut also sees the event and the count. It
+// runs without the registry lock, for CloseBlockedSessions and for a bind that
+// found its user already blocked.
+func (p *Proxy) finishBlockedCut(cut []closedSession) {
+	if len(cut) == 0 {
+		return
+	}
 	for _, cs := range cut {
 		p.emitDenyEvent(cs.ci, analytics.Event{
 			Timestamp: time.Now(),
@@ -331,12 +421,12 @@ func (p *Proxy) CloseBlockedSessions() {
 			Protocol:  cs.proto,
 			Reason:    string(denyreason.UserBlocked),
 		})
+	}
+	p.cfg.Metrics.RecordBlocklistSessionsClosed(len(cut))
+	for _, cs := range cut {
 		for _, c := range cs.closers {
 			_ = c.Close()
 		}
-	}
-	if len(cut) > 0 {
-		p.cfg.Metrics.RecordBlocklistSessionsClosed(len(cut))
 	}
 }
 

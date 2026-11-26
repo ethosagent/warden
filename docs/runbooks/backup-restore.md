@@ -238,6 +238,14 @@ jq -c 'select(.schema=="warden.admin.v1" and .ts > "2027-01-15T08:00:00Z"
   `has_sub` and `has_email` flags, no value). Take the people from your incident or
   change record, then `warden control-plane block add --state-dir /data --email ...
   --reason ...` and `block remove`.
+- **API-key revocations** (`api_key.revoke`, `api_key.revoke_owner`, `target_ref`
+  `api_key:<id>`): a key revoked after the set comes back active. Either revoke
+  each again, `warden control-plane api-key revoke --id <id> --state-dir /data` (or
+  `--owner-sub <sub>`; `api-key list` shows ids, owners and status), or restore
+  with `--revoke-api-keys`, which revokes every key in the restored database before
+  it is put in place and records the count (`api_keys_revoked`) in the `cp.restore`
+  row. Owners then create new keys in the console. The offline commands work while
+  the control plane runs; it refuses a revoked key within 2 seconds.
 - **Policy versions** (`policy.write`, `policy.rollback`): the rows hold hashes, not
   the policy. Re-apply from your source of truth (the YAML in version control) through
   the console or `warden policy import`, and confirm the ETag again.

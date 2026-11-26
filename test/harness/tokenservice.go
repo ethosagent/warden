@@ -189,6 +189,40 @@ func (h *H) awaitRegisteredAgent(id string) {
 	})
 }
 
+// RegisterTokenAgentKey registers agent id with the public JWK of a key the
+// scenario holds (the kid is the JWK's own), the way an operator registers the
+// key `warden identity enroll` printed. It returns once the control plane sees
+// the agent. Needs WithTokenService.
+func (h *H) RegisterTokenAgentKey(id string, jwk keys.JWK, groups, scopes []string) {
+	h.tb.Helper()
+	raw, err := json.Marshal(jwk)
+	if err != nil {
+		h.tb.Fatalf("harness: encode an agent key: %v", err)
+	}
+	store, closeDB := h.agentStore()
+	defer closeDB()
+	_, err = store.Create(context.Background(), agentreg.Agent{
+		ID: id, DisplayName: id, Keys: []agentreg.Key{{KID: jwk.Kid, JWK: raw}},
+		AllowedGroups: groups, AllowedScopes: scopes,
+	}, "harness")
+	if err != nil {
+		h.tb.Fatalf("harness: register agent %s: %v", id, err)
+	}
+	h.awaitRegisteredAgent(id)
+}
+
+// TokenEndpointURL is the URL a client reaches POST /oauth2/token at. The
+// assertion audience is TokenServiceIssuer + TokenEndpointPath, which is not
+// this URL: the harness issuer is a loopback origin.
+func (c *CPClient) TokenEndpointURL() string { return "https://" + c.addr + TokenEndpointPath }
+
+// TokenAudience is the audience a client assertion names in the harness.
+func TokenAudience() string { return TokenServiceIssuer + TokenEndpointPath }
+
+// HTTPClient is the client the harness reaches the control plane with: it
+// trusts the control plane's CA.
+func (c *CPClient) HTTPClient() *http.Client { return c.cl }
+
 // DisableTokenAgent switches agent id off in the registry. The control plane
 // notices on its next registry watch tick, so a scenario advances the clock
 // until the refusal shows.
@@ -202,6 +236,39 @@ func (h *H) DisableTokenAgent(id string) {
 	}
 	if _, err := store.SetStatus(context.Background(), id, agentreg.StatusDisabled, a.Revision, "harness"); err != nil {
 		h.tb.Fatalf("harness: disable agent %s: %v", id, err)
+	}
+}
+
+// RotateTokenAgentKey replaces agent id's only key with a fresh one (the agent
+// stays enabled), straight on the state database like the offline CLI. The
+// control plane notices on its next registry watch tick, so a scenario advances
+// the clock until the change shows. The old key can no longer authenticate.
+func (h *H) RotateTokenAgentKey(id string) {
+	h.tb.Helper()
+	priv, err := signer.GenerateLocal(keys.AlgEdDSA)
+	if err != nil {
+		h.tb.Fatalf("harness: generate an agent key: %v", err)
+	}
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok {
+		h.tb.Fatal("harness: the agent key is not Ed25519")
+	}
+	kid := id + "-key-2"
+	jwk, err := json.Marshal(map[string]string{
+		"kty": "OKP", "crv": "Ed25519", "kid": kid, "x": base64.RawURLEncoding.EncodeToString(pub),
+	})
+	if err != nil {
+		h.tb.Fatalf("harness: encode an agent key: %v", err)
+	}
+	store, closeDB := h.agentStore()
+	defer closeDB()
+	a, err := store.Get(context.Background(), id)
+	if err != nil {
+		h.tb.Fatalf("harness: read agent %s: %v", id, err)
+	}
+	a.Keys = []agentreg.Key{{KID: kid, JWK: jwk}}
+	if _, err := store.Update(context.Background(), a, "harness"); err != nil {
+		h.tb.Fatalf("harness: rotate the key of agent %s: %v", id, err)
 	}
 }
 

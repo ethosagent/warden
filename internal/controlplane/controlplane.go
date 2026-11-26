@@ -34,6 +34,7 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/apikeys"
 	"github.com/ethosagent/warden/internal/approvals"
+	"github.com/ethosagent/warden/internal/bundle"
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
@@ -360,6 +361,9 @@ type Server struct {
 	// apiKeyCounts is its outcome counter (nil-safe).
 	apiKeys      *apiKeyAuth
 	apiKeyCounts *apiKeyCounters
+	// apiKeyExpiry remembers which expiring keys the hourly job already warned
+	// about (apikeys_expiry.go).
+	apiKeyExpiry apiKeyExpiryState
 	// findings, when set, receives every Finding instead of the alert pipeline.
 	// Tests inject a fake here.
 	findings FindingPublisher
@@ -798,6 +802,7 @@ func (s *Server) Handler() http.Handler {
 	// console.approvals is enabled; the hasher is a no-op without admin audit.
 	if s.approvals != nil {
 		dash.SetChangeDrafts(s.changeDraftsAPI())
+		dash.SetApprovalsReplayTimeout(s.cfg.Console.Approvals.ReplayTimeout)
 		s.RegisterStateHasher(auditTargetChangeDraft, s.changeDraftHash)
 	}
 	// Per-worker MCP view (inventory + observed schema), selected by ?proxy=.
@@ -806,14 +811,19 @@ func (s *Server) Handler() http.Handler {
 	// worker whose policy version differs from what the CP currently serves,
 	// and (versioned mode) the version its heartbeat ETag maps to.
 	var tracker WorkerTracker = s.registry
+	dash.SetBundlesServed(func() bool { return s.policy.bundleHeadSeq() > 0 })
 	dash.SetWorkers(func() []dashboard.WorkerView {
 		cur := s.policy.currentETag()
 		views := tracker.Views()
 		FlagNoGroupPolicy(views, s.scopedEntries())
 		FlagNoIdentityChallenge(views, s.challengeServed())
+		FlagNoIdentityRequire(views, s.servedSettings())
 		for i := range views {
 			views[i].Behind = views[i].PolicyETag != "" && views[i].PolicyETag != cur
 		}
+		// A worker that verifies bundles reports the envelope's ETag, never the
+		// legacy one above: its behind flag is its bundle seq against the head.
+		FlagBundleState(views, s.policy.bundleHeadSeq())
 		fillPolicyVersions(s.versions, views)
 		s.fillWorkerAuth(views)
 		return views
@@ -822,6 +832,8 @@ func (s *Server) Handler() http.Handler {
 	s.wireWorkerTokens(dash)
 	// Worker certificate revoke route and its audit hasher (W-P2-WCA-05).
 	s.wireWorkerCerts(dash)
+	// Enrollment token admin routes and their audit hasher (W-P2-WCA-08).
+	s.wireWorkerEnrollments(dash)
 	// Signing key admin routes and their audit hasher (W-P2-KEYS-04).
 	s.wireKeys(dash)
 	// Agent registry admin routes and their audit hasher (W-P2-AREG-02).
@@ -899,15 +911,107 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		// worker serves and the mode it runs. Old workers send neither.
 		AgentID      string `json:"agentID"`
 		IdentityMode string `json:"identityMode"`
+		// The signed-bundle state of a worker that holds pins (W-P2-SBND-05);
+		// an old worker sends none of it.
+		BundleSeq        int64    `json:"bundleSeq"`
+		BundleKID        string   `json:"bundleKid"`
+		BundleIssuedAt   string   `json:"bundleIssuedAt"`
+		PinnedKIDs       []string `json:"pinnedKids"`
+		BundleStale      bool     `json:"bundleStale"`
+		LastRejectReason string   `json:"lastRejectReason"`
+		LastRejectAt     string   `json:"lastRejectAt"`
 	}
 	// Body is optional/tiny; ignore decode errors (heartbeat is best-effort).
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body)
 	caps := normalizeCaps(body.Caps)
 	agentID, mode := validAgentBinding(body.AgentID, body.IdentityMode)
-	s.registry.SeenHeartbeat(principal.ProxyID, trimETag(body.PolicyETag), caps, agentID, mode)
+	wb := validWorkerBundle(body.BundleSeq, body.BundleKID, body.BundleIssuedAt, body.PinnedKIDs, body.BundleStale, body.LastRejectReason, body.LastRejectAt)
+	s.registry.SeenHeartbeat(principal.ProxyID, trimETag(body.PolicyETag), caps, agentID, mode, wb)
+	s.noteWorkerBundle(principal.ProxyID, caps, wb)
 	s.noteGroupPolicy(principal.ProxyID, caps)
 	s.noteIdentityChallenge(principal.ProxyID, caps)
+	s.noteIdentityRequire(principal.ProxyID, agentID, caps)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// bundleRejectReasons is the closed set of rejection reasons a worker may
+// report: every bundle.Reason value and config.BundleReasonInvalidPolicy.
+var bundleRejectReasons = func() map[string]struct{} {
+	m := map[string]struct{}{config.BundleReasonInvalidPolicy: {}}
+	for _, e := range []error{
+		bundle.ErrMalformed, bundle.ErrTooLarge, bundle.ErrUnsupportedFormat, bundle.ErrUnsigned,
+		bundle.ErrUnknownKid, bundle.ErrBadSignature, bundle.ErrIssuerMismatch, bundle.ErrCredentialMismatch,
+		bundle.ErrRollback, bundle.ErrEquivocation, bundle.ErrExpired, bundle.ErrFuture,
+	} {
+		m[bundle.Reason(e)] = struct{}{}
+	}
+	return m
+}()
+
+// kidPattern is the shape of an accepted key id: a JWK thumbprint or an
+// operator-chosen kid.
+var kidPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// maxPinnedKIDs bounds the pinned kids kept per heartbeat.
+const maxPinnedKIDs = 8
+
+// validWorkerBundle turns the self-asserted bundle fields of a heartbeat into
+// the form the registry stores and the console renders. Nothing from a worker
+// is trusted: a seq outside 0..MaxBundleSeqFloor becomes 0, a malformed kid or
+// time is dropped, the pinned kids are bounded, and a reason outside the closed
+// set is stored as "other" (kept visible, never rendered as free text).
+func validWorkerBundle(seq int64, kid, issuedAt string, pinned []string, stale bool, reason, rejectAt string) WorkerBundle {
+	wb := WorkerBundle{Stale: stale}
+	if seq > 0 && seq <= MaxBundleSeqFloor {
+		wb.Seq = seq
+	}
+	if kidPattern.MatchString(kid) {
+		wb.KID = kid
+	}
+	wb.IssuedAt = canonicalTime(issuedAt)
+	for _, k := range pinned {
+		if len(wb.PinnedKIDs) == maxPinnedKIDs {
+			break
+		}
+		if kidPattern.MatchString(k) {
+			wb.PinnedKIDs = append(wb.PinnedKIDs, k)
+		}
+	}
+	if reason != "" {
+		wb.RejectReason = "other"
+		if _, ok := bundleRejectReasons[reason]; ok {
+			wb.RejectReason = reason
+		}
+		wb.RejectAt = canonicalTime(rejectAt)
+	}
+	return wb
+}
+
+// canonicalTime returns an RFC 3339 time as UTC RFC 3339, or "" when it does
+// not parse.
+func canonicalTime(s string) string {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// noteWorkerBundle logs the two events an operator must see once: a worker's
+// new rejection reason (WARN, proxy_id, seq and reason only) and a worker that
+// reports a seq above the control plane's head (ERROR, once per worker while it
+// stays ahead, which means the control plane was restored to an older state).
+func (s *Server) noteWorkerBundle(proxyID string, caps []string, wb WorkerBundle) {
+	head := s.policy.bundleHeadSeq()
+	ahead := slices.Contains(caps, config.CapBundleV1) && head > 0 && wb.Seq > head
+	rejected, aheadNew := s.registry.NoteBundleSignals(proxyID, wb.RejectReason, ahead)
+	if rejected {
+		// applied_seq is the bundle the worker still enforces, not the one it rejected.
+		s.cfg.Logger.Warn("worker bundle rejected", "proxy_id", proxyID, "applied_seq", wb.Seq, "reason", wb.RejectReason)
+	}
+	if aheadNew {
+		s.cfg.Logger.Error("worker reports a bundle seq above the control plane head", "proxy_id", proxyID, "seq", wb.Seq, "head", head)
+	}
 }
 
 // validAgentBinding drops a heartbeat's agentID that is not agentid.ValidID and
@@ -1232,18 +1336,30 @@ func (s *Server) writeSettingsChecked(ctx context.Context, in config.SettingsWir
 	if s.versions != nil {
 		return s.publishSettings(ctx, in, meta, check)
 	}
+	if err := s.checkIssuerCollision(in.Identity); err != nil {
+		return err
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	// The on-disk settings, without serve-time overlays: overlays carry data no
+	// settings writer owns. An unreadable file refuses a checked write; an
+	// unchecked one starts from empty settings, as the write below does.
+	var live *config.SettingsWire
+	cur, err := s.policy.loadBase(context.Background())
+	switch {
+	case err == nil:
+		live = cur.Settings
+	case check != nil:
+		return fmt.Errorf("controlplane: read live settings: %w", err)
+	}
 	if check != nil {
-		// The on-disk settings, without serve-time overlays: overlays carry
-		// data no settings writer owns.
-		cur, err := s.policy.loadBase(context.Background())
-		if err != nil {
-			return fmt.Errorf("controlplane: read live settings: %w", err)
-		}
-		if err := check(cur.Settings); err != nil {
+		if err := check(live); err != nil {
 			return err
 		}
+	}
+	// The require-mode rollout guard (versioned writers run it in writeVersioned).
+	if err := s.requireGuard(ctx, live, in); err != nil {
+		return err
 	}
 
 	// Load the current file as a top-level YAML map so policy/logging/secrets and
@@ -1724,6 +1840,7 @@ type identityYAML struct {
 	ClockSkewSeconds   int         `yaml:"clockSkewSeconds,omitempty"`
 	MaxTokenTTLSeconds int         `yaml:"maxTokenTTLSeconds,omitempty"`
 	InternalIssuerURL  string      `yaml:"internalIssuerURL,omitempty"`
+	AcceptDexTokens    *bool       `yaml:"acceptDexTokens,omitempty"`
 	SignIn             *signInYAML `yaml:"signIn,omitempty"`
 }
 
@@ -1741,7 +1858,7 @@ func newIdentityYAML(in config.IdentitySettings) identityYAML {
 		DefaultMode: in.DefaultMode, Issuer: in.Issuer, Audience: in.Audience,
 		AllowedAZP: in.AllowedAZP, JWKSURL: in.JWKSURL, GroupsClaim: in.GroupsClaim,
 		ClockSkewSeconds: in.ClockSkewSeconds, MaxTokenTTLSeconds: in.MaxTokenTTLSeconds,
-		InternalIssuerURL: in.InternalIssuerURL,
+		InternalIssuerURL: in.InternalIssuerURL, AcceptDexTokens: in.AcceptDexTokens,
 	}
 	if si := in.SignIn; si != nil {
 		out.SignIn = &signInYAML{ClientID: si.ClientID, Scopes: si.Scopes, MaxPending: si.MaxPending, StartsPerMinute: si.StartsPerMinute}

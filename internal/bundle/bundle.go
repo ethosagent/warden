@@ -14,6 +14,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"time"
@@ -34,22 +36,27 @@ const (
 // Bundle is the signed payload. Policy and Sections carry already-serialized
 // JSON so the bytes the CP served are the bytes that were hashed and signed.
 //
-// Adding a top-level field (W-P2-WBND-06 adds tokenIssuer) takes three steps:
+// Adding a top-level field (W-P2-WBND-06 added tokenIssuer) takes three steps:
 // decode it in Bundle.setMember (payload.go), which the field-coverage test
 // enforces; cover it in contentSHA256, or carry it inside a section, so a
 // change to it changes the content hash; and compare it with the applied
 // state where it matters.
 type Bundle struct {
-	Typ               string                     `json:"typ"`
-	Seq               int64                      `json:"seq"`
-	PolicyVersion     int64                      `json:"policyVersion"` // informational only
-	IssuedAt          time.Time                  `json:"issuedAt"`
-	ExpiresAt         time.Time                  `json:"expiresAt"`
-	CPID              string                     `json:"cpID"`
-	ContentSHA256     string                     `json:"contentSha256"`
-	Policy            json.RawMessage            `json:"policy"`
-	CredentialsSHA256 string                     `json:"credentialsSha256,omitempty"`
-	Sections          map[string]json.RawMessage `json:"sections,omitempty"`
+	Typ               string          `json:"typ"`
+	Seq               int64           `json:"seq"`
+	PolicyVersion     int64           `json:"policyVersion"` // informational only
+	IssuedAt          time.Time       `json:"issuedAt"`
+	ExpiresAt         time.Time       `json:"expiresAt"`
+	CPID              string          `json:"cpID"`
+	ContentSHA256     string          `json:"contentSha256"`
+	Policy            json.RawMessage `json:"policy"`
+	CredentialsSHA256 string          `json:"credentialsSha256,omitempty"`
+	// TokenIssuer is the iss of the Warden tokens the control plane mints
+	// (tokenService.issuer). It is signed and part of ContentSHA256, so a
+	// worker verifies tokens against the issuer the signers vouched for, never
+	// against cpID. Empty (omitted) when the control plane mints no tokens.
+	TokenIssuer string                     `json:"tokenIssuer,omitempty"`
+	Sections    map[string]json.RawMessage `json:"sections,omitempty"`
 }
 
 // Credentials is the unsigned sidecar the envelope carries beside the signed
@@ -118,13 +125,45 @@ type Verified struct {
 	// Credentials is the sidecar, present only when it matched the signed
 	// hash. Nil when the bundle carries none.
 	Credentials *Credentials
+
+	// payload (the base64url text, aliasing the verified bytes) and
+	// signatures are the envelope members Verify parsed, for
+	// WithoutCredentials.
+	payload    []byte
+	signatures []Signature
+}
+
+// WithoutCredentials returns the verified envelope re-marshalled in canonical
+// form with no credentials sidecar: only the payload and signatures that
+// Verify itself parsed, under the names Sign writes. It is what may be
+// persisted (the worker's last-known-good cache): no unknown member and no
+// secret can come along, whatever the received envelope looked like. Verify
+// accepts the result with Options.AllowMissingCredentials.
+func (v Verified) WithoutCredentials() ([]byte, error) {
+	if len(v.payload) == 0 || len(v.signatures) == 0 {
+		return nil, errors.New("bundle: not a verified envelope")
+	}
+	// No HTML escaping, so <, > and & in the unsigned signature entries are not
+	// inflated sixfold; invalid UTF-8 still becomes an escaped U+FFFD. Either
+	// way the result is bounded like a received envelope, so an oversized one
+	// is a write failure the caller logs, not a cache LoadCache would refuse.
+	out, err := marshalNoEscape(Envelope{Payload: string(v.payload), Signatures: v.signatures})
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > MaxEnvelopeBytes {
+		return nil, fmt.Errorf("%w: bundle: stripped envelope is %d bytes, limit %d", ErrTooLarge, len(out), MaxEnvelopeBytes)
+	}
+	return out, nil
 }
 
 // contentSHA256 hashes what makes two bundles the same content: cpID, policy,
-// credentialsSha256 and sections, not the timestamps, so a re-sign of
-// unchanged content is recognisable. Fields are length-prefixed and sections
-// are visited in key order.
-func contentSHA256(cpID string, policy json.RawMessage, credsSHA string, sections map[string]json.RawMessage) string {
+// credentialsSha256, sections and tokenIssuer, not the timestamps, so a
+// re-sign of unchanged content is recognisable. Fields are length-prefixed and
+// sections are visited in key order. The token issuer is appended only when
+// set, so the hash of a bundle without one is what it was before the field
+// existed.
+func contentSHA256(cpID string, policy json.RawMessage, credsSHA string, sections map[string]json.RawMessage, tokenIssuer string) string {
 	h := sha256.New()
 	writeField(h, []byte("warden-bundle-content-v1"))
 	writeField(h, []byte(cpID))
@@ -141,6 +180,10 @@ func contentSHA256(cpID string, policy json.RawMessage, credsSHA string, section
 	for _, name := range names {
 		writeField(h, []byte(name))
 		writeField(h, sections[name])
+	}
+	if tokenIssuer != "" {
+		writeField(h, []byte("tokenIssuer"))
+		writeField(h, []byte(tokenIssuer))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

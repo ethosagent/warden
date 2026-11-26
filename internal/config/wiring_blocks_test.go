@@ -29,6 +29,7 @@ controlPlane:
   endpoint: https://cp.example.com/policy
   tokenEnv: CP_TOKEN
   pollInterval: 15s
+  requireSignedBundles: false
 central:
   mode: worker
   endpoint: https://agg.example.com/central/ingest
@@ -69,6 +70,7 @@ func TestManagedModeAllowlistRules(t *testing.T) {
 controlPlane:
   endpoint: https://cp.example.com/policy
   tokenEnv: WARDEN_CP_TOKEN
+  requireSignedBundles: false
 `
 	if _, err := parse([]byte(managed)); err != nil {
 		t.Errorf("managed mode with empty allowlist should be valid: %v", err)
@@ -94,6 +96,7 @@ func TestControlPlaneLongPollDefaults(t *testing.T) {
 	p, err := parse([]byte(baseAllow + `
 controlPlane:
   endpoint: https://cp.example.com/policy
+  requireSignedBundles: false
 `))
 	if err != nil {
 		t.Fatal(err)

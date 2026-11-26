@@ -1,10 +1,12 @@
 package analytics
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -177,4 +179,63 @@ func newIngestServer(t *testing.T, h http.Handler) *httptest.Server {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// An old warden.db opens with user_act and identity_token_type added, the
+// values round-trip through every write and read path, and an identity-free
+// Event marshals without either key (W-P2-WBND-02).
+func TestMigrateUserActColumn(t *testing.T) {
+	dsn := "file:" + filepath.Join(t.TempDir(), "warden.db")
+	createLegacyEventsDB(t, dsn)
+	s, err := NewSQLiteStore(dsn, 0)
+	if err != nil {
+		t.Fatalf("open legacy: %v", err)
+	}
+	for _, c := range []string{"user_act", "identity_token_type"} {
+		if !hasColumn(t, s, c) {
+			t.Errorf("column %s not added", c)
+		}
+	}
+	ev := attributedEvent()
+	ev.UserAct, ev.IdentityTokenType = "agent-a", "warden"
+	if err := s.StoreEvent(ev); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StoreEventsBatch([]Event{ev}); err != nil {
+		t.Fatal(err)
+	}
+	count := func(evs []Event) int {
+		n := 0
+		for _, e := range evs {
+			switch {
+			case e.UserAct == "agent-a" && e.IdentityTokenType == "warden":
+				n++
+			case e.UserAct != "" || e.IdentityTokenType != "":
+				t.Errorf("a row picked up the wrong values: %+v", e)
+			}
+		}
+		return n
+	}
+	got, err := s.GetEvents(EventFilter{})
+	if err != nil || len(got) != 3 || count(got) != 2 {
+		t.Fatalf("GetEvents: %d events, %d with the agent, err %v; want 3 and 2", len(got), count(got), err)
+	}
+	_, oldest, err := s.GetOldestEventIDs(10)
+	if err != nil || len(oldest) != 3 || count(oldest) != 2 {
+		t.Fatalf("GetOldestEventIDs: %d events, %d with the agent, err %v; want 3 and 2", len(oldest), count(oldest), err)
+	}
+	_ = s.Close()
+	s2, err := NewSQLiteStore(dsn, 0)
+	if err != nil {
+		t.Fatalf("second open must be a no-op: %v", err)
+	}
+	_ = s2.Close()
+
+	b, err := json.Marshal(Event{Domain: "x.com", Decision: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "user_act") || strings.Contains(string(b), "identity_token_type") {
+		t.Errorf("identity-free event carries the new keys: %s", b)
+	}
 }

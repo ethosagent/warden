@@ -107,10 +107,12 @@ type Params struct {
 	// requires StateDir. Any other value is a startup error.
 	PolicyStore string
 
-	// Bundles is --bundles: "off" (or "", the default) leaves /policy exactly
-	// as it was; "offer" serves the signed bundle envelope to workers that ask
-	// for it with the bundle Accept header and the legacy policy to everyone
-	// else; "require" answers a request without that header with 406. Offer and
+	// Bundles is --bundles: "" (BundlesDefault, the default) is "require" when
+	// StateDir, PolicyStore versioned and keys.enabled are all present and "off"
+	// with a startup WARN when one is missing; "off" is the explicit, temporary
+	// opt-out and leaves /policy exactly as it was; "offer" serves the signed
+	// bundle envelope to workers that ask for it with the bundle Accept header
+	// and the legacy policy to everyone else; "require" answers a request without that header with 406. Offer and
 	// require need StateDir, PolicyStore versioned and keys.enabled; Run
 	// refuses to start without them.
 	Bundles string
@@ -167,6 +169,18 @@ type Params struct {
 	BackupReporter BackupReporter
 	// Version is the warden version recorded in backup manifests.
 	Version string
+}
+
+// activeTestHooks names the key-store seams set on p.
+func activeTestHooks(p Params) []string {
+	var hooks []string
+	if p.KeyStore != nil {
+		hooks = append(hooks, "KeyStore")
+	}
+	if p.KeysAWSClient != nil {
+		hooks = append(hooks, "KeysAWSClient")
+	}
+	return hooks
 }
 
 // Run boots a control plane from Params and serves until ctx is cancelled. It
@@ -255,6 +269,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		}
 	}
 	logger, _ := observability.NewLogger(logOut, pol.LogLevel, pol.LogFormat)
+	// Go-only collaborator seams (KeyStore, KeysAWSClient) replace the
+	// configured key store. No flag or YAML key can set them, so this WARN only
+	// appears when Go code embeds the control plane; it names the hooks alone.
+	if hooks := activeTestHooks(p); len(hooks) > 0 {
+		logger.Warn("test hooks active: Go-only key-store seams replace the configured store",
+			"hooks", strings.Join(hooks, ","))
+	}
 	if jsonLogOnStdout(jsonLog) {
 		logger.Info("audit.jsonLog.output is stdout: operational logs moved to stderr so stdout carries only warden.admin.v1 lines")
 	}
@@ -314,6 +335,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(err)
 	}
+	logBundlesMode(logger, bundlesCfg)
 	bindAddr := listenAddr
 	if p.Listener != nil {
 		bindAddr = p.Listener.Addr().String()
@@ -773,6 +795,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// publisher can sign. A mode it cannot honour stops the control plane.
 	if bundlesCfg.On() {
 		if err := srv.policy.startBundles(context.WithoutCancel(ctx)); err != nil {
+			if cause := bundleKeyLoadError(srv.cfg.Keys); cause != "" {
+				err = fmt.Errorf("%w (the key manager says: %s)", err, cause)
+			}
 			if srv.integrationsStore != nil {
 				_ = srv.integrationsStore.Close() // Start never ran, so nothing else closes it
 			}
@@ -827,6 +852,18 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 
 	// Periodic re-read so external edits to the policy file propagate to workers.
 	srv.Start(ctx)
+
+	// API key expiry warnings: an hourly scan publishes api_key_expiring Findings
+	// (W-P2-APIK-05). Run waits for the loop before the state DB closes.
+	if apiKeyStore != nil {
+		eCtx, eCancel := context.WithCancel(ctx)
+		eDone := make(chan struct{})
+		go srv.runAPIKeyExpiry(eCtx, eDone)
+		defer func() {
+			eCancel()
+			<-eDone
+		}()
+	}
 
 	// Worker certificate revocations: pick up writes by the offline CLI within
 	// the 2 s data_version poll. Run waits for the loop before the state DB

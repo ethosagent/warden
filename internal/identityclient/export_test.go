@@ -17,3 +17,7 @@ const (
 
 // SetPreambleTimeout shortens the preamble deadline for a timeout test.
 func (f *Forwarder) SetPreambleTimeout(d time.Duration) { f.preambleTimeout = d }
+
+// SetJoinHook makes fn run once per caller that has joined an exchange flight,
+// so a test can wait until N callers share one request without sleeping.
+func (s *WardenTokenSource) SetJoinHook(fn func()) { s.joinHook = fn }

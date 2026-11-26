@@ -115,8 +115,8 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().Int("analytics-retention-days", 30, "prune fleet analytics events older than N days (0 = keep forever)")
 	cmd.Flags().String("alerts-db", "", "sqlite alert store DB path (default: sibling of the analytics DB, named warden-alerts.db)")
 	cmd.Flags().String("policy-store", controlplane.PolicyStoreFile, "where served policy comes from: file (default, the served YAML) | versioned (append-only versions in <state-dir>/warden-cp.db; requires --state-dir)")
-	cmd.Flags().String("bundles", controlplane.BundlesOff, "signed policy bundles on GET /policy: off (default, byte-identical) | offer (envelope for workers that send Accept: "+controlplane.BundleMediaType+", legacy policy for the rest) | require (a request without that header gets 406); offer and require need --state-dir, --policy-store=versioned and keys.enabled")
-	cmd.Flags().Duration("bundle-max-age", controlplane.DefaultBundleMaxAge, "how long a signed bundle is valid; the control plane re-signs every quarter of it (minimum 1h; with --bundles offer|require)")
+	cmd.Flags().String("bundles", controlplane.BundlesDefault, "signed policy bundles on GET /policy. Unset = require when --state-dir, --policy-store=versioned and keys.enabled are all present (otherwise the legacy unsigned policy and a startup WARN naming what is missing). require = a request without the Accept header "+controlplane.BundleMediaType+" gets 406; offer = envelope for workers that send that header, legacy policy for the rest (use while pinning the fleet); off = legacy policy only, a temporary opt-out that logs a WARN. require and offer need --state-dir, --policy-store=versioned and keys.enabled")
+	cmd.Flags().Duration("bundle-max-age", controlplane.DefaultBundleMaxAge, "how long a signed bundle is valid; the control plane re-signs every quarter of it (minimum 1h; with signed bundles on)")
 	cmd.Flags().Int64("bundle-seq-floor", 0, "with --bundles offer|require, append a restore row at this seq at startup when the publish log is below it (after restoring a backup; 0 = never)")
 	cmd.Flags().Bool("require-console-auth", false, "refuse to start unless console.auth is oidc (no open dashboard)")
 	cmd.Flags().String("admin-audit-key-file", "", "admin audit signing key (default <state-dir>/cp-audit.key; the HMAC key sits beside it); used when console.adminAudit.enabled")
@@ -131,6 +131,6 @@ func newControlPlaneCmd() *cobra.Command {
 	// list/export are read-only, rotate writes without the lock and reset takes it; agent list is read-only and
 	// agent register/update/disable/enable write without the lock, each in one
 	// BEGIN IMMEDIATE transaction).
-	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd(), newBackupCmd(), newRestoreCmd(), newControlPlaneTokenCmd(), newControlPlaneEnrollTokenCmd(), newControlPlaneWorkerCmd(), newControlPlaneBlockCmd(), newControlPlaneKeysCmd(), newControlPlaneCACmd(), newControlPlaneAgentCmd())
+	cmd.AddCommand(newAdminAuditCmd(), newHashPasswordCmd(), newBackupCmd(), newRestoreCmd(), newControlPlaneTokenCmd(), newControlPlaneEnrollTokenCmd(), newControlPlaneWorkerCmd(), newControlPlaneBlockCmd(), newControlPlaneKeysCmd(), newControlPlaneCACmd(), newControlPlaneAgentCmd(), newControlPlaneAPIKeyCmd())
 	return cmd
 }

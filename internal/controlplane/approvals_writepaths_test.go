@@ -425,21 +425,30 @@ var notVersionedWriteRoutes = map[routeKey]string{
 	{http.MethodPost, "/dashboard/api/backup"}:               "writes a backup, not a version",
 	{http.MethodPost, "/dashboard/api/worker-tokens"}:        "worker token store",
 	{http.MethodDelete, "/dashboard/api/worker-tokens/{id}"}: "worker token store",
-	{http.MethodPost, "/dashboard/api/blocked-users"}:        "block list store, a serve-time overlay (W-P2-APPR-08 gates removals)",
-	{http.MethodDelete, "/dashboard/api/blocked-users/{id}"}: "block list store, a serve-time overlay (W-P2-APPR-08 gates removals)",
+	{http.MethodPost, "/dashboard/api/blocked-users"}:        "adding a block narrows access: the immediate kill switch, never held (W-P2-APPR-08)",
 	{http.MethodPost, "/dashboard/api/keys/rotate"}:          "signing key store",
 	{http.MethodDelete, "/dashboard/api/sessions"}:           "session store",
 	// Landed alongside APPR-06: CP-local stores, not part of a policy version.
-	{http.MethodPost, "/dashboard/api/agents"}:                      "agent registry store, a serve-time overlay",
-	{http.MethodPut, "/dashboard/api/agents/{id}"}:                  "agent registry store, a serve-time overlay",
-	{http.MethodPost, "/dashboard/api/agents/{id}/disable"}:         "agent registry store, a serve-time overlay",
-	{http.MethodPost, "/dashboard/api/agents/{id}/enable"}:          "agent registry store, a serve-time overlay",
+	{http.MethodPost, "/dashboard/api/agents/{id}/disable"}:         "disabling an agent narrows access and applies directly (W-P2-APPR-08)",
 	{http.MethodPost, "/dashboard/api/api-keys"}:                    "API key store",
 	{http.MethodDelete, "/dashboard/api/api-keys"}:                  "API key store",
 	{http.MethodDelete, "/dashboard/api/api-keys/{id}"}:             "API key store",
 	{http.MethodPost, "/dashboard/api/token-sessions/revoke"}:       "token session store",
 	{http.MethodPost, "/dashboard/api/token-sessions/{sid}/revoke"}: "token session store",
 	{http.MethodPost, "/dashboard/api/workers/{id}/revoke"}:         "worker certificate store",
+	{http.MethodPost, "/dashboard/api/worker-enrollments"}:          "enrollment token store",
+	{http.MethodDelete, "/dashboard/api/worker-enrollments/{id}"}:   "enrollment token store",
+}
+
+// gatedTargetRoutes are the CP-local store routes whose widening requests go
+// through the Gate and are held as a draft of their own target (W-P2-APPR-08):
+// they create no policy version, but a request that widens access answers 202.
+// TestApprovalsTargetRoutesHold drives each with a widening request.
+var gatedTargetRoutes = map[routeKey]string{
+	{http.MethodDelete, "/dashboard/api/blocked-users/{id}"}: "blocked_users",
+	{http.MethodPost, "/dashboard/api/agents"}:               "agents",
+	{http.MethodPut, "/dashboard/api/agents/{id}"}:           "agents",
+	{http.MethodPost, "/dashboard/api/agents/{id}/enable"}:   "agents",
 }
 
 // TestVersionedWritesAreGated walks the authz table: every audited mutating
@@ -457,14 +466,20 @@ func TestVersionedWritesAreGated(t *testing.T) {
 		}
 		_, gated := versionedWriteRoutes[key]
 		_, other := notVersionedWriteRoutes[key]
-		if gated == other {
-			t.Errorf("%s %s (%s) must be in exactly one of versionedWriteRoutes and notVersionedWriteRoutes (gated=%v other=%v)",
-				key.Method, key.Path, row.Action, gated, other)
+		_, target := gatedTargetRoutes[key]
+		if n := b2i(gated) + b2i(other) + b2i(target); n != 1 {
+			t.Errorf("%s %s (%s) must be in exactly one of versionedWriteRoutes, gatedTargetRoutes and notVersionedWriteRoutes (gated=%v target=%v other=%v)",
+				key.Method, key.Path, row.Action, gated, target, other)
 		}
 	}
 	for key := range versionedWriteRoutes {
 		if _, ok := table[key]; !ok {
 			t.Errorf("versionedWriteRoutes names %s %s, which is not a route", key.Method, key.Path)
+		}
+	}
+	for key := range gatedTargetRoutes {
+		if _, ok := table[key]; !ok {
+			t.Errorf("gatedTargetRoutes names %s %s, which is not a route", key.Method, key.Path)
 		}
 	}
 	for key := range notVersionedWriteRoutes {
@@ -515,8 +530,8 @@ func TestVersionedStoreCreateCallers(t *testing.T) {
 	// `.Create(ctx, ` call fails: classify it here after routing a version write
 	// through Server.writeVersioned.
 	wantCreate := map[string]bool{"policy_publish.go": true, "policycli.go": true, "policystore.go": true}
-	otherCreate := map[string]bool{"auth.go": true, "breakglass.go": true, "workertokens_admin.go": true, "workertokens_cli.go": true,
-		"agents.go": true, "agentcli.go": true, "enrollment_cli.go": true}
+	otherCreate := map[string]bool{"approvals_agents.go": true, "auth.go": true, "breakglass.go": true, "workertokens_admin.go": true, "workertokens_cli.go": true,
+		"agents.go": true, "agentcli.go": true, "enrollment_cli.go": true, "enrollment_admin.go": true}
 	wantPublish := map[string]bool{"policy_publish.go": true, "approvals_apply.go": true}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -583,4 +598,11 @@ func TestApprovalsMetaWrittenAtStart(t *testing.T) {
 	if err != nil || !found || m.Enabled {
 		t.Fatalf("meta after a disabled start = %+v, %v, %v; want found and disabled", m, found, err)
 	}
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

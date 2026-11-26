@@ -90,6 +90,9 @@ The worker side of the same stream (`warden.decision.v1`) uses the same
 | 28 | Identity mode on, so users can be told apart | worker `identity.defaultMode` = `attribute`, `identity.issuer`, `identity.audience` | `warden identity status` shows claims; deny events carry the user. |
 | 29 | Block list reaches every worker | admin API or `warden control-plane block add --state-dir ...` | Block a test user; the worker answers `403 {"error":"user_blocked"}` within seconds. |
 | 30 | Workers advertise `blocklist/v1` | (automatic in this release) | `GET /dashboard/api/workers` lists `caps` per worker. A worker without `blocklist/v1` would silently ignore the block list; the dashboard does not render a badge for it yet, so check the field. |
+| 31 | Change approvals, when a second person must approve widening changes | `console.approvals.enabled` = `true` (needs `console.auth` `oidc`, `--policy-store=versioned`, `--state-dir` and `console.adminAudit.enabled`); tune `console.approvals.minApprovals`, `console.approvals.replayTimeout` and `console.approvals.draftTTL`; guide in [approvals.md](approvals.md) | A widening policy save answers `202` with a draft id and the `/policy` ETag does not move; the author's own approve answers `403 self_approval_forbidden`; a second editor's approve answers `200`. `go test -race ./internal/controlplane -run TestApprovalsEndToEnd` passes. |
+| 32 | Emergency apply is off, or routed and watched | `console.approvals.allowEmergencyApply` = `false` (the default), or `true` with `console.breakGlass.enabled` and an `integrations` match for `rule: approval_bypassed` | No startup WARN about `allowEmergencyApply`; a drill apply raises one critical `approval_bypassed` Finding on the channel and an independent admin closes it with a review. |
+| 33 | The state dir and fleet database are on a local disk | `--state-dir`, `--analytics-db` (the fleet database need not be under `--state-dir`), `--analytics-provider` | Approvals use SQLite WAL files; never put them on NFS or another network filesystem. `--analytics-provider` `memory` keeps no replay data across restarts. |
 
 ### Identity and group policy: how they fail
 
@@ -108,10 +111,10 @@ The worker side of the same stream (`warden.decision.v1`) uses the same
 
 | # | Item | Set | How to check |
 |---|---|---|---|
-| 31 | Keys on, with a rotation cadence | `keys.enabled` = `true` (needs `--state-dir`), `keys.token.rotationInterval` = `720h`, `keys.token.prepublish` = `1h`, `keys.token.overlap` = `48h` | `warden control-plane keys list --state-dir /data --purpose token` shows an `active` and a `next` key; `GET /.well-known/jwks.json` lists both kids. |
-| 32 | The rotation drill has been run | [runbooks/key-rotation.md](runbooks/key-rotation.md) | `go test ./cmd/proxy -run 'TestKeysRotateCLI\|TestKeysRotateEmergency'` and `go test -tags integration ./test/integration -run TestKeysRotationDrill` pass. You have rotated once, on a copy, and watched the retired kid verify through its overlap. |
-| 33 | Keys survive a restore | the manifest's `not_included` names the key store, so a restore needs `warden control-plane keys reset --purpose token --yes` and the same for `bundle` | `go test ./cmd/proxy -run TestKeysRestoreHint` passes: the restore prints the reset hint when material is missing, and the reset regenerates. |
-| 34 | Key changes are audited | `console.adminAudit.enabled` = `true` | After a CLI rotation, `keys.rotate_requested` rows with `auth_method` `cli` appear in the admin audit (section 3). |
+| 34 | Keys on, with a rotation cadence | `keys.enabled` = `true` (needs `--state-dir`), `keys.token.rotationInterval` = `720h`, `keys.token.prepublish` = `1h`, `keys.token.overlap` = `48h` | `warden control-plane keys list --state-dir /data --purpose token` shows an `active` and a `next` key; `GET /.well-known/jwks.json` lists both kids. |
+| 35 | The rotation drill has been run | [runbooks/key-rotation.md](runbooks/key-rotation.md) | `go test ./cmd/proxy -run 'TestKeysRotateCLI\|TestKeysRotateEmergency'` and `go test -tags integration ./test/integration -run TestKeysRotationDrill` pass. You have rotated once, on a copy, and watched the retired kid verify through its overlap. |
+| 36 | Keys survive a restore | the manifest's `not_included` names the key store, so a restore needs `warden control-plane keys reset --purpose token --yes` and the same for `bundle` | `go test ./cmd/proxy -run TestKeysRestoreHint` passes: the restore prints the reset hint when material is missing, and the reset regenerates. |
+| 37 | Key changes are audited | `console.adminAudit.enabled` = `true` | After a CLI rotation, `keys.rotate_requested` rows with `auth_method` `cli` appear in the admin audit (section 3). |
 
 ## 8. Known limits in Phase 1
 

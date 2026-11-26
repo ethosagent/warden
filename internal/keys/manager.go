@@ -32,6 +32,12 @@ const (
 // purpose has rows but its active key cannot be loaded.
 const AlertSigningKeyUnavailable = "signing_key_unavailable"
 
+// AlertStagedKeyUnavailable is the rule id of the Finding raised when a bundle
+// purpose's staged next key cannot be loaded: signing with both keys is
+// impossible, so the whole purpose stays on its last good snapshot (or, at boot,
+// does not load). `keys rotate --purpose bundle --unstage` recovers.
+const AlertStagedKeyUnavailable = "staged_key_unavailable"
+
 // Actor is who caused a key change, for created_by and the admin audit trail.
 type Actor struct {
 	// Subject is the principal: a user, "system" or "cli".
@@ -121,6 +127,9 @@ type Manager struct {
 	// degraded records why each purpose is currently unavailable (nil map
 	// entry when it is not), for LastError.
 	degraded map[string]string
+	// stagedDown records the purposes whose last load failed on the staged
+	// next key alone (NotReadyReason).
+	stagedDown map[string]bool
 	// episodes records the alerts already raised for a rule and purpose, so a
 	// Finding fires once per episode, not once per retry or per pass.
 	episodes map[string]string
@@ -157,7 +166,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	}
 	m := &Manager{
 		cfg: cfg, log: cfg.Logger,
-		degraded: map[string]string{}, episodes: map[string]string{},
+		degraded: map[string]string{}, stagedDown: map[string]bool{}, episodes: map[string]string{},
 	}
 	if m.log == nil {
 		m.log = slog.Default()
@@ -195,6 +204,20 @@ func (m *Manager) Init(ctx context.Context) {
 	if v, err := m.cfg.Meta.DataVersion(ctx); err == nil {
 		m.dataVersion = v // a first poll that sees only our own writes reloads nothing
 	}
+}
+
+// NotReadyReason says why Ready is false: "staged_key_unavailable" when a
+// purpose cannot load because its staged next key's material is lost (the fix
+// is `keys rotate --purpose bundle --unstage`), "no_active_key" otherwise.
+func (m *Manager) NotReadyReason() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range loadPurposes {
+		if m.stagedDown[p] {
+			return "staged_key_unavailable"
+		}
+	}
+	return "no_active_key"
 }
 
 // Ready reports whether every loadable purpose has an active key in the
@@ -371,8 +394,23 @@ func (m *Manager) loadLocked(ctx context.Context, purpose string) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrNoActiveKey, err)
 	}
-	if m.set.install(purpose, sg, rows, m.cfg.Timings[purpose].Overlap) {
-		m.log.Info("keys_loaded", "purpose", purpose, "alg", active.Alg, "active_kid", active.KID, "rows", len(rows))
+	// A staged bundle next key signs beside the active one, so its material
+	// must load too. A failure fails the whole load: the last good snapshot
+	// stays (or, at boot, the bundle publisher refuses to start), never a
+	// silent drop to one signature that a worker pinned only to the staged
+	// key would reject.
+	var staged Signer
+	if st, ok := StagedNext(rows); ok {
+		if staged, err = m.loadSigner(ctx, st); err != nil {
+			return fmt.Errorf("%w: %s next key %s: %w", ErrStagedKeyUnavailable, purpose, st.KID, err)
+		}
+	}
+	if m.set.install(purpose, sg, staged, rows, m.cfg.Timings[purpose].Overlap) {
+		attrs := []any{"purpose", purpose, "alg", active.Alg, "active_kid", active.KID, "rows", len(rows)}
+		if staged != nil {
+			attrs = append(attrs, "staged_kid", staged.KID())
+		}
+		m.log.Info("keys_loaded", attrs...)
 	}
 	return nil
 }
@@ -402,11 +440,22 @@ func (m *Manager) adoptLocked(ctx context.Context, purpose string) error {
 func (m *Manager) noteLoad(ctx context.Context, purpose string, err error) {
 	if err == nil {
 		delete(m.degraded, purpose)
+		delete(m.stagedDown, purpose)
 		m.clearAlert(purpose, AlertSigningKeyUnavailable)
+		m.clearAlert(purpose, AlertStagedKeyUnavailable)
 		return
 	}
 	m.log.Error("keys_load_failed", "purpose", purpose, "error", err)
 	m.degraded[purpose] = err.Error()
+	delete(m.stagedDown, purpose)
+	if errors.Is(err, ErrStagedKeyUnavailable) {
+		m.stagedDown[purpose] = true
+		// The active key is fine; the staged next key's material is not. A
+		// distinct Finding tells the operator the fix is `keys rotate
+		// --purpose bundle --unstage`, not a key store outage.
+		m.alertOnce(ctx, purpose, AlertStagedKeyUnavailable, err.Error())
+		return
+	}
 	m.alertOnce(ctx, purpose, AlertSigningKeyUnavailable, err.Error())
 }
 
@@ -464,8 +513,8 @@ func (m *Manager) loadSigner(ctx context.Context, row Record) (Signer, error) {
 		return nil, storeErr("parse", row.Purpose, row.KID, err)
 	}
 	if sg.KID() != row.KID || sg.Alg() != row.Alg {
-		return nil, fmt.Errorf("keys: %s key %s: stored material does not match its row (kid %s, alg %s)",
-			row.Purpose, row.KID, sg.KID(), sg.Alg())
+		return nil, fmt.Errorf("%w: %s key %s: stored material is kid %s, alg %s",
+			ErrKeyMaterialMismatch, row.Purpose, row.KID, sg.KID(), sg.Alg())
 	}
 	return sg, nil
 }
@@ -832,6 +881,9 @@ type KeySet struct {
 // loaded is one purpose's immutable snapshot.
 type loaded struct {
 	active Signer
+	// staged is the bundle purpose's staged next key, which signs beside
+	// active (Signers); nil for every other purpose and when nothing is staged.
+	staged Signer
 	rows   []Record
 	// overlap is the purpose's configured overlap: how long a retired key stays
 	// in the JWKS.
@@ -851,11 +903,11 @@ func newKeySet(now func() time.Time, onSignErr func(string), log *slog.Logger) *
 // rows and the same active key changes nothing — no version bump, no
 // subscribers, no keys_loaded line — so the version moves once per transition,
 // not once per poll. It reports whether the snapshot changed.
-func (ks *KeySet) install(purpose string, active Signer, rows []Record, overlap time.Duration) bool {
+func (ks *KeySet) install(purpose string, active, staged Signer, rows []Record, overlap time.Duration) bool {
 	ks.mu.Lock()
 	old := *ks.cur.Load()
 	if l := old[purpose]; l != nil && l.overlap == overlap && sameRecords(l.rows, rows) &&
-		kidOf(l.active) == kidOf(active) {
+		kidOf(l.active) == kidOf(active) && kidOf(l.staged) == kidOf(staged) {
 		ks.mu.Unlock()
 		return false
 	}
@@ -866,7 +918,10 @@ func (ks *KeySet) install(purpose string, active Signer, rows []Record, overlap 
 	if active != nil && ks.onSignErr != nil {
 		active = countingSigner{Signer: active, purpose: purpose, onErr: ks.onSignErr}
 	}
-	next[purpose] = &loaded{active: active, rows: append([]Record(nil), rows...), overlap: overlap}
+	if staged != nil && ks.onSignErr != nil {
+		staged = countingSigner{Signer: staged, purpose: purpose, onErr: ks.onSignErr}
+	}
+	next[purpose] = &loaded{active: active, staged: staged, rows: append([]Record(nil), rows...), overlap: overlap}
 	ks.cur.Store(&next)
 	ks.ver.Add(1)
 	ks.mu.Unlock()
@@ -885,7 +940,8 @@ func (ks *KeySet) holds(purpose string, rows []Record) bool {
 		return false
 	}
 	a, _ := activeRow(rows)
-	return a.KID != "" && kidOf(l.active) == a.KID
+	st, _ := StagedNext(rows)
+	return a.KID != "" && kidOf(l.active) == a.KID && kidOf(l.staged) == st.KID
 }
 
 func kidOf(sg Signer) string {
@@ -1076,6 +1132,37 @@ func (ks *KeySet) Active(purpose string) (Signer, error) {
 		return l.active, nil
 	}
 	return nil, fmt.Errorf("%w: %s", ErrNoActiveKey, purpose)
+}
+
+// Signers returns every signer that signs purpose's output now: the active key
+// and, for the bundle purpose, the staged next key (StagedNext), active first.
+// During a staged bundle rotation the control plane signs each envelope with
+// both, so a worker that pins either key verifies it. It is ErrNoActiveKey
+// when purpose has no active key loaded.
+func (ks *KeySet) Signers(purpose string) ([]Signer, error) {
+	l := (*ks.cur.Load())[purpose]
+	if l == nil || l.active == nil {
+		return nil, fmt.Errorf("%w: %s", ErrNoActiveKey, purpose)
+	}
+	out := []Signer{l.active}
+	if l.staged != nil {
+		out = append(out, l.staged)
+	}
+	return out, nil
+}
+
+// StagedNext returns the bundle purpose's staged next key: the next row whose
+// activate_at is set. A manual purpose's next key has no activate_at until
+// Stage stamps it, so the field is the marker (token next keys carry
+// activate_at too, on a schedule, and are never staged). rows must be one
+// purpose's.
+func StagedNext(rows []Record) (Record, bool) {
+	for _, r := range rows {
+		if r.Purpose == PurposeBundle && r.State == StateNext && !r.ActivateAt.IsZero() {
+			return r, true
+		}
+	}
+	return Record{}, false
 }
 
 // Loaded reports whether purpose has an active key in the snapshot.

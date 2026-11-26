@@ -90,7 +90,11 @@ const (
 	// changed while the served policy did not; publishReasonRestore marks the
 	// row --bundle-seq-floor appends.
 	publishReasonTokenJWKS = "token_jwks"
-	publishReasonRestore   = "restore"
+	// publishReasonTokenIssuer marks a row appended because the signed token
+	// issuer changed (tokenService.issuer edited, or the service switched on
+	// or off) while the served policy did not.
+	publishReasonTokenIssuer = "token_issuer"
+	publishReasonRestore     = "restore"
 )
 
 // wireOverlay merges serve-time data into the served wire: data that must reach
@@ -343,6 +347,16 @@ func etagFor(wire policyWire) string {
 	b, _ := json.Marshal(projectScoped(wire))
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8]) // 16 hex chars
+}
+
+// bundleHeadSeq is the seq of the newest signed bundle the control plane
+// serves, 0 when it serves none (bundles off, or nothing signed yet).
+func (ps *policyServer) bundleHeadSeq() int64 {
+	b, _ := ps.watch.bundleSnapshot()
+	if b == nil {
+		return 0
+	}
+	return b.seq
 }
 
 // currentETag returns the ETag of the policy currently served (for the dashboard

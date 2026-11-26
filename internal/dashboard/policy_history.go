@@ -232,7 +232,7 @@ func (s *Server) rollbackPolicyVersion(w http.ResponseWriter, r *http.Request, v
 		writeError(w, http.StatusBadRequest, "note is longer than 512 characters")
 		return
 	}
-	res, err := s.policyHistory.Rollback(r.Context(), v, note, WriteMeta{ExpectedHead: expected})
+	res, err := s.policyHistory.Rollback(withForce(r.Context(), r), v, note, WriteMeta{ExpectedHead: expected})
 	if err != nil {
 		writeHistoryError(w, err)
 		return
@@ -251,12 +251,13 @@ func writeHistoryError(w http.ResponseWriter, err error) {
 	var re *RoleRequiredError
 	var held *HeldForApproval
 	var cerr *ChangeError
+	var wl *WorkersLackCapabilityError
 	switch {
 	case errors.Is(err, ErrPolicyVersionNotFound):
 		writeError(w, http.StatusNotFound, "policy version not found")
 	case errors.As(err, &ie):
 		writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]string{"error": "invalid_policy", "detail": ie.Error()})
-	case errors.As(err, &ce), errors.As(err, &re), errors.As(err, &held), errors.As(err, &cerr):
+	case errors.As(err, &ce), errors.As(err, &re), errors.As(err, &wl), errors.As(err, &held), errors.As(err, &cerr):
 		writeWriterError(w, err)
 	default:
 		writeError(w, http.StatusInternalServerError, "policy history error")
@@ -295,7 +296,8 @@ const APIKeysPath = "/dashboard/api/api-keys"
 // holds, a worker token path (/dashboard/api/worker-tokens/wt_x) becomes
 // /dashboard/api/worker-tokens/{id}, and a block list entry path becomes
 // /dashboard/api/blocked-users/{id}, a worker revoke path becomes
-// /dashboard/api/workers/{id}/revoke, a token session revoke path becomes
+// /dashboard/api/workers/{id}/revoke, an enrollment token path becomes
+// /dashboard/api/worker-enrollments/{id}, a token session revoke path becomes
 // /dashboard/api/token-sessions/{sid}/revoke, an agent path becomes
 // /dashboard/api/agents/{id}[/disable|/enable]; every other path is returned unchanged.
 // The control plane keys its authz table and audit classification on the
@@ -303,6 +305,9 @@ const APIKeysPath = "/dashboard/api/api-keys"
 func RoutePath(p string) string {
 	if _, ok := workerTokenID(p); ok {
 		return workerTokensPath + "/{id}"
+	}
+	if _, ok := workerEnrollmentID(p); ok {
+		return workerEnrollmentsPath + "/{id}"
 	}
 	if _, ok := workerRevokeID(p); ok {
 		return workersPath + "/{id}/revoke"

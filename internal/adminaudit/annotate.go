@@ -68,6 +68,14 @@ const (
 	DetailSha256Suffix = "Sha256"
 )
 
+// The require-mode rollout guard's keys (W-P2-WBND-07): force is "true" when an
+// admin overrode the refusal, and workersLacking lists (with workersLackingCount,
+// like the agent lists above) the proxy ids that lacked identity/require-v1.
+const (
+	DetailForce          = "force"
+	DetailWorkersLacking = "workersLacking"
+)
+
 // DetailSource is where a change came from (for example approval).
 const DetailSource = "source"
 
@@ -79,9 +87,9 @@ var annotationKeys = func() map[string]bool {
 		DetailWorkerID: true, DetailCount: true, DetailEnrollTokens: true,
 		DetailBaseVersion: true, DetailAppliedVersion: true, DetailWidening: true,
 		DetailReasons: true, DetailReplayStatus: true, DetailAckNoReplay: true, DetailSource: true,
-		DetailChanged: true, DetailStatusFrom: true, DetailStatusTo: true, DetailTruncated: true,
+		DetailForce: true, DetailChanged: true, DetailStatusFrom: true, DetailStatusTo: true, DetailTruncated: true,
 	}
-	for _, k := range []string{DetailKidsAdded, DetailKidsRemoved, DetailJktsAdded, DetailJktsRemoved, DetailGroupsAdded, DetailGroupsRemoved} {
+	for _, k := range []string{DetailWorkersLacking, DetailKidsAdded, DetailKidsRemoved, DetailJktsAdded, DetailJktsRemoved, DetailGroupsAdded, DetailGroupsRemoved} {
 		m[k] = true
 		m[k+DetailCountSuffix] = true
 		m[k+DetailSha256Suffix] = true

@@ -369,3 +369,44 @@ func TestSignInStartedCounterScrape(t *testing.T) {
 	var nilM *Metrics
 	nilM.RecordSignInStarted("started") // nil-safe
 }
+
+func TestBundleMetrics(t *testing.T) {
+	m, h, shutdown := newWithHandler(t)
+	defer func() { _ = shutdown(context.Background()) }()
+
+	m.RecordBundleRejected("bad_signature")
+	m.RecordBundleRejected("invalid_policy")
+	m.RecordBundleRejected("some-attacker-kid") // unbounded input: one "other" series
+	m.SetBundleState(5, 90*time.Second, false)
+	m.SetBundleState(5, -time.Second, true) // a clock behind issuedAt never goes negative
+
+	body := scrape(t, h)
+	for _, want := range []string{
+		`warden_bundle_rejected_total{`, `reason="bad_signature"`, `reason="invalid_policy"`, `reason="other"`,
+		"warden_bundle_seq", "warden_bundle_age_seconds", "warden_bundle_stale",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape lacks %q\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "some-attacker-kid") {
+		t.Errorf("an unbounded value reached a label\n%s", body)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "warden_bundle_seq{") && !strings.HasSuffix(line, " 5") {
+			t.Errorf("seq line = %q, want value 5", line)
+		}
+		if strings.HasPrefix(line, "warden_bundle_stale{") && !strings.HasSuffix(line, " 1") {
+			t.Errorf("stale line = %q, want value 1", line)
+		}
+		if strings.HasPrefix(line, "warden_bundle_age_seconds{") && !strings.HasSuffix(line, " 0") {
+			t.Errorf("age line = %q, want value 0", line)
+		}
+	}
+}
+
+func TestBundleMetricsNilSafe(t *testing.T) {
+	var m *Metrics
+	m.RecordBundleRejected("bad_signature")
+	m.SetBundleState(1, time.Second, true)
+}

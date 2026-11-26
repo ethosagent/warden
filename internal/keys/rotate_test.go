@@ -405,6 +405,21 @@ func TestBundleManualRotation(t *testing.T) {
 		t.Errorf("the refusal raised %d alerts: %+v", n, e.alerts.alerts())
 	}
 
+	// Confirmed but not staged: refused, still no Finding. The control plane
+	// must have signed with both keys before the old one stops.
+	if err := m.Rotate(ctx, keys.PurposeBundle, keys.RotateOpts{ConfirmPinned: true}); !errors.Is(err, keys.ErrNotStaged) {
+		t.Fatalf("Rotate(bundle) unstaged = %v, want ErrNotStaged", err)
+	}
+	if n := len(e.alerts.alerts()); n != 0 {
+		t.Errorf("the refusal raised %d alerts: %+v", n, e.alerts.alerts())
+	}
+	// Staged, then one prepublish window of dual signing later, the rotation
+	// goes through.
+	if _, err := m.StageBundle(ctx, keys.Actor{Subject: "ops@example.com", AuthMethod: "oidc"}); err != nil {
+		t.Fatalf("StageBundle: %v", err)
+	}
+	e.clk.Advance(time.Hour)
+
 	// Confirmed: the operator rotates, and the audit trail names them.
 	actor := keys.Actor{Subject: "ops@example.com", AuthMethod: "oidc"}
 	if err := m.Rotate(ctx, keys.PurposeBundle, keys.RotateOpts{ConfirmPinned: true, Actor: actor}); err != nil {

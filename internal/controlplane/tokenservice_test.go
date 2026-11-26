@@ -479,7 +479,7 @@ func TestTokenIssuerValidatorsAgree(t *testing.T) {
 }
 
 func newGuard(e *keysEnv) servedSigners {
-	return servedSigners{inner: e.mgr.KeySet(), records: e.mgr.KeySet().Records, now: e.clk.Now, served: e.srv.servesTokenKID}
+	return servedSigners{inner: e.mgr.KeySet(), records: e.mgr.KeySet().Records, now: e.clk.Now, served: e.srv.servesTokenKID, bundled: e.srv.servesBundleTokenKID}
 }
 
 // TestServedSigners: the active token key mints only once it has been
@@ -937,5 +937,28 @@ func TestRunTokenServiceStartupCheck(t *testing.T) {
 	err = Run(ctx, &lockedBuffer{}, Params{ConfigPath: cfg, Listener: ln, AnalyticsProvider: "memory"})
 	if err == nil || !strings.Contains(err.Error(), "tokenService") {
 		t.Fatalf("Run = %v, want an error naming tokenService", err)
+	}
+}
+
+// TestTokenIssuerCollisionRejected: tokenService.issuer equal to identity.issuer
+// stops startup with an error that names both keys, whatever the case
+// spelling; a different issuer is fine.
+func TestTokenIssuerCollisionRejected(t *testing.T) {
+	logger, _ := testLogger()
+	kc := config.DefaultKeys()
+	kc.Enabled = true
+	const idpIssuer = "https://idp.example.com"
+	id := config.IdentitySettings{Issuer: idpIssuer, Audience: "warden"}
+	cfg := func(issuer string) string {
+		return writeConfigFile(t, "policy:\n  allowlist:\n    - domain: api.example.com\ntokenService:\n  enabled: true\n  issuer: "+issuer+"\n")
+	}
+	for _, issuer := range []string{idpIssuer, "https://IDP.example.com"} {
+		_, err := resolveTokenService(logger, cfg(issuer), t.TempDir(), id, kc)
+		if err == nil || !strings.Contains(err.Error(), "tokenService.issuer") || !strings.Contains(err.Error(), "identity.issuer") {
+			t.Errorf("issuer %q: err = %v, want it to name tokenService.issuer and identity.issuer", issuer, err)
+		}
+	}
+	if _, err := resolveTokenService(logger, cfg("https://warden.example.com"), t.TempDir(), id, kc); err != nil {
+		t.Errorf("distinct issuers rejected: %v", err)
 	}
 }

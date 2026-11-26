@@ -35,6 +35,9 @@ type ServiceConfig struct {
 	Store Store
 	// Appliers holds one Applier per supported target.
 	Appliers map[Target]Applier
+	// Classifiers holds one Classifier per non-policy target (W-P2-APPR-08);
+	// the policy target is classified by Classify.
+	Classifiers map[Target]Classifier
 	// Redact replaces credential values with their fingerprint (the control
 	// plane's RedactCredentials). Required: a draft must never hold a raw
 	// credential.
@@ -230,7 +233,8 @@ func EncodeDoc(doc Doc, redact func(Doc) Doc) (json.RawMessage, string, error) {
 }
 
 // CreateDraft stores doc (credential-redacted) as a new draft based on
-// baseVersion, in state draft. Only the policy target has a doc codec so far.
+// baseVersion, in state draft. Only the policy target has a doc codec; the
+// others use CreateTargetDraft.
 func (s *Service) CreateDraft(ctx context.Context, target Target, doc Doc, author Author, prov Provenance, baseVersion int64) (Draft, error) {
 	if !target.Valid() {
 		return Draft{}, fmt.Errorf("approvals: unknown target %q", target)

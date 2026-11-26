@@ -561,3 +561,55 @@ func TestResolveAdminToken(t *testing.T) {
 		}
 	}
 }
+
+// TestRunOnReady is the in-process contract the security harness depends on:
+// Run on 127.0.0.1:0 reports the really bound address (never the :0
+// placeholder) through OnReady, that address serves /healthz with 200 (probed
+// directly), and Run returns nil on shutdown.
+func TestRunOnReady(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ready := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, &bytes.Buffer{}, Params{
+			ConfigPath:        writePolicyFile(t, "api.openai.com"),
+			StateDir:          filepath.Join(t.TempDir(), "state"),
+			AnalyticsProvider: "memory",
+			ListenAddr:        "127.0.0.1:0",
+			OnReady:           func(addr string) { ready <- addr },
+		})
+	}()
+	var addr string
+	select {
+	case addr = <-ready:
+	case err := <-errCh:
+		t.Fatalf("Run returned before OnReady: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for OnReady")
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host != "127.0.0.1" || port == "" || port == "0" {
+		t.Fatalf("OnReady addr = %q, want the bound 127.0.0.1:<port>", addr)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://" + addr + "/healthz")
+	if err != nil {
+		cancel()
+		t.Fatalf("GET /healthz on the OnReady address: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		cancel()
+		t.Fatalf("GET /healthz = %d, want 200", resp.StatusCode)
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run after cancel = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for Run to return after cancel")
+	}
+}

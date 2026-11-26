@@ -84,12 +84,15 @@ func (a changeDraftAPI) changeErr(ctx context.Context, err error) error {
 	var ce *dashboard.ChangeError
 	var rr *approvals.RoleRequiredError
 	var ip *dashboard.InvalidPolicyError
+	var wl *dashboard.WorkersLackCapabilityError
 	fail := func(status int, code string, f map[string]any) error {
 		return &dashboard.ChangeError{Status: status, Code: code, Fields: f, Err: err}
 	}
 	switch {
 	case errors.As(err, &ce):
 		return err
+	case errors.As(err, &wl):
+		return fail(http.StatusConflict, "workers_lack_capability", map[string]any{"workers": wl.Workers})
 	case errors.Is(err, approvals.ErrNotFound):
 		return fail(http.StatusNotFound, "not_found", nil)
 	case errors.Is(err, errNotAuthor):
@@ -158,11 +161,11 @@ func (a changeDraftAPI) changeErr(ctx context.Context, err error) error {
 // its current revision has.
 func (a changeDraftAPI) view(d approvals.Draft, approved int) dashboard.ChangeDraftView {
 	v := dashboard.ChangeDraftView{
-		ID: d.ID, Target: string(d.Target), Revision: d.Revision, BaseVersion: d.BaseVersion,
+		ID: d.ID, Target: string(d.Target), TargetRef: d.TargetRef, Revision: d.Revision, BaseVersion: d.BaseVersion,
 		State: string(d.State), Author: dashboard.ChangeActor{Sub: d.Author.Sub, Email: d.Author.Email},
 		Source: string(d.Source), Message: d.Message, DocSHA256: d.DocSHA256,
 		Widening: true, Reasons: []dashboard.ChangeReason{}, RequiredRole: d.RequiredRole,
-		LastError: d.LastError, AppliedVersion: d.AppliedVersion,
+		LastError: d.LastError,
 		CreatedAt: d.CreatedAt.UTC(), UpdatedAt: d.UpdatedAt.UTC(), ExpiresAt: d.ExpiresAt.UTC(),
 		ApprovalsRequired: a.svc().MinApprovals(),
 	}
@@ -173,12 +176,25 @@ func (a changeDraftAPI) view(d approvals.Draft, approved int) dashboard.ChangeDr
 			v.Reasons = append(v.Reasons, dashboard.ChangeReason{Code: r.Code, Path: r.Path, Detail: r.Detail})
 		}
 	}
+	// Only a policy draft publishes a policy version; another target's number
+	// (an agent revision) is not one and must not be read as one.
+	if d.Target == approvals.TargetPolicy {
+		v.AppliedVersion = d.AppliedVersion
+	}
 	v.Approvals = approved
 	return v
 }
 
 // approvalCount is the distinct approvers of d's current revision (0 on a
 // store error: the count is informational, the apply path counts for itself).
+// seesEntities reports whether the caller may read the entities a non-policy
+// draft names (who is blocked): admins only, as for the block list routes. An
+// API key counts as the role its owner holds.
+func (a changeDraftAPI) seesEntities(ctx context.Context) bool {
+	p, ok := PrincipalFrom(ctx)
+	return ok && principalRole(a.s.cfg.Console, p) >= config.RoleAdmin
+}
+
 func (a changeDraftAPI) approvalCount(ctx context.Context, d approvals.Draft) int {
 	n, _ := a.svc().ApprovalCount(ctx, d)
 	return n
@@ -186,7 +202,7 @@ func (a changeDraftAPI) approvalCount(ctx context.Context, d approvals.Draft) in
 
 func (a changeDraftAPI) result(ctx context.Context, d approvals.Draft, applied bool) dashboard.ChangeResult {
 	res := dashboard.ChangeResult{ChangeDraftView: a.view(d, a.approvalCount(ctx, d))}
-	if applied {
+	if applied && d.Target == approvals.TargetPolicy {
 		res.Version = d.AppliedVersion
 	}
 	return res
@@ -209,9 +225,24 @@ func replayView(r approvals.Replay) dashboard.ChangeReplayView {
 }
 
 func (a changeDraftAPI) detail(ctx context.Context, d approvals.Draft) (dashboard.ChangeDraftDetail, error) {
-	doc, err := d.PolicyDoc()
-	if err != nil {
-		return dashboard.ChangeDraftDetail{}, err
+	var doc approvals.Doc
+	var view any
+	if d.Target == approvals.TargetPolicy {
+		var err error
+		if doc, err = d.PolicyDoc(); err != nil {
+			return dashboard.ChangeDraftDetail{}, err
+		}
+		// Stored docs are redacted; redact again on the way out.
+		view = redactDraftDoc(doc)
+	} else {
+		ad, ok := a.s.targetAdapters()[d.Target]
+		if !ok {
+			return dashboard.ChangeDraftDetail{}, approvals.ErrUnsupportedTarget
+		}
+		var err error
+		if view, err = ad.View(d, a.seesEntities(ctx)); err != nil {
+			return dashboard.ChangeDraftDetail{}, err
+		}
 	}
 	rows, err := a.svc().Store().Approvals(ctx, d.ID)
 	if err != nil {
@@ -219,9 +250,8 @@ func (a changeDraftAPI) detail(ctx context.Context, d approvals.Draft) (dashboar
 	}
 	out := dashboard.ChangeDraftDetail{
 		ChangeDraftView: a.view(d, a.approvalCount(ctx, d)),
-		// Stored docs are redacted; redact again on the way out.
-		Doc:          redactDraftDoc(doc),
-		ApprovalRows: []dashboard.ChangeApprovalView{},
+		Doc:             view,
+		ApprovalRows:    []dashboard.ChangeApprovalView{},
 	}
 	for _, r := range rows {
 		out.ApprovalRows = append(out.ApprovalRows, dashboard.ChangeApprovalView{
@@ -320,6 +350,9 @@ func (a changeDraftAPI) Diff(ctx context.Context, id string) (dashboard.ChangeDi
 	if err != nil {
 		return dashboard.ChangeDiff{}, a.changeErr(ctx, err)
 	}
+	if d.Target != approvals.TargetPolicy {
+		return a.targetDiff(ctx, d)
+	}
 	doc, err := d.PolicyDoc()
 	if err != nil {
 		return dashboard.ChangeDiff{}, a.changeErr(ctx, err)
@@ -410,11 +443,16 @@ func (a changeDraftAPI) authored(ctx context.Context, id string) (approvals.Draf
 	return d, au, nil
 }
 
-// Update implements dashboard.ChangeDrafts.
+// Update implements dashboard.ChangeDrafts. Only a policy draft can be edited:
+// a block-list or agent draft is exactly the change its write route held, so
+// the author withdraws it and makes the change again.
 func (a changeDraftAPI) Update(ctx context.Context, id string, revision int, in dashboard.ChangeUpdateInput) (dashboard.ChangeDraftDetail, error) {
-	_, au, err := a.authored(ctx, id)
+	cur, au, err := a.authored(ctx, id)
 	if err != nil {
 		return dashboard.ChangeDraftDetail{}, err
+	}
+	if cur.Target != approvals.TargetPolicy {
+		return dashboard.ChangeDraftDetail{}, a.changeErr(ctx, approvals.ErrUnsupportedTarget)
 	}
 	doc, err := a.decodeAndValidate(ctx, in.Doc)
 	if err != nil {
@@ -478,8 +516,8 @@ func (a changeDraftAPI) publishApprovalRequested(d approvals.Draft) {
 	}
 	a.s.publishFinding(integration.Finding{
 		RuleID: findingPolicyApprovalRequested, Category: "security", Severity: integration.SevInfo,
-		Summary:  "a policy change that widens access is waiting for a second person to approve it",
-		Evidence: integration.Evidence("draft=" + d.ID + " revision=" + strconv.Itoa(d.Revision) + " reasons=" + strings.Join(codes, ",")),
+		Summary:  "a change that widens access is waiting for a second person to approve it",
+		Evidence: integration.Evidence("draft=" + d.ID + " target=" + string(d.Target) + " revision=" + strconv.Itoa(d.Revision) + " reasons=" + strings.Join(codes, ",")),
 		DedupKey: findingPolicyApprovalRequested + ":" + d.ID,
 		Ts:       a.s.cfg.Clock.Now(),
 	})
@@ -508,6 +546,9 @@ func (a changeDraftAPI) Rebase(ctx context.Context, id string, revision int) (da
 		return dashboard.ChangeResult{}, err
 	}
 	rev := revisionOrCurrent(revision, d)
+	if d.Target != approvals.TargetPolicy {
+		return dashboard.ChangeResult{}, a.changeErr(ctx, approvals.ErrUnsupportedTarget)
+	}
 	if d.State != approvals.StateNeedsRebase {
 		return dashboard.ChangeResult{}, a.changeErr(ctx, approvals.ErrIllegalTransition)
 	}
@@ -675,8 +716,9 @@ type auditFollowUp struct {
 	BeforeHash, AfterHash     string
 	// Committed marks a row for a change that really happened although the
 	// request failed afterwards. It is recorded (as outcome ok) even when the
-	// request's own row is not ok. Only the emergency-apply handler, for a
-	// version that published but could not be recorded on its draft, sets it.
+	// request's own row is not ok. Only the emergency-apply path sets it (the
+	// handler for a policy version that published but could not be recorded on
+	// its draft, a non-policy Applier for its write).
 	Committed bool
 }
 
@@ -694,6 +736,36 @@ func auditFollowUps(ctx context.Context) []auditFollowUp {
 		return sc.followUps
 	}
 	return nil
+}
+
+// targetHashNow is the audit state hash of target now ("" without admin audit
+// or a hasher for it).
+func (s *Server) targetHashNow(ctx context.Context, target string) string {
+	if s.audit == nil {
+		return ""
+	}
+	h, _ := s.audit.stateHash(ctx, target)
+	return h
+}
+
+// targetDiff is Diff of a draft of a target other than the policy.
+func (a changeDraftAPI) targetDiff(ctx context.Context, d approvals.Draft) (dashboard.ChangeDiff, error) {
+	ad, ok := a.s.targetAdapters()[d.Target]
+	if !ok {
+		return dashboard.ChangeDiff{}, a.changeErr(ctx, approvals.ErrUnsupportedTarget)
+	}
+	proposed, err := ad.View(d, a.seesEntities(ctx))
+	if err != nil {
+		return dashboard.ChangeDiff{}, a.changeErr(ctx, err)
+	}
+	current, err := ad.Current(ctx, d, a.seesEntities(ctx))
+	if err != nil {
+		return dashboard.ChangeDiff{}, a.changeErr(ctx, err)
+	}
+	return dashboard.ChangeDiff{
+		ID: d.ID, Revision: d.Revision, BaseVersion: d.BaseVersion,
+		Diff: map[string]any{"current": current, "proposed": proposed},
+	}, nil
 }
 
 // policyHashNow is the policy audit hash now ("" without admin audit).
@@ -716,6 +788,10 @@ func (a changeDraftAPI) recordPolicyApply(ctx context.Context, before string, d 
 // recordPolicyApplyOp is recordPolicyApply with the row's op detail set (an
 // emergency apply says so, so history and audit tell it from an approval).
 func (a changeDraftAPI) recordPolicyApplyOp(ctx context.Context, before string, d approvals.Draft, op string) {
+	// Another target's Applier asks for its own row (its action, ref and hash).
+	if d.Target != approvals.TargetPolicy {
+		return
+	}
 	if f, ok := a.policyApplyFollowUp(ctx, before, d, op); ok {
 		addAuditFollowUp(ctx, f)
 	}
@@ -723,7 +799,7 @@ func (a changeDraftAPI) recordPolicyApplyOp(ctx context.Context, before string, 
 
 // policyApplyFollowUp is the policy.write row of a draft that published.
 func (a changeDraftAPI) policyApplyFollowUp(ctx context.Context, before string, d approvals.Draft, op string) (auditFollowUp, bool) {
-	if a.s.audit == nil {
+	if a.s.audit == nil || d.Target != approvals.TargetPolicy {
 		return auditFollowUp{}, false
 	}
 	after := a.s.policyHashNow(ctx)
