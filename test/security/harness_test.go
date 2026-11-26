@@ -523,6 +523,9 @@ func TestEnumCompleteness(t *testing.T) {
 		}
 	}
 	pend := map[string]string{}
+	if len(pending) != 0 {
+		t.Errorf("pending.go lists %d values: the suite is complete, so every value needs a case or an exclusion", len(pending))
+	}
 	for _, p := range pending {
 		switch {
 		case !exists[p.Item]:

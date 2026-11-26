@@ -10,7 +10,8 @@ package security
 //     covers (the ticket that adds the case removes its lines);
 //   - a line names a ticket outside the suite.
 //
-// The feature is done when this list is empty.
+// The feature is done when this list is empty, which it now is: the test fails
+// on any entry.
 type Pending struct {
 	// Item is a Cover* string (CoverIdentity, CoverBundle, CoverToken,
 	// CoverRoute).
@@ -28,33 +29,11 @@ const (
 	TicketDegrade = "W-P2-SECT-07" // degraded and restart modes
 )
 
-func pend(ticket string, items ...string) []Pending {
-	out := make([]Pending, 0, len(items))
-	for _, it := range items {
-		out = append(out, Pending{Item: it, Ticket: ticket})
-	}
-	return out
-}
-
-func joinPending(parts ...[]Pending) []Pending {
-	var out []Pending
-	for _, p := range parts {
-		out = append(out, p...)
-	}
-	return out
-}
-
-// pending is the list. Keep each ticket's block together.
-var pending = joinPending(
-	// W-P2-SECT-07: degraded and restart modes.
-	pend(TicketDegrade,
-		CoverIdentity("jwks_unavailable"),
-		CoverToken("agent_store_unavailable"), CoverToken("replay_store_unavailable"),
-		CoverToken("verifier_misconfigured"), CoverToken("idp_unavailable"),
-		CoverToken("block_store_unavailable"),
-		CoverToken("session_store_unavailable"), CoverToken("event_store_unavailable"),
-	),
-)
+// pending is the list of values still waiting for a case. It is empty: every
+// ticket of the suite has landed, and TestEnumCompleteness fails on any entry,
+// so a new reason or route ships with a case (or an exclusion below), never with
+// a promise.
+var pending []Pending
 
 // Exclusion is an enum value the black-box suite cannot drive and says why: the
 // ticket that closes it names the unit tests that cover it. Unlike a Pending
@@ -73,4 +52,22 @@ var exclusions = []Exclusion{{
 		"gatedEvaluator), so the binding's own agent_disabled reason is defence in depth that only a race " +
 		"between the two reaches; driving it needs a seam inside the applier. Covered by " +
 		"internal/proxy/identity_binding_test.go and internal/worker/binding_longpoll_test.go",
+}, {
+	Item: CoverToken("block_store_unavailable"),
+	Reason: "the block list is held in memory once loaded and keeps its previous contents when a reload fails, " +
+		"so the only way for the token endpoint to see it unavailable is a control plane that serves before " +
+		"its first load, and the control plane does not: a state database whose blocked_users table cannot " +
+		"be read stops the versioned policy store from loading its head and the control plane refuses to " +
+		"start (observed driving this ticket), so no exchange can reach the refusal end to end. The refusal " +
+		"(503 temporarily_unavailable, no token) is covered by internal/tokensvc/service_test.go " +
+		"(check error fails closed) and the not-ready checker by internal/controlplane/blockchecker_test.go " +
+		"and internal/controlplane/blockedusers_test.go",
+}, {
+	Item: CoverToken("verifier_misconfigured"),
+	Reason: "the reason answers an assertion verifier or subject resolver that was assembled without its " +
+		"agent registry, replay store, issuer, clock or IdP verifier. The control plane's assembly " +
+		"(newTokenService) either builds all of them or does not enable the endpoint, so a running " +
+		"control plane cannot reach it, and nothing a test may change after startup removes one. Covered by " +
+		"internal/tokensvc/assertion_test.go (a misconfigured verifier fails closed) and " +
+		"internal/tokensvc/service_test.go",
 }}

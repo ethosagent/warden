@@ -111,6 +111,23 @@
 // TamperProxy.Requests records, per worker request, the path, whether an
 // Authorization header was present and the certificate the worker presented.
 //
+// # Degraded modes and restarts
+//
+// degraded_test.go, degraded_worker_test.go, degraded_cp_test.go and
+// degraded_token_test.go (W-P2-SECT-07) stop and restart the control plane and
+// the workers, stop the OIDC issuer, and break the control plane's own state
+// database (Stack.FailWrites: triggers that fail every write of a table;
+// Stack.HideTable: a renamed table) so the token endpoint's stores fail the way
+// a faulty disk fails them. Workers booted from a forged cache
+// (Stack.WriteBundleCache, signed with the control plane's bundle key while it
+// is still up) show what a restarting worker refuses. Every case asserts the
+// refusal, the absence of an upstream hit or token, and the recovery.
+// The token endpoint's warden_cp_tokens_denied_total counter has no exposition
+// yet, so these cases pin a refusal through its token_events row or, when no row
+// can be written, the token_exchange_denied log line.
+// pending.go is empty; two token reasons are excluded with the unit tests that
+// cover them.
+//
 // # The gate canary
 //
 // TestCanary fails when WARDEN_SECURITY_CANARY=1. Running
