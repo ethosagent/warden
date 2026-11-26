@@ -297,7 +297,10 @@ func testRevocation(t *testing.T) {
 	wa, wb := s.Worker("agent-a"), s.Worker("agent-b")
 	u1 := s.MintWardenToken(t, a, "user-1", "eng")
 	u2 := s.MintWardenToken(t, a, "user-2", "eng")
-	bu := s.MintWardenToken(t, b, "user-1", "eng")
+	// agent-b's user is not user-1: the block by email below is fleet-wide,
+	// so sharing user-1 let the agent-disable subtest see user_blocked when
+	// the block reached agent-b first.
+	bu := s.MintWardenToken(t, b, "user-3", "eng")
 	if c := decode(t, u1); c.Email != "user-1@example.com" {
 		t.Fatalf("the minted token carries email %q, want user-1@example.com (a block by email has nothing to match)", c.Email)
 	}
