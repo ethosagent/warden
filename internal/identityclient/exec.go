@@ -103,7 +103,15 @@ type ChildEnvOptions struct {
 	// Passthrough names further parent variables to copy, beyond
 	// ChildEnvAllowlist. Each must pass ValidatePassthroughName.
 	Passthrough []string
+	// Omit names allowlisted variables to leave out even when set. `exec
+	// --run-as` omits the parent's account variables (HOME, USER, LOGNAME,
+	// SHELL), which describe the parent and would point the child at files it
+	// cannot read; --env can still pass one by name.
+	Omit []string
 }
+
+// RunAsOmittedEnv are the account variables a --run-as child does not inherit.
+var RunAsOmittedEnv = []string{"HOME", "USER", "LOGNAME", "SHELL"}
 
 // BuildChildEnv returns the environment of the supervised child. lookup reads
 // one parent variable (os.LookupEnv in the CLI). The child gets the set
@@ -126,8 +134,15 @@ func BuildChildEnv(lookup func(string) (string, bool), proxyURL string, opts Chi
 	for _, v := range ca {
 		caNames[v.Name] = true
 	}
+	omit := map[string]bool{}
+	for _, n := range opts.Omit {
+		omit[n] = true
+	}
 	seen := map[string]bool{}
 	for _, n := range ChildEnvAllowlist {
+		if omit[n] {
+			continue
+		}
 		seen[n] = true
 		if v, ok := lookup(n); ok {
 			env = append(env, n+"="+v)

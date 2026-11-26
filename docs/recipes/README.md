@@ -119,8 +119,25 @@ token in memory and injects a fresh one on every new CONNECT, so the token is
 never in the agent's environment or argv. The agent gets only an allowlisted
 environment (PATH, HOME, locale and the like, plus the proxy and CA variables);
 pass anything else, such as an API key, by name with `--env NAME`. A tunnel
-opened before a refresh keeps its original token, and an agent running as the
-same uid can still read the identity cache file, so run it as a separate uid.
+opened before a refresh keeps its original token. For an agent behind a
+`require`-mode worker, add `--agent-id ID` (with `--token-endpoint` and the
+agent key): `exec` then injects the agent's Warden token, exits 4 without
+starting the agent when the control plane refuses the exchange, and keeps the
+token and key out of the agent's environment, argv and logs.
+
+Without `--run-as`, `exec` protects against leaks through the environment, argv
+and logs and against stale tokens, but **not against a hostile agent running as
+the same uid**: it can read the identity cache and the agent key. To stop that,
+run `exec` as root and add `--run-as UID:GID` (numeric, neither 0, and a
+dedicated uid and gid that nothing else uses, not 65534 `nobody`): the agent
+then starts under that uid with no extra groups and cannot read the key or the
+cache, which must be owned by another uid (for example root under `sudo`) with
+mode 0600; `exec` refuses to start otherwise. A terminal shared with the agent
+still allows `TIOCSTI` keystroke injection: use kernel 6.2 or later with
+`dev.tty.legacy_tiocsti=0`, or sudo's `use_pty`. Linux only. The agent does not
+inherit HOME, USER, LOGNAME or SHELL in that case; pass one with `--env NAME`.
+For containers, prefer the sidecar `warden identity forward` recipes, which keep
+the key out of the agent's container entirely.
 Transparent-mode recipes carry no proxy URL, so only `X-Warden-Identity` on
 terminated traffic applies there.
 

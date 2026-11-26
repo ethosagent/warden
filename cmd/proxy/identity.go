@@ -62,6 +62,9 @@ type identityDeps struct {
 	// signals delivers the signals `exec` forwards; nil subscribes to the
 	// process's SIGTERM, SIGHUP, SIGINT and SIGQUIT.
 	signals func() (<-chan os.Signal, func())
+	// euid reads the effective uid for `exec --run-as`; nil selects
+	// os.Geteuid.
+	euid func() int
 	// tune adjusts the client after construction (tests inject a fake sleeper).
 	tune func(*identityclient.Client)
 }

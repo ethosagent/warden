@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,9 +77,9 @@ func loopbackListenAddr(addr string) error {
 
 func (r *identityRunner) execCmd() *cobra.Command {
 	var (
-		worker, listen, ca, signInNotify string
-		includeHTTP, challenge, inTunnel bool
-		passEnv                          []string
+		worker, listen, ca, signInNotify, runAs string
+		includeHTTP, challenge, inTunnel        bool
+		passEnv                                 []string
 	)
 	cmd := &cobra.Command{
 		Use:   "exec --worker host:port [flags] -- COMMAND [ARGS...]",
@@ -102,14 +103,22 @@ func (r *identityRunner) execCmd() *cobra.Command {
 			"error.message holds the link, which an agent that never reads a 407 body shows in its chat. " +
 			"--signin-notify COMMAND also runs COMMAND (through sh -c) with the URL in " +
 			"WARDEN_SIGNIN_URL and the code in WARDEN_SIGNIN_CODE, for a chat message or a desktop notification; it " +
-			"never gets a token. The exit code is the command's, or 128+N when signal N killed it. A command " +
-			"running as the same user can still read the identity cache file; use another user for the command.",
+			"never gets a token. The exit code is the command's, or 128+N when signal N killed it.\n\n" +
+			"With --agent-id (or " + identityclient.EnvAgentID + ") the forwarder sends the agent's Warden token, " +
+			"exchanged at --token-endpoint with the agent's key and the user's ID token, instead of the ID token, " +
+			"for a worker in require mode. The exchange happens before the command starts: exit 4 when the control " +
+			"plane refuses it (the command never starts), exit 2 without a login on a non-terminal. No token or key " +
+			"path enters the command's environment, arguments or files. It cannot be combined with --challenge.\n\n" +
+			"A command running as the same user can read the agent key and the identity cache. --run-as UID:GID " +
+			"(Linux, exec run as root) starts the command under that numeric uid and gid with no supplementary " +
+			"groups, so it cannot read them; exec then also leaves HOME, USER, LOGNAME and SHELL out of the " +
+			"command's environment unless named with --env. The key, the subject token file and the cache directory must belong to another uid than UID and be unreadable by GID and by others; exec checks this first.",
 		SilenceUsage: true, SilenceErrors: true,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return r.runExec(cmd, args, execOpts{worker: worker, listen: listen, ca: ca, includeHTTP: includeHTTP,
 				passEnv: passEnv, challenge: challenge || inTunnel || signInNotify != "", inTunnel: inTunnel,
-				signInNotify: signInNotify})
+				signInNotify: signInNotify, runAs: runAs})
 		},
 	}
 	cmd.Flags().SetInterspersed(false) // flags after COMMAND belong to the command
@@ -122,6 +131,7 @@ func (r *identityRunner) execCmd() *cobra.Command {
 	fl.BoolVar(&challenge, "challenge", false, "start without a login and sign in through the worker's 407 sign-in challenge (identity.defaultMode: challenge)")
 	fl.BoolVar(&inTunnel, "challenge-in-tunnel", false, "with --challenge, ask the worker to send the sign-in challenge inside the tunnel, so the agent's own request gets a 403 that names the link (needs a TLS-terminating worker); implies --challenge")
 	fl.StringVar(&signInNotify, "signin-notify", "", "run `COMMAND` (sh -c) when a sign-in is needed, with WARDEN_SIGNIN_URL and WARDEN_SIGNIN_CODE set; implies --challenge")
+	fl.StringVar(&runAs, "run-as", "", "start the command as numeric `UID:GID` (Linux; exec must run as root; neither may be 0) so it cannot read the agent key or login cache")
 	fl.StringArrayVar(&passEnv, "env", nil, "pass the environment variable `NAME` to the command as well (repeatable; name only, the value is read from the environment)")
 	return cmd
 }
@@ -137,6 +147,8 @@ type execOpts struct {
 	signInNotify string
 	// inTunnel asks the worker for the challenge inside the tunnel (#621).
 	inTunnel bool
+	// runAs is the --run-as uid:gid, empty for none.
+	runAs string
 }
 
 func (r *identityRunner) runExec(cmd *cobra.Command, args []string, o execOpts) error {
@@ -152,9 +164,28 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, o execOpts) 
 			return err
 		}
 	}
-	c, err := r.client(cmd)
-	if err != nil {
-		return err
+	agent := r.agentMode()
+	if agent && o.challenge {
+		return errors.New("--agent-id cannot be combined with --challenge, --challenge-in-tunnel or --signin-notify: the sign-in challenge is for the user's own token")
+	}
+	// Refuse --run-as before anything starts: no login, listener or child.
+	var runAs *identityclient.RunAs
+	if o.runAs != "" {
+		euid := r.deps.euid
+		if euid == nil {
+			euid = os.Geteuid
+		}
+		ra, err := identityclient.ResolveRunAs(o.runAs, euid)
+		if err != nil {
+			return err
+		}
+		runAs = &ra
+		if err := r.checkRunAsAccess(ra, agent); err != nil {
+			return err
+		}
+		// Pdeathsig follows the thread that starts the child: keep it.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
 	}
 	ctx := cmd.Context()
 	if ctx == nil {
@@ -163,21 +194,38 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, o execOpts) 
 	errw := cmd.ErrOrStderr()
 	terminal := stdinIsTerminal(r.deps.stdin)
 
-	_, err = c.Token(ctx)
-	if errors.Is(err, identityclient.ErrLoginRequired) && o.challenge {
-		// No login yet: the worker's sign-in challenge will ask for one.
-		err = nil
-	}
-	if errors.Is(err, identityclient.ErrLoginRequired) && terminal {
-		warnings, lerr := c.Login(ctx, errw)
-		if lerr != nil {
-			return mapErr(lerr)
+	// Get the first token before anything starts, so a refused login or
+	// exchange ends exec without a child.
+	var (
+		src *identityclient.WardenTokenSource
+		c   *identityclient.Client
+		err error
+	)
+	if agent {
+		// The subject may be a file, so no issuer is needed unless a login is.
+		if src, err = r.firstAgentSource(cmd, terminal); err != nil {
+			return mapErr(err)
 		}
-		warn(cmd, warnings...)
+	} else {
+		if c, err = r.client(cmd); err != nil {
+			return err
+		}
 		_, err = c.Token(ctx)
-	}
-	if err != nil {
-		return mapErr(err)
+		if errors.Is(err, identityclient.ErrLoginRequired) && o.challenge {
+			// No login yet: the worker's sign-in challenge will ask for one.
+			err = nil
+		}
+		if errors.Is(err, identityclient.ErrLoginRequired) && terminal {
+			warnings, lerr := c.Login(ctx, errw)
+			if lerr != nil {
+				return mapErr(lerr)
+			}
+			warn(cmd, warnings...)
+			_, err = c.Token(ctx)
+		}
+		if err != nil {
+			return mapErr(err)
+		}
 	}
 
 	credential, err := identityclient.NewProxyCredential(nil)
@@ -199,11 +247,18 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, o execOpts) 
 	fwLog := slog.New(slog.NewTextHandler(errw, &slog.HandlerOptions{Level: level}))
 	fw := &identityclient.Forwarder{
 		WorkerAddr: worker, ClientCredential: credential,
-		Token: func(ctx context.Context) (string, error) {
+		Log: fwLog, InTunnel: o.inTunnel && o.challenge,
+	}
+	if src != nil {
+		// A CONNECT must not wait out retries: it fails fast with a reason and
+		// the source's own backoff retries the exchange.
+		src.Attempts = 1
+		fw.Source = src
+	} else {
+		fw.Token = func(ctx context.Context) (string, error) {
 			res, err := c.Token(ctx)
 			return res.IDToken, err
-		},
-		Log: fwLog, InTunnel: o.inTunnel && o.challenge,
+		}
 	}
 	fctx, stopFwd := context.WithCancel(ctx)
 	var hooks sync.WaitGroup
@@ -218,7 +273,7 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, o execOpts) 
 	defer func() { stopFwd(); <-fwdDone; hooks.Wait() }()
 
 	env, warnings, err := identityclient.BuildChildEnv(lookup, identityclient.LoopbackProxyURL(ln.Addr(), credential),
-		identityclient.ChildEnvOptions{IncludeHTTP: includeHTTP, CA: ca, Passthrough: passEnv})
+		identityclient.ChildEnvOptions{IncludeHTTP: includeHTTP, CA: ca, Passthrough: passEnv, Omit: omitFor(runAs)})
 	if err != nil {
 		return err
 	}
@@ -235,6 +290,11 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, o execOpts) 
 	child.Stdin = r.deps.stdin
 	child.Stdout = cmd.OutOrStdout()
 	child.Stderr = errw
+	if runAs != nil {
+		if err := runAs.Apply(child); err != nil {
+			return err
+		}
+	}
 	code, err := identityclient.Run(ctx, identityclient.ExecSpec{
 		Start: func() (identityclient.Process, error) {
 			if err := child.Start(); err != nil {
@@ -251,6 +311,73 @@ func (r *identityRunner) runExec(cmd *cobra.Command, args []string, o execOpts) 
 		return &exitError{code: code}
 	}
 	return nil
+}
+
+// checkRunAsAccess refuses --run-as when the child's new identity could read
+// the agent key, the subject token file or the login cache directory. It runs
+// before any exchange, login or child.
+func (r *identityRunner) checkRunAsAccess(ra identityclient.RunAs, agent bool) error {
+	var paths []identityclient.AccessPath
+	if agent {
+		cfg, err := identityclient.LoadAgentConfig(r.agentFlags(""), r.deps.getenv)
+		if err != nil {
+			return err
+		}
+		paths = append(paths,
+			identityclient.AccessPath{What: "agent key file", Path: cfg.KeyFile},
+			identityclient.AccessPath{What: "subject token file", Path: cfg.SubjectTokenFile})
+	}
+	// The cache is only used with an issuer; an agent that takes its subject
+	// from a file may have none configured.
+	if cfg, err := r.config(); err == nil {
+		paths = append(paths, identityclient.AccessPath{What: "login cache directory", Path: cfg.CacheDir})
+	} else if !agent {
+		return err
+	}
+	return identityclient.CheckRunAsAccess(ra, paths, nil)
+}
+
+// omitFor lists the variables a child under --run-as does not inherit.
+func omitFor(runAs *identityclient.RunAs) []string {
+	if runAs == nil {
+		return nil
+	}
+	return identityclient.RunAsOmittedEnv
+}
+
+// firstAgentSource builds the agent's token source and gets its first token
+// with the library's retries. A missing login runs the device-code login when
+// stdin is a terminal; the source is then rebuilt, because a failed source holds
+// its retry backoff.
+func (r *identityRunner) firstAgentSource(cmd *cobra.Command, terminal bool) (*identityclient.WardenTokenSource, error) {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	src, err := r.agentTokenSource(cmd, "")
+	if err != nil {
+		return nil, err
+	}
+	_, err = src.Token(ctx)
+	if errors.Is(err, identityclient.ErrLoginRequired) && terminal {
+		c, cerr := r.client(cmd)
+		if cerr != nil {
+			return nil, cerr
+		}
+		warnings, lerr := c.Login(ctx, cmd.ErrOrStderr())
+		if lerr != nil {
+			return nil, lerr
+		}
+		warn(cmd, warnings...)
+		if src, err = r.agentTokenSource(cmd, ""); err != nil {
+			return nil, err
+		}
+		_, err = src.Token(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return src, nil
 }
 
 // signInHookTimeout bounds one --signin-notify command.

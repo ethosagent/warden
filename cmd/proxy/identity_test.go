@@ -101,6 +101,8 @@ type rig struct {
 	// parent holds extra parent variables `exec` may look up, beyond env,
 	// PATH and the helper mode.
 	parent map[string]string
+	// euid is the effective uid `exec --run-as` sees; nil is the real one.
+	euid func() int
 }
 
 func newRig(t *testing.T, issuer string) *rig {
@@ -122,6 +124,7 @@ func (r *rig) deps() identityDeps {
 		},
 		openFile: func(p string) (io.ReadCloser, error) { return os.Open(p) },
 		stdin:    strings.NewReader(r.stdin),
+		euid:     r.euid,
 	}
 }
 
