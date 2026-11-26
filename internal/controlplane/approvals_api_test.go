@@ -40,6 +40,12 @@ type draftEnv struct {
 	raw map[string]string
 	// keys is the API key store, set by newDraftEnvKeys only.
 	keys *sqlitestore.SQLiteStore
+	// stateDir holds warden-cp.db; audit is the real admin audit store when
+	// the env was built with realAudit (nil otherwise).
+	stateDir string
+	audit    *adminaudit.Store
+	// workerToken and workerTokenID are a worker token made with realAudit.
+	workerToken, workerTokenID string
 }
 
 func newDraftEnv(t *testing.T, mutate func(*config.ConsoleApprovals)) *draftEnv {
@@ -48,16 +54,19 @@ func newDraftEnv(t *testing.T, mutate func(*config.ConsoleApprovals)) *draftEnv 
 
 // newDraftEnvAt is newDraftEnv on the fake clock clk (nil = the real clock).
 func newDraftEnvAt(t *testing.T, mutate func(*config.ConsoleApprovals), clk *clocktest.Fake) *draftEnv {
-	return newDraftEnvOpts(t, mutate, clk, false)
+	return newDraftEnvOpts(t, mutate, clk, false, false)
 }
 
 // newDraftEnvKeys is newDraftEnv with console.apiKeys on too, so a test can
 // mint keys for the session users (mintKey) and call with them (doKey).
 func newDraftEnvKeys(t *testing.T) *draftEnv {
-	return newDraftEnvOpts(t, nil, nil, true)
+	return newDraftEnvOpts(t, nil, nil, true, false)
 }
 
-func newDraftEnvOpts(t *testing.T, mutate func(*config.ConsoleApprovals), clk *clocktest.Fake, withKeys bool) *draftEnv {
+// newDraftEnvOpts also takes realAudit: the control plane then records into a
+// real signed admin audit chain in the env's state dir (e.rec stays empty) so a
+// test can verify the chain the way the offline CLI does.
+func newDraftEnvOpts(t *testing.T, mutate func(*config.ConsoleApprovals), clk *clocktest.Fake, withKeys, realAudit bool) *draftEnv {
 	t.Helper()
 	ac := config.DefaultConsoleApprovals()
 	ac.Enabled = true
@@ -71,7 +80,8 @@ func newDraftEnvOpts(t *testing.T, mutate func(*config.ConsoleApprovals), clk *c
 	if withKeys {
 		migs = cpstate.Enable(migs, sqlitestore.MigrationID)
 	}
-	db, err := cpstate.Open(context.Background(), t.TempDir()+"/warden-cp.db", migs)
+	stateDir := t.TempDir()
+	db, err := cpstate.Open(context.Background(), stateDir+"/"+adminaudit.StateDBFileName, migs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +93,25 @@ func newDraftEnvOpts(t *testing.T, mutate func(*config.ConsoleApprovals), clk *c
 	}
 	if clk != nil {
 		cfg.Clock = clk
+	}
+	if realAudit {
+		cfg.AdminAudit, err = adminaudit.Open(context.Background(), db, adminaudit.OpenOptions{KeyFile: adminaudit.DefaultKeyPath(stateDir)})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var workerToken, workerTokenID string
+	if realAudit {
+		// A per-token worker, so a parked long poll is countable (lpParked).
+		ts, err := NewWorkerTokenStore(db, StoreOptions{Logger: logger})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pt, tok, err := ts.Create(context.Background(), CreateOpts{Name: "w1", ProxyID: "proxy-a", Actor: "admin"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.WorkerTokens, workerToken, workerTokenID = ts, pt, tok.ID
 	}
 	var keyStore *sqlitestore.SQLiteStore
 	if withKeys {
@@ -112,9 +141,11 @@ func newDraftEnvOpts(t *testing.T, mutate func(*config.ConsoleApprovals), clk *c
 	}
 	srv.sessions = NewSessionStore(db.SQL(), time.Hour, 12*time.Hour, newFakeClock().Now)
 	srv.sessionReader = srv.sessions
-	e := &draftEnv{srv: srv, rec: &fakeRecorder{}, pub: &recFindings{}, raw: map[string]string{}, keys: keyStore, logs: logs}
+	e := &draftEnv{srv: srv, rec: &fakeRecorder{}, pub: &recFindings{}, raw: map[string]string{}, keys: keyStore, logs: logs, stateDir: stateDir, audit: cfg.AdminAudit, workerToken: workerToken, workerTokenID: workerTokenID}
 	srv.findings = e.pub
-	srv.enableAdminAudit(e.rec, e.rec.probe, fakeMAC)
+	if !realAudit {
+		srv.enableAdminAudit(e.rec, e.rec.probe, fakeMAC)
+	}
 	e.h = srv.Handler()
 	for _, s := range []struct{ name, group, method string }{
 		{"u1", groupEditor, "oidc"}, {"u2", groupEditor, "oidc"}, {"u3", groupEditor, "oidc"},
