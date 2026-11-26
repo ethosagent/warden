@@ -562,6 +562,10 @@ type setupResponse struct {
 	// up on it. Omitted when approvals are off or the control plane did not
 	// say.
 	ApprovalsReplayTimeoutSec int `json:"approvalsReplayTimeoutSec,omitempty"`
+	// APIKeys is present only on a control plane with console.apiKeys.enabled
+	// (W-P2-APIK-04): the console shows the API Keys tab and builds its create
+	// dialog from the scope list. Absent elsewhere.
+	APIKeys *APIKeySettings `json:"apiKeys,omitempty"`
 }
 
 // BackupStatus is the value-free state of the control plane's scheduled backups.
@@ -586,6 +590,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	if resp.ApprovalsEnabled = s.changeDrafts != nil; resp.ApprovalsEnabled {
 		resp.ApprovalsReplayTimeoutSec = int(s.approvalsReplayTimeout / time.Second)
 	}
+	resp.APIKeys = s.apiKeysSetup()
 	if s.backupFn != nil {
 		resp.Backup = s.backupFn(r)
 	}

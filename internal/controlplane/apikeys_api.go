@@ -13,6 +13,7 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/apikeys"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/dashboard"
 )
 
 // The API key management routes (W-P2-APIK-03). The control plane serves them
@@ -470,4 +471,32 @@ func (s *Server) apiKeysStateHash(ctx context.Context) (string, error) {
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	return s.stateHashJSON(auditTargetAPIKeys, rows)
+}
+
+// apiKeySettingsSource feeds the console's API Keys tab: the registered scopes
+// with their minimum roles (not exposed by any route) and the TTL bounds.
+type apiKeySettingsSource struct{ s *Server }
+
+func (a apiKeySettingsSource) APIKeySettings() dashboard.APIKeySettings {
+	reg, cc := a.s.cfg.APIKeyRegistry, a.s.cfg.Console.APIKeys
+	scopes := reg.Registered()
+	out := dashboard.APIKeySettings{
+		Scopes:     make([]dashboard.APIKeyScope, 0, len(scopes)),
+		DefaultTTL: int64(cc.DefaultTTL / time.Second),
+		MaxTTL:     int64(cc.MaxTTL / time.Second),
+	}
+	for _, sc := range scopes {
+		if role, ok := reg.Lookup(sc); ok {
+			out.Scopes = append(out.Scopes, dashboard.APIKeyScope{Name: string(sc), MinRole: role.String()})
+		}
+	}
+	return out
+}
+
+// wireAPIKeysTab shows the console's API Keys tab, only when the management
+// routes are served.
+func (s *Server) wireAPIKeysTab(dash *dashboard.Server) {
+	if s.apiKeyMgmtEnabled() {
+		dash.SetAPIKeys(apiKeySettingsSource{s})
+	}
 }

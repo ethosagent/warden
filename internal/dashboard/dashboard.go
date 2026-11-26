@@ -179,6 +179,8 @@ type Server struct {
 	blockList BlockListStore
 	// agents is the agent registry admin API (W-P2-AREG-02); nil on a worker.
 	agents AgentRegistry
+	// apiKeys feeds the API Keys tab (W-P2-APIK-04); nil hides the tab.
+	apiKeys APIKeySource
 }
 
 // analyticsCacheTTL is how long a computed analytics/MCP payload is reused
