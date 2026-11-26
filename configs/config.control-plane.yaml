@@ -115,3 +115,14 @@ logging:
 #    redirectURL: https://localhost:7070/auth/callback
 #  roles:
 #    admin: [warden-admins]
+
+# Worker CA (CONTROL PLANE ONLY, never served to workers; docs/control-plane.md "Worker CA").
+# The compose recipe's cp-bootstrap service creates the chain and key below with
+# `warden control-plane ca init` into the cp-ca volume. keySource: file is DEVELOPMENT
+# ONLY (the intermediate key is a plain file); production uses keySource: keys.
+workerCA:
+  enabled: true
+  trustDomain: warden.local
+  certFile: /ca/intermediate-chain.pem
+  keySource: file
+  keyFile: /ca/intermediate.key

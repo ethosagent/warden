@@ -288,12 +288,12 @@ strings never become a reason.
 | `wrong_iss` | `iss` differs from `identity.issuer` |
 | `wrong_aud` | `aud` does not contain `identity.audience` |
 | `wrong_azp` | `azp` is not in `identity.allowedAZP` |
-| `unknown_kid` | The key id is not in the issuer's key set |
+| `unknown_kid` | The key id is not in the issuer's key set, as of a JWKS fetch that succeeded |
 | `alg_not_allowed` | `alg` is not RS256 or ES256 |
 | `malformed` | Not a parseable JWT, a missing `sub`/`exp`/`iat`, a future `nbf`, or a header in the wrong form |
 | `too_large` | The token is over 16 KiB |
 | `ttl_too_long` | `exp - iat` is over the maximum token lifetime |
-| `jwks_unavailable` | The issuer's key set could not be fetched (status `unverified`) |
+| `jwks_unavailable` | The issuer's key set could not be fetched (status `unverified`): a cold cache, or a key id missing from the cached set while the latest refetch failed (it may be a rotated key). Cached key ids keep verifying |
 | `wrong_nonce` | Console login only: the nonce does not match. Never seen on proxied traffic |
 | `missing_claim` | A Warden token without `sub`, `act.sub`, `sid`, `jti` or `cnf.jkt` |
 | `unbound_token` | An IdP token on a worker that does not accept them (`identity.acceptDexTokens` false), and in `require` mode every IdP token |

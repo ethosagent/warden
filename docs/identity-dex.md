@@ -423,7 +423,10 @@ list's job (section 6).
 (`6h` in the recipe) and keeps the previous key in the JWKS until the tokens it
 signed have expired, so rotation drops no valid token. Workers fetch keys
 lazily: a token with an unknown `kid` triggers a JWKS refetch, at most once per
-30 s, and the last good key set is kept when a fetch fails. Nothing to restart.
+30 s, and the last good key set is kept when a fetch fails. Cached kids keep
+verifying while Dex is unreachable; a kid missing from the cache is
+`jwks_unavailable` (status `unverified`, a retryable 503 at the token endpoint)
+until a refetch succeeds, and only then `unknown_kid`. Nothing to restart.
 
 | Situation | What happens |
 |---|---|

@@ -17,48 +17,81 @@
 # controlPlane.caCert / central.caCert (see configs/config.worker.yaml).
 #   OUT_DIR=deploy/compose/certs ./scripts/gen-certs.sh
 #
-# Per-worker tokens (docs/control-plane.md#worker-token-cli): every worker holds
-# its OWN revocable wwt_ token, bound to its proxy id, and the control plane runs
-# strict (--require-worker-tokens): no shared worker token exists. The one-shot
-# cp-bootstrap service registers each worker's token on the control plane's state
-# volume before the control plane and the workers start. Dashboard writes use the
-# control plane's own admin token (WARDEN_CP_ADMIN_TOKEN).
+# Worker certificates (docs/control-plane.md "Worker CA", docs/runbooks/worker-certs.md):
+# every worker enrolls once with its OWN one-time wet_ enrollment token, receives a
+# short-lived mTLS client certificate (24h, renewed at 50% of its life) and
+# authenticates with it; the control plane runs strict-certs (--require-worker-certs),
+# so a wwt_ token, a shared token or an anonymous caller gets 401. The one-shot
+# cp-bootstrap service creates the worker CA into its own volume (cp-ca, never the
+# control plane's state volume) and registers each worker's enrollment token on the
+# state volume before the control plane and the workers start. Dashboard writes use
+# the control plane's own admin token (WARDEN_CP_ADMIN_TOKEN).
 #
-# The tokens come from your shell or a .env file (see deploy/compose/.env.example);
-# the defaults below are public dev placeholders: set real values anywhere that
-# is not a laptop. Generate one with:  echo wwt_$(head -c32 /dev/urandom | base32 | tr -d = | tr A-Z a-z | head -c52)
+# DEVELOPMENT ONLY: the worker CA's intermediate key is a plain file in cp-ca
+# (workerCA.keySource: file) and the root key is deleted after `ca init`. In
+# production keep the intermediate in the key manager (keySource: keys) and the
+# root offline.
 #
-# Run (from repo root):
+# The enrollment tokens come from your shell or a .env file (see
+# deploy/compose/.env.example); the defaults below are public dev placeholders: set
+# real values anywhere that is not a laptop. Generate one with:
+#   echo wet_$(head -c32 /dev/urandom | base32 | tr -d = | tr A-Z a-z | head -c52)
+# Recovery: a certificate lives 24h (renewed at ~12h), an enrollment token is good for
+# one use and one hour, the CA for one year. If workers cannot enroll any more (stack
+# stopped overnight, first `up` retried after an hour, expired CA), reset with
+#   docker compose -f deploy/compose/docker-compose.control-plane.yml down -v
+# or keep state: mint a new token with `exec control-plane warden control-plane
+# enroll-token create --name w1-2 --worker-id worker-1 --from-env ...` and clear
+# /data/cp/cert/* in that worker's volume (docs/control-plane.md, "Run it").
+# Moving an existing token-based deployment over: docs/control-plane.md,
+# "Migrating from per-worker tokens".
+#
+# Run (from repo root; the first run builds the image, which carries the worker CA commands):
 #   docker compose -f deploy/compose/docker-compose.control-plane.yml up
 #
 # Fleet dashboard: https://localhost:7070/dashboard/  (cert signed by the proxy
 #   CA — your browser will warn; trust it or curl with --cacert deploy/compose/certs/proxy-ca.crt)
 # Per-worker dashboards: http://localhost:9091/dashboard/ and :9092
 
+# The published image predates the worker CA commands: build from this repo.
+x-warden-build: &warden-build
+  context: ../..
+  dockerfile: Dockerfile
+
 services:
-  # One-shot: registers each worker's token (--from-env, so the plaintext never
-  # appears on a command line or in a log) in <state-dir>/warden-cp.db on the
-  # shared cp-data volume, as the image's warden user, then exits. Re-running is
-  # a no-op (same name and value), so every `up` is safe.
+  # One-shot, as the image's warden user: creates the worker CA in /ca (the cp-ca
+  # volume) when it does not exist yet, then registers each worker's enrollment
+  # token (--from-env, so the plaintext never appears on a command line or in a
+  # log) in <state-dir>/warden-cp.db on the cp-data volume, then exits. Every step
+  # is a no-op on a second run, so every `up` is safe. root.key is deleted at once
+  # (development recipe; the control plane never needs it).
   cp-bootstrap:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
+    build: *warden-build
+    image: ${WARDEN_IMAGE:-warden-control-plane:local}
     restart: "no"
     network_mode: none
     environment:
-      - WARDEN_WORKER_1_TOKEN=${WARDEN_WORKER_1_TOKEN:-wwt_devonlyworkeronetokennotarealsecretxxxxxxxxxxxxxxxxx}
-      - WARDEN_WORKER_2_TOKEN=${WARDEN_WORKER_2_TOKEN:-wwt_devonlyworkertwotokennotarealsecretxxxxxxxxxxxxxxxxx}
+      - WARDEN_WORKER_1_ENROLL=${WARDEN_WORKER_1_ENROLL:-wet_devonlyworkeroneenrolltokennotarealsecretxxxxxxxxxxx}
+      - WARDEN_WORKER_2_ENROLL=${WARDEN_WORKER_2_ENROLL:-wet_devonlyworkertwoenrolltokennotarealsecretxxxxxxxxxxx}
     volumes:
+      - ../../configs/config.control-plane.yaml:/etc/warden/config.yaml:ro
       - cp-data:/data
+      - cp-ca:/ca
     entrypoint:
       - sh
       - -c
       - |
         set -e
-        warden control-plane token create --from-env WARDEN_WORKER_1_TOKEN --name w1 --proxy-id worker-1 --state-dir=/data
-        warden control-plane token create --from-env WARDEN_WORKER_2_TOKEN --name w2 --proxy-id worker-2 --state-dir=/data
+        if [ ! -f /ca/intermediate-chain.pem ] || [ ! -f /ca/intermediate.key ]; then
+          warden control-plane ca init --out-dir /ca --trust-domain warden.local --key-source file --state-dir /data
+          rm -f /ca/root.key
+        fi
+        warden control-plane enroll-token create --from-env WARDEN_WORKER_1_ENROLL --name w1 --worker-id worker-1 --state-dir=/data --config /etc/warden/config.yaml
+        warden control-plane enroll-token create --from-env WARDEN_WORKER_2_ENROLL --name w2 --worker-id worker-2 --state-dir=/data --config /etc/warden/config.yaml
 
   control-plane:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
+    build: *warden-build
+    image: ${WARDEN_IMAGE:-warden-control-plane:local}
     depends_on:
       cp-bootstrap:
         condition: service_completed_successfully
@@ -76,6 +109,9 @@ services:
       - ../../configs/config.control-plane.yaml:/etc/warden/config.yaml:ro
       - ./certs:/etc/warden/certs:ro
       - cp-data:/data
+      # The worker CA (workerCA in the config above): the intermediate chain and,
+      # development only, its key. Read-only here; a separate volume from the state.
+      - cp-ca:/ca:ro
       # Backup sets (docs/runbooks/backup-restore.md). Must NOT be inside
       # --state-dir. Mounted always; written only once the --backup-* flags below
       # are enabled. A fresh named volume is root-owned, so give it to the image's
@@ -89,7 +125,7 @@ services:
       - "--config=/etc/warden/config.yaml"
       - "--state-dir=/data"   # seed → /data/config.yaml; serve+edit the writable copy
       - "--listen=0.0.0.0:7070"
-      - "--require-worker-tokens"   # strict: wwt_ worker tokens only (needs --state-dir and TLS)
+      - "--require-worker-certs"   # strict-certs: worker certificates only (needs workerCA, --state-dir and TLS)
       - "--admin-token-env=WARDEN_CP_ADMIN_TOKEN"
       - "--ca-cert=/etc/warden/certs/proxy-ca.crt"   # mint the CP server cert from the proxy CA
       - "--ca-key=/etc/warden/certs/proxy-ca.key"
@@ -99,12 +135,20 @@ services:
       # - "--backup-interval=24h"      # default 24h, minimum 1h
       # - "--backup-keep=7"            # complete sets kept, default 7
       # - "--backup-include=cp,alerts,config"   # fleet is opt-in
+    # busybox wget does not trust the proxy CA: skip verification for this local probe.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "--no-check-certificate", "https://127.0.0.1:7070/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   worker-1:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
+    build: *warden-build
+    image: ${WARDEN_IMAGE:-warden-control-plane:local}
     depends_on:
       control-plane:
-        condition: service_started
+        condition: service_healthy
       cp-bootstrap:
         condition: service_completed_successfully
     # Identity verification (docs/control-plane.md): a worker with an identity: block
@@ -114,9 +158,10 @@ services:
     ports:
       - "127.0.0.1:9091:9090"
     environment:
-      # This worker's own token, under the in-container name config.worker.yaml
-      # reads (controlPlane.tokenEnv and central.tokenEnv).
-      - WARDEN_WORKER_TOKEN=${WARDEN_WORKER_1_TOKEN:-wwt_devonlyworkeronetokennotarealsecretxxxxxxxxxxxxxxxxx}
+      # This worker's own one-time enrollment token, under the in-container name
+      # config.worker.yaml reads (controlPlane.enrollment.tokenEnv). Used once; the
+      # certificate it buys lives in the worker's state dir on worker1-data.
+      - WARDEN_WORKER_ENROLL_TOKEN=${WARDEN_WORKER_1_ENROLL:-wet_devonlyworkeroneenrolltokennotarealsecretxxxxxxxxxxx}
       - WARDEN_ADMIN_TOKEN=${WARDEN_ADMIN_TOKEN:-dev-admin-token}
       - WARDEN_PROXY_ID=worker-1
       # The worker holds its own secret locally (never sent to the control plane).
@@ -137,10 +182,11 @@ services:
       - "--db=/data/warden.db"
 
   worker-2:
-    image: ethosagent/warden:${WARDEN_VERSION:-0.3.0}
+    build: *warden-build
+    image: ${WARDEN_IMAGE:-warden-control-plane:local}
     depends_on:
       control-plane:
-        condition: service_started
+        condition: service_healthy
       cp-bootstrap:
         condition: service_completed_successfully
     # Identity verification (docs/control-plane.md): a worker with an identity: block
@@ -150,9 +196,10 @@ services:
     ports:
       - "127.0.0.1:9092:9090"
     environment:
-      # This worker's own token, under the in-container name config.worker.yaml
-      # reads (controlPlane.tokenEnv and central.tokenEnv).
-      - WARDEN_WORKER_TOKEN=${WARDEN_WORKER_2_TOKEN:-wwt_devonlyworkertwotokennotarealsecretxxxxxxxxxxxxxxxxx}
+      # This worker's own one-time enrollment token, under the in-container name
+      # config.worker.yaml reads (controlPlane.enrollment.tokenEnv). Used once; the
+      # certificate it buys lives in the worker's state dir on worker2-data.
+      - WARDEN_WORKER_ENROLL_TOKEN=${WARDEN_WORKER_2_ENROLL:-wet_devonlyworkertwoenrolltokennotarealsecretxxxxxxxxxxx}
       - WARDEN_ADMIN_TOKEN=${WARDEN_ADMIN_TOKEN:-dev-admin-token}
       - WARDEN_PROXY_ID=worker-2
       - EXAMPLE_SECRET=demo-local-secret-not-a-real-key
@@ -210,6 +257,7 @@ networks:
 
 volumes:
   cp-data:
+  cp-ca:
   cp-backups:
   worker1-data:
   worker2-data:

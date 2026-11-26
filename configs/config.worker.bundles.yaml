@@ -60,7 +60,14 @@ responseScan:
 controlPlane:
   endpoint: https://control-plane:7070/policy
   bundleKeysFile: /etc/warden/pins/bundle-keys.json   # public keys only; a worker with pins applies only verified bundles
-  tokenEnv: WARDEN_WORKER_TOKEN
+  # Certificate auth: the worker trades its one-time wet_ enrollment token (named by
+  # the env var below) for a short-lived client certificate, keeps it renewed and
+  # persists it under stateDir (a named volume), so a restart does not re-enroll.
+  # No tokenEnv: the worker presents the certificate on /policy, the heartbeat and
+  # central ingest (docs/control-plane.md "Worker CA").
+  stateDir: /data/cp
+  enrollment:
+    tokenEnv: WARDEN_WORKER_ENROLL_TOKEN
   caCert: /etc/warden/certs/proxy-ca.crt
   longPollWait: 30s         # how long the CP holds /policy open before returning 304
   heartbeatInterval: 10s    # liveness ping cadence
@@ -70,7 +77,6 @@ controlPlane:
 central:
   mode: worker
   endpoint: https://control-plane:7070/central/ingest
-  tokenEnv: WARDEN_WORKER_TOKEN
   proxyID: ${WARDEN_PROXY_ID}   # set per worker so the fleet view can slice by proxy
   caCert: /etc/warden/certs/proxy-ca.crt
   mcpPushInterval: 30s          # forward MCP inventory + observed schema (when mcp.enabled)
