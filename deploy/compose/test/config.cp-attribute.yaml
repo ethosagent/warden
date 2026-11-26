@@ -1,0 +1,35 @@
+# NEGATIVE TEST ONLY (W-P2-RCP-05): the recipes' control-plane config with
+# identity: attribute for the agent, so a worker no longer refuses a request
+# without a Warden token. Mounted by recipe-identity-attribute.yml. One file
+# serves both recipes: both allowed hosts and both agent ids are listed.
+policy:
+  allowlist:
+    - domain: api.anthropic.com
+      port: 443
+    - domain: api.openai.com
+      port: 443
+
+logging:
+  level: info
+  format: json
+
+agents:
+  - id: claude-code
+    identity: attribute
+  - id: codex
+    identity: attribute
+
+identity:
+  issuer: http://localhost:5556/dex
+  internalIssuerURL: http://dex:5556
+  audience: warden
+  allowedAZP: [agent-harness, warden-cli]
+  acceptDexTokens: false
+
+keys:
+  enabled: true
+
+tokenService:
+  enabled: true
+  issuer: https://control-plane:7070
+  allowedAZP: [agent-harness, warden-cli]
