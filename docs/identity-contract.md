@@ -297,7 +297,7 @@ strings never become a reason.
 | `wrong_nonce` | Console login only: the nonce does not match. Never seen on proxied traffic |
 | `missing_claim` | A Warden token without `sub`, `act.sub`, `sid`, `jti` or `cnf.jkt` |
 | `unbound_token` | An IdP token on a worker that does not accept them (`identity.acceptDexTokens` false), and in `require` mode every IdP token |
-| `agent_unregistered` | Warden token, but the worker's bound agent is not in the bundle's registered agents (a port-derived id such as `agent:8080` never matches) |
+| `agent_unregistered` | Warden token, but the worker's bound agent is not in the bundle's registered agents (a derived id such as `agent:8080` matches only an identical registry id) |
 | `agent_disabled` | Warden token, but the bound agent is disabled in the current bundle |
 | `agent_mismatch` | Warden token whose `act.sub` is not the worker's bound agent |
 | `cnf_mismatch` | Warden token whose `cnf.jkt` is not one of the bound agent's registered key thumbprints |
@@ -563,8 +563,9 @@ A worker serves one agent (the id from `--agent-id`, then `central.agentID`, the
 checks it against the registered agents of the **current** signed bundle, in this
 order, and the first failure is the reason:
 
-1. the worker's agent is not registered: `agent_unregistered`. A port-derived id
-   such as `agent:8080` never matches a registry id;
+1. the worker's agent is not registered: `agent_unregistered`. A derived id is
+   used as it is and matches only a registry entry with the identical id, so name
+   the worker with `--agent-id` or `central.agentID`;
 2. the agent is disabled: `agent_disabled`;
 3. `act.sub` is another agent: `agent_mismatch`;
 4. `cnf.jkt` is not one of the agent's registered key thumbprints: `cnf_mismatch`.
