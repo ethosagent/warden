@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -12,41 +13,68 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/identityclient"
+	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/test/harness"
 )
 
 // The token-injecting forwarder (W-P2-RCP-02): the real `identity forward`
-// engine (identityclient.RunForwarder over a WardenTokenSource) in front of a
-// CONNECT worker, with the real control-plane token service issuing the tokens.
-// The worker here is a small fake that refuses (407) tokens it was told are
-// revoked: enforcing Warden tokens on the worker is a later ticket, and what is
-// proved here is the forwarder's half: the token is injected, a 407 leads to
-// one refresh and one retry, a rotation drains the old tunnels, and the state
-// of the token source is what /healthz reports.
+// engine (identityclient.RunForwarder over a WardenTokenSource) in front of the
+// harness's real worker, which runs in require mode bound to the forwarder's
+// agent, with the real control-plane token service issuing the tokens. A
+// recording relay sits between the forwarder and the worker: it notes the token
+// of every CONNECT and the status the worker answered, and changes nothing.
+//
+// What is proved: the token is injected and admitted; a plain rotation drains
+// the tunnels of the old token; an emergency token-key rotation at the control
+// plane makes the worker refuse the held token with its own 407, and the
+// forwarder then refreshes once and retries once with a new token (different
+// jti, same act); the signer window and a disabled agent show on /healthz and
+// as 503 reason codes.
 
-// tokenWorker is a CONNECT listener that records the token of each CONNECT and
-// answers 407 for a token in revoked, else 200 and an echo.
-type tokenWorker struct {
-	ln net.Listener
+// forwarderAgent is the agent the forwarder acts for and the worker is bound to.
+const forwarderAgent = "harness-agent"
 
-	mu      sync.Mutex
-	tokens  []string
-	revoked map[string]bool
+// forwarderTarget is the CONNECT target of the scenario.
+const forwarderTarget = identityHost + ":443"
+
+func identityForwarderOpts() []harness.Option {
+	return tokenServiceOpts(harness.WithBundles(controlplane.BundlesOffer), harness.WithBundlePins(), harness.WithWorkerAgent(forwarderAgent))
 }
 
-func newTokenWorker(t *testing.T) *tokenWorker {
+// relayRecord is one CONNECT the relay carried: the token it presented and the
+// status the worker answered (0 when the worker never answered).
+type relayRecord struct {
+	token  string
+	status int
+}
+
+// recordingRelay is a TCP relay in front of the real worker that records each
+// CONNECT's Proxy-Authorization token and the worker's status, then pipes the
+// bytes both ways untouched.
+type recordingRelay struct {
+	ln     net.Listener
+	target string
+
+	mu   sync.Mutex
+	recs []relayRecord
+}
+
+func newRecordingRelay(t *testing.T, target string) *recordingRelay {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &tokenWorker{ln: ln, revoked: map[string]bool{}}
+	r := &recordingRelay{ln: ln, target: target}
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
@@ -54,21 +82,23 @@ func newTokenWorker(t *testing.T) *tokenWorker {
 			if err != nil {
 				return
 			}
-			go w.serve(c)
+			go r.serve(c)
 		}
 	}()
-	return w
+	return r
 }
 
-func (w *tokenWorker) serve(c net.Conn) {
+func (r *recordingRelay) serve(c net.Conn) {
 	defer func() { _ = c.Close() }()
 	br := bufio.NewReader(c)
+	var head strings.Builder
 	var tok string
 	for {
 		l, err := br.ReadString('\n')
 		if err != nil {
 			return
 		}
+		head.WriteString(l)
 		if rest, ok := strings.CutPrefix(l, "Proxy-Authorization: Basic "); ok {
 			if raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(rest)); err == nil {
 				tok = strings.TrimPrefix(string(raw), "session:")
@@ -78,28 +108,44 @@ func (w *tokenWorker) serve(c net.Conn) {
 			break
 		}
 	}
-	w.mu.Lock()
-	w.tokens = append(w.tokens, tok)
-	denied := w.revoked[tok]
-	w.mu.Unlock()
-	if denied {
-		_, _ = io.WriteString(c, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"warden\"\r\nContent-Length: 0\r\n\r\n")
+	wc, err := net.DialTimeout("tcp", r.target, 5*time.Second)
+	if err != nil {
 		return
 	}
-	_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
-	_, _ = io.Copy(c, br)
+	defer func() { _ = wc.Close() }()
+	if _, err := io.WriteString(wc, head.String()); err != nil {
+		return
+	}
+	wbr := bufio.NewReader(wc)
+	status, err := peekStatus(wbr)
+	r.mu.Lock()
+	r.recs = append(r.recs, relayRecord{token: tok, status: status})
+	r.mu.Unlock()
+	if err != nil {
+		return
+	}
+	go func() {
+		_, _ = io.Copy(wc, br)
+		_ = wc.Close()
+	}()
+	_, _ = io.Copy(c, wbr)
 }
 
-func (w *tokenWorker) Tokens() []string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return append([]string(nil), w.tokens...)
+// peekStatus reads the status code of the response at the head of br without
+// consuming it.
+func peekStatus(br *bufio.Reader) (int, error) {
+	// "HTTP/1.1 NNN": the code is bytes 9..11.
+	b, err := br.Peek(12)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(string(b[9:12]))
 }
 
-func (w *tokenWorker) Revoke(tok string) {
-	w.mu.Lock()
-	w.revoked[tok] = true
-	w.mu.Unlock()
+func (r *recordingRelay) records() []relayRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]relayRecord(nil), r.recs...)
 }
 
 // syncedBuffer is a log sink the forwarder's goroutines and the scenario share.
@@ -184,14 +230,66 @@ func tunnelClosed(c net.Conn, br *bufio.Reader) bool {
 	return !ok || !ne.Timeout()
 }
 
+// heldTunnel is a CONNECT through the forwarder with a TLS session inside it,
+// terminated by the real worker.
+type heldTunnel struct {
+	conn net.Conn
+	br   *bufio.Reader
+	tls  *tls.Conn
+	tbr  *bufio.Reader
+}
+
+// openTunnel CONNECTs through the forwarder and, on a 200, starts TLS to the
+// worker's terminating listener. It returns the forwarder's answer head.
+func openTunnel(t *testing.T, h *harness.H, client forwarderClient) (*heldTunnel, string) {
+	t.Helper()
+	conn, br, head := client.connect(forwarderTarget)
+	if headStatus(head) != http.StatusOK {
+		return nil, head
+	}
+	if br.Buffered() != 0 {
+		t.Fatalf("the worker sent %d bytes before the TLS hello", br.Buffered())
+	}
+	cfg := h.AgentTLSConfig().Clone()
+	cfg.ServerName = identityHost
+	cfg.NextProtos = []string{"http/1.1"}
+	tc := tls.Client(conn, cfg)
+	if err := tc.Handshake(); err != nil {
+		t.Fatalf("TLS through the tunnel: %v", err)
+	}
+	return &heldTunnel{conn: conn, br: br, tls: tc, tbr: bufio.NewReader(tc)}, head
+}
+
+// get sends GET path on the tunnel and returns the status.
+func (ht *heldTunnel) get(t *testing.T, path string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, "https://"+identityHost+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ht.tls.SetDeadline(time.Now().Add(30 * time.Second))
+	if err := req.Write(ht.tls); err != nil {
+		t.Fatalf("write on the tunnel: %v", err)
+	}
+	resp, err := http.ReadResponse(ht.tbr, req)
+	if err != nil {
+		t.Fatalf("read on the tunnel: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+func (ht *heldTunnel) closed() bool { return tunnelClosed(ht.tls, ht.tbr) }
+
 // identityForwarder is the scenario.
 func identityForwarder(t *testing.T, h *harness.H) {
+	h.Upstream(identityHost)
 	key, err := identityclient.GenerateAgentKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	const agentID = "harness-agent"
-	h.RegisterTokenAgentKey(agentID, key.PublicJWK(), []string{"eng"}, []string{"read", "write"})
+	h.RegisterTokenAgentKey(forwarderAgent, key.PublicJWK(), []string{"eng"}, []string{"read", "write"})
 	subjectFile := filepath.Join(t.TempDir(), "subject")
 	writeSubject := func() string {
 		tok := tokenUser(h, "user-42", "eng")
@@ -204,16 +302,16 @@ func identityForwarder(t *testing.T, h *harness.H) {
 
 	ex := &identityclient.Exchanger{
 		Endpoint: h.CP().TokenEndpointURL(), Audience: harness.TokenAudience(),
-		AgentID: agentID, Key: key, Scope: "read", HTTP: h.CP().HTTPClient(), Now: h.Clock().Now,
+		AgentID: forwarderAgent, Key: key, Scope: "read", HTTP: h.CP().HTTPClient(), Now: h.Clock().Now,
 	}
 	src := identityclient.NewWardenTokenSource(ex, identityclient.FileSubject{Path: subjectFile})
-	src.Now, src.Attempts, src.AgentID = h.Clock().Now, 1, agentID
+	src.Now, src.Attempts, src.AgentID = h.Clock().Now, 1, forwarderAgent
 
-	worker := newTokenWorker(t)
+	relay := newRecordingRelay(t, h.ProxyAddr())
 	logs := &syncedBuffer{}
 	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	fwd := &identityclient.Forwarder{
-		WorkerAddr: worker.ln.Addr().String(), Source: src, AllowAnonymousClients: true, Log: log, Clock: h.Clock(),
+		WorkerAddr: relay.ln.Addr().String(), Source: src, AllowAnonymousClients: true, Log: log, Clock: h.Clock(),
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -259,7 +357,8 @@ func identityForwarder(t *testing.T, h *harness.H) {
 		return resp.StatusCode, body.State
 	}
 	// advanceUntil moves the harness clock by step until cond holds, so every
-	// loop on that clock (the forwarder's, the control plane's) gets its turn.
+	// loop on that clock (the forwarder's, the control plane's, the worker's)
+	// gets its turn.
 	advanceUntil := func(desc string, step time.Duration, cond func() bool) {
 		h.Eventually(desc, func() bool {
 			if cond() {
@@ -277,75 +376,146 @@ func identityForwarder(t *testing.T, h *harness.H) {
 	if code, _ := healthz(); code != http.StatusServiceUnavailable {
 		t.Errorf("healthz status = %d, want 503", code)
 	}
-	if _, _, head := client.connect("api.example.com:443"); headStatus(head) != http.StatusServiceUnavailable || headReason(head) != "cp_unreachable" {
+	if _, _, head := client.connect(forwarderTarget); headStatus(head) != http.StatusServiceUnavailable || headReason(head) != "cp_unreachable" {
 		t.Fatalf("CONNECT before the key is published: %q, want 503 cp_unreachable", head)
 	}
-	if n := len(worker.Tokens()); n != 0 {
+	if n := len(relay.records()); n != 0 {
 		t.Fatalf("the worker saw %d connections with no token", n)
 	}
 
-	// 2. The window passes: the forwarder recovers by itself.
+	// 2. The window passes: the forwarder recovers by itself. The worker is then
+	// put in require mode for its agent, and the forwarder's token is admitted
+	// once the worker holds the bundle that carries the token key.
 	waitTokenKeyPublished(h)
 	user = writeSubject()
 	advanceUntil("healthz to report a valid token", 3*time.Second, func() bool { _, s := healthz(); return s == "valid" })
 	if code, _ := healthz(); code != http.StatusOK {
 		t.Errorf("healthz status = %d, want 200", code)
 	}
+	editSettings(t, h, func(s *config.SettingsWire) {
+		s.Agents = append(s.Agents, config.AgentSettings{ID: forwarderAgent, Identity: config.IdentityModeRequire})
+	})
+	h.Eventually("the worker to apply require mode", func() bool {
+		return requireConnect(t, h, "").status == http.StatusProxyAuthRequired
+	})
+	h.Eventually("the worker to admit the forwarder's token", func() bool {
+		conn, _, head := client.connect(forwarderTarget)
+		_ = conn.Close()
+		return headStatus(head) == http.StatusOK
+	})
+	settled := len(relay.records())
 
-	// 3. A CONNECT carries the Warden token, not anything the client sent.
-	oldConn, oldBR, head := client.connect("api.example.com:443")
-	if headStatus(head) != http.StatusOK {
+	// 3. A CONNECT carries the Warden token, not anything the client sent, and
+	// the real worker admits it in require mode.
+	oldTun, head := openTunnel(t, h, client)
+	if oldTun == nil {
 		t.Fatalf("CONNECT: %q, want 200", head)
 	}
-	first := worker.Tokens()
-	if len(first) != 1 {
-		t.Fatalf("worker tokens = %d, want 1", len(first))
+	recs := relay.records()[settled:]
+	if len(recs) != 1 || recs[0].status != http.StatusOK || recs[0].token == "" {
+		t.Fatalf("relay records = %+v, want one CONNECT with a token answered 200", recs)
 	}
-	_, c1 := verifyWardenToken(t, h, first[0])
-	if c1.Sub != "user-42" || c1.Act.Sub != agentID {
-		t.Errorf("injected token: sub %q act %q, want user-42 acting as %s", c1.Sub, c1.Act.Sub, agentID)
+	first := recs[0].token
+	_, c1 := verifyWardenToken(t, h, first)
+	if c1.Sub != "user-42" || c1.Act.Sub != forwarderAgent {
+		t.Errorf("injected token: sub %q act %q, want user-42 acting as %s", c1.Sub, c1.Act.Sub, forwarderAgent)
 	}
-	if _, err := io.WriteString(oldConn, "ping\n"); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := oldBR.ReadString('\n'); got != "ping\n" {
-		t.Fatalf("echo through the tunnel = %q", got)
+	if st := oldTun.get(t, "/first"); st != http.StatusOK {
+		t.Fatalf("GET through the tunnel = %d, want 200", st)
 	}
 
-	// 4. The worker no longer accepts that token (revoked): the 407 makes the
-	// forwarder exchange again (the 2s floor since the last exchange has passed)
-	// and retry the CONNECT once, with the new token, which the worker accepts.
+	// 4. A rotation (a plain refresh, the old token still valid at the worker)
+	// drains the tunnel opened with the old token once it has been idle for 2s;
+	// a tunnel opened with the new token stays.
 	h.Clock().Advance(3 * time.Second)
 	user = writeSubject()
-	worker.Revoke(first[0])
-	c2conn, _, head := client.connect("api.example.com:443")
-	defer func() { _ = c2conn.Close() }()
-	if headStatus(head) != http.StatusOK {
-		t.Fatalf("CONNECT with a revoked token: %q, want 200 after the retry", head)
+	if _, err := src.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
 	}
-	toks := worker.Tokens()
-	if len(toks) != 3 || toks[1] != first[0] || toks[2] == first[0] || toks[2] == "" {
-		t.Fatalf("worker tokens after the 407 = %d (revoked token repeated: %v), want the revoked one, then a new one", len(toks), len(toks) > 2 && toks[2] == first[0])
+	cur, _ := src.Current()
+	second := cur.AccessToken
+	if second == first {
+		t.Fatal("the refresh returned the same token")
 	}
-	_, c2 := verifyWardenToken(t, h, toks[2])
-	if c2.SID != c1.SID || c2.JTI == c1.JTI {
-		t.Errorf("refreshed token: sid %s jti %s, want sid %s and a fresh jti", c2.SID, c2.JTI, c1.SID)
+	_, c1b := verifyWardenToken(t, h, second) // before its key is revoked
+	newTun, head := openTunnel(t, h, client)
+	if newTun == nil {
+		t.Fatalf("CONNECT after the rotation: %q, want 200", head)
+	}
+	if got := relay.records(); got[len(got)-1].token != second || got[len(got)-1].status != http.StatusOK {
+		t.Fatalf("the CONNECT after the rotation = %+v, want the newest token answered 200", got[len(got)-1])
+	}
+	advanceUntil("the old tunnel to be drained", 500*time.Millisecond, oldTun.closed)
+	if newTun.closed() {
+		t.Error("the tunnel opened with the new token was drained")
+	}
+	if st := newTun.get(t, "/second"); st != http.StatusOK {
+		t.Errorf("GET on the new tunnel after the drain = %d, want 200", st)
 	}
 
-	// 5. The rotation drains the tunnel opened with the old token once it has
-	// been idle for 2s; the tunnel made with the new token stays.
-	advanceUntil("the old tunnel to be drained", 500*time.Millisecond, func() bool { return tunnelClosed(oldConn, oldBR) })
-	if _, _, head := client.connect("api.example.com:443"); headStatus(head) != http.StatusOK {
-		t.Errorf("CONNECT after the drain: %q", head)
+	// 5. A real revocation: an emergency rotation of the token key at the
+	// control plane revokes the key that signed both tokens held so far. The
+	// worker applies the new bundle, closes the tunnel it holds for the revoked
+	// token and refuses that token's next CONNECT with its own 407. The next
+	// request through the forwarder meets that 407, makes one exchange and
+	// retries once with a token signed by the new key.
+	ctx5 := context.Background()
+	o, err := controlplane.OpenKeysOffline(ctx5, h.KeyStateDir(), controlplane.KeysCLIOptions{Clock: h.Clock()})
+	if err != nil {
+		t.Fatalf("open the keys CLI: %v", err)
 	}
-	if last := worker.Tokens(); last[len(last)-1] != toks[2] {
-		t.Errorf("a new CONNECT carries a token other than the newest")
+	defer func() { _ = o.Close() }()
+	if _, err := o.Rotate(ctx5, keys.PurposeToken, true); err != nil {
+		t.Fatalf("emergency rotation: %v", err)
+	}
+	advanceUntil("the worker to refuse the revoked token", time.Second, func() bool {
+		status, _ := h.ConnectReplyAt(0, forwarderTarget, basicAuth("session", second))
+		return status == http.StatusProxyAuthRequired
+	})
+	advanceUntil("the worker to close the tunnel of the revoked token", 500*time.Millisecond, newTun.closed)
+	h.Clock().Advance(3 * time.Second) // past the forwarder's 2s floor between exchanges
+	user = writeSubject()
+	// The forwarder must still hold the revoked token, so the 407 below is the
+	// worker refusing it (not a proactive refresh that made the retry moot).
+	if cur, _ := src.Current(); cur.AccessToken != second {
+		t.Fatal("the forwarder refreshed before the CONNECT; the 407 path was not exercised")
+	}
+	deniesBefore := requireDeny(h, "unknown_kid")
+	before := len(relay.records())
+	retryTun, head := openTunnel(t, h, client)
+	h.Eventually("the worker to record the forwarder's unknown_kid refusal", func() bool {
+		return requireDeny(h, "unknown_kid") > deniesBefore
+	})
+	if got := requireDeny(h, "unknown_kid") - deniesBefore; got != 1 {
+		t.Errorf("unknown_kid refusals for the forwarder's CONNECT = %d, want 1", got)
+	}
+	if retryTun == nil {
+		t.Fatalf("CONNECT after the emergency rotation: %q, want 200 after the retry", head)
+	}
+	recs = relay.records()[before:]
+	if len(recs) != 2 || recs[0].status != http.StatusProxyAuthRequired || recs[0].token != second ||
+		recs[1].status != http.StatusOK || recs[1].token == "" || recs[1].token == second {
+		t.Fatalf("relay records after the revocation = %+v, want the revoked token answered 407, then a new token answered 200", recs)
+	}
+	third := recs[1].token
+	_, c2 := verifyWardenToken(t, h, third)
+	if c2.Act.Sub != c1b.Act.Sub || c2.Sub != c1b.Sub {
+		t.Errorf("refreshed token: sub %q act %q, want sub %q act %q", c2.Sub, c2.Act.Sub, c1b.Sub, c1b.Act.Sub)
+	}
+	if c2.JTI == c1b.JTI {
+		t.Errorf("refreshed token has the revoked token's jti %s", c2.JTI)
+	}
+	if c2.SID != c1b.SID {
+		t.Errorf("refreshed token sid %s, want the session's sid %s (a refresh continues the session)", c2.SID, c1b.SID)
+	}
+	if st := retryTun.get(t, "/retried"); st != http.StatusOK {
+		t.Errorf("GET through the retried tunnel = %d, want 200", st)
 	}
 
 	// 6. The agent is disabled at the control plane. The held token works until
 	// the refresh fails and then until its own exp; after that the forwarder
 	// reports exchange_denied and refuses CONNECTs with that reason.
-	h.DisableTokenAgent(agentID)
+	h.DisableTokenAgent(forwarderAgent)
 	advanceUntil("healthz to report exchange_denied", 30*time.Second, func() bool {
 		user = writeSubject()
 		_, s := healthz()
@@ -354,11 +524,11 @@ func identityForwarder(t *testing.T, h *harness.H) {
 	if code, _ := healthz(); code != http.StatusServiceUnavailable {
 		t.Errorf("healthz status = %d, want 503", code)
 	}
-	dials := len(worker.Tokens())
-	if _, _, head := client.connect("api.example.com:443"); headStatus(head) != http.StatusServiceUnavailable || headReason(head) != "exchange_denied" {
+	dials := len(relay.records())
+	if _, _, head := client.connect(forwarderTarget); headStatus(head) != http.StatusServiceUnavailable || headReason(head) != "exchange_denied" {
 		t.Fatalf("CONNECT for a disabled agent: %q, want 503 exchange_denied", head)
 	}
-	if n := len(worker.Tokens()); n != dials {
+	if n := len(relay.records()); n != dials {
 		t.Errorf("the worker saw %d more connections for a disabled agent", n-dials)
 	}
 
@@ -374,7 +544,10 @@ func identityForwarder(t *testing.T, h *harness.H) {
 			t.Errorf("the forwarder log has no %s event", want)
 		}
 	}
-	secrets := append([]string{user, base64.StdEncoding.EncodeToString([]byte("session:" + toks[2]))}, worker.Tokens()...)
+	secrets := []string{user, base64.StdEncoding.EncodeToString([]byte("session:" + third))}
+	for _, r := range relay.records() {
+		secrets = append(secrets, r.token)
+	}
 	for _, s := range secrets {
 		if s != "" && strings.Contains(out, s) {
 			t.Errorf("the forwarder log holds a credential (%d bytes of it)", len(s))
