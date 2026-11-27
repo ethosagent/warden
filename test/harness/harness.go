@@ -221,6 +221,9 @@ type H struct {
 	// wantCentral (WithCentralForwarding) makes every worker forward its events
 	// to the control plane's /central/ingest.
 	wantCentral bool
+	// wantFleetCostBlocks (WithFleetCostBlocks) boots the CP with the sqlite fleet
+	// store and the fake clock so the fleet cost aggregator runs.
+	wantFleetCostBlocks bool
 	// workerAgentID (WithWorkerAgent) is the --agent-id every worker boots with.
 	workerAgentID string
 	// wantBackup (WithBackup) boots the control plane with --backup-dir.
@@ -866,6 +869,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyBackup(&ip.cp.params)
 	h.applyKeys(&ip.cp.params)
 	h.applyBundles(&ip.cp.params)
+	h.applyFleetCostBlocks(&ip.cp.params)
 	h.applyAPIKeys(&ip.cp.params)
 	h.applyStrict(&ip.cp.params)
 	h.applyStrictCerts(&ip.cp.params)

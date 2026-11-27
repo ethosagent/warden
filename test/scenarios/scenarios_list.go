@@ -201,6 +201,11 @@ var All = slices.Concat(
 		// user_cost_limited, another user keeps his budget, and a worker
 		// restart reseeds the ledger from local events.
 		{Name: "user_cost_cap", Opts: userCostCapOpts(), Run: userCostCap},
+		// Per-user limits end to end (W-P3-PUL-10): two workers and one CP with
+		// the fleet store; rate and cost denies, the anonymous bucket, the
+		// CP-published costBlockedUsers on the second worker, the usage totals
+		// and no judge calls for limit denials.
+		{Name: "user_limits_e2e", Opts: userLimitsOpts(), Run: userLimitsE2E},
 		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
 		// gateway through RequestMeta without changing any verdict.
 		{Name: "mcp_subject_seam_unchanged", Opts: mcpSubjectOpts(), Run: mcpSubjectSeamUnchanged},
