@@ -410,29 +410,73 @@ func TestUserLimit_GroupsTruncated(t *testing.T) {
 	}
 }
 
-// Limits are charged only after a policy Allow: a request the judge decides
-// (NoMatch) is neither charged nor refused by a limit, and a policy deny stays
-// a policy deny.
+// Limits are charged only on a request that will be forwarded (a policy Allow,
+// or a NoMatch the judge allowed). A NoMatch the judge denies ends denied, so
+// it is never charged and its judge deny is never overwritten by a limit; the
+// budget is intact for the next allowed request.
 func TestUserLimit_OnlyAfterPolicyAllow(t *testing.T) {
-	j := &fakeJudge{verdict: Verdict{Decision: "allow"}}
+	j := &fakeJudge{verdict: Verdict{Decision: "deny", Reason: "no"}}
 	e := newIDEnvCfg(t, IdentityModeAttribute, limitEdit(config.Policy{
-		Allowlist:        []config.AllowlistEntry{{Domain: "other.test", Port: 443}},
-		DefaultUserLimit: &config.UserLimit{RateLimit: "1/hour"},
-		AnonymousLimit:   &config.UserLimit{RateLimit: "1/hour"},
+		Allowlist:  []config.AllowlistEntry{{Domain: "other.test", Port: 443}},
+		UserLimits: []config.UserLimit{engRule("1/hour")},
 	}, j))
-	c := e.h1("")
+	alice := "X-Warden-Identity: Bearer tok-alice\r\n"
 	for i := 0; i < 3; i++ {
-		if st := c.get("X-Warden-Identity: Bearer tok-alice\r\n"); st != http.StatusOK {
-			t.Fatalf("judge-allowed request %d = %d, want 200", i, st)
+		resp := e.h1("").getResp(alice)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("judge-denied request %d = %d, want 403", i, resp.StatusCode)
 		}
 	}
-	for _, ev := range waitEvents(t, e.store, 3) {
-		if ev.LimitRule != "" {
-			t.Errorf("judge-decided event carries limit_rule %q", ev.LimitRule)
+	for _, d := range waitEvents(t, e.store, 3) {
+		if d.Reason != string(denyreason.Judge) {
+			t.Errorf("deny reason = %q, want judge (a limit never overwrites it)", d.Reason)
 		}
 	}
 	if n := e.p.cfg.Policy.(*policy.Evaluator).UserLimitBuckets(); n != 0 {
-		t.Errorf("buckets = %d, want 0", n)
+		t.Errorf("buckets = %d, want 0: a judge-denied request is never charged", n)
+	}
+	j.mu.Lock()
+	j.verdict = Verdict{Decision: "allow"}
+	j.mu.Unlock()
+	if st := e.h1("").get(alice); st != http.StatusOK {
+		t.Errorf("first judge-allowed request = %d, want 200", st)
+	}
+}
+
+// A NoMatch request the judge allows is forwarded, so it is charged: after the
+// judge, before the upstream. Once the bucket is exhausted the request is
+// refused by the pre-judge peek, so an over-limit user costs no judge call.
+func TestUserLimit_JudgeAllowedCharged(t *testing.T) {
+	j := &fakeJudge{verdict: Verdict{Decision: "allow"}}
+	e := newIDEnvCfg(t, IdentityModeAttribute, limitEdit(config.Policy{
+		Allowlist:  []config.AllowlistEntry{{Domain: "other.test", Port: 443}},
+		UserLimits: []config.UserLimit{engRule("2/hour")},
+	}, j))
+	c := e.h1("")
+	alice := "X-Warden-Identity: Bearer tok-alice\r\n"
+	for i := 0; i < 2; i++ {
+		if st := c.get(alice); st != http.StatusOK {
+			t.Fatalf("judge-allowed request %d = %d, want 200", i, st)
+		}
+	}
+	assertRateLimited(t, c.getResp(alice), 3600)
+	j.mu.Lock()
+	calls := j.calls
+	j.mu.Unlock()
+	if calls != 2 {
+		t.Errorf("judge calls = %d, want 2 (the over-limit request is refused before the judge)", calls)
+	}
+	if n := e.be.requests(); n != 2 {
+		t.Errorf("upstream saw %d requests, want 2", n)
+	}
+	for _, ev := range waitEvents(t, e.store, 3) {
+		if ev.LimitRule != "eng" {
+			t.Errorf("%s event limit_rule = %q, want eng", ev.Decision, ev.LimitRule)
+		}
+	}
+	if d := limitDenies(e.store); len(d) != 1 || d[0].Reason != string(denyreason.UserRateLimited) || d[0].UserSub != "alice" {
+		t.Errorf("denies = %+v", d)
 	}
 }
 

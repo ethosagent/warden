@@ -79,28 +79,62 @@ func (p *Proxy) recordUserLimitDenied(v policy.RequestVerdict) {
 	}
 }
 
-// userLimitStage charges the request to the per-user limit rule that applies
-// to its subject (nil for no, invalid or expired token: the anonymous rule)
-// and refuses it when that rule is out of budget. It runs after constraintGate
-// and only when that gate's verdict was Allow, so a NoMatch (judge), Deny or
-// Conditional request is never charged and never allowed here. Over the
-// limit the judge is not called, nothing is swapped and nothing is dialed.
-// With no limits configured it is one read lock in the evaluator and changes
-// nothing on the request or its events.
+// userLimitStage applies the per-user limit rule that matches the request's
+// subject (nil for no, invalid or expired token: the anonymous rule). It runs
+// after constraintGate and before judgeGate, and only charges a request that
+// will be forwarded:
+//   - a policy Allow is charged here; over the limit the judge is not called,
+//     nothing is swapped and nothing is dialed;
+//   - a NoMatch the judge decides is only peeked here (no budget consumed), so
+//     an already-exhausted user costs no judge call, and is charged by
+//     judgedUserLimitStage once the judge allowed it: a judge-denied request is
+//     never charged;
+//   - a Deny or Conditional never reaches this stage (constraintGate ended it).
+//
+// A limit verdict can only deny; it never overrides the policy or judge
+// verdict. With no limits configured it is one read lock in the evaluator and
+// changes nothing on the request or its events.
 func (p *Proxy) userLimitStage(s *requestScope) (endSession bool) {
-	if !s.policyAllowed {
+	switch {
+	case s.policyAllowed:
+		return p.applyUserLimit(s, false)
+	case s.deferred == deferJudge:
+		s.chargeAfterJudge = true
+		return p.applyUserLimit(s, true)
+	}
+	return false
+}
+
+// judgedUserLimitStage charges a judge-decided (NoMatch) request after the
+// judge allowed it (judgeGate already ended every judge deny), before any
+// swap or upstream byte. An over-limit user still costs at most one judge
+// call per request here: userLimitStage's peek refuses them before the judge
+// once their bucket is exhausted, so only the request that exhausts it races
+// past the peek.
+func (p *Proxy) judgedUserLimitStage(s *requestScope) (endSession bool) {
+	if !s.chargeAfterJudge {
 		return false
 	}
-	v := p.cfg.Policy.ChargeUserLimit(policy.RequestContext{
-		Domain: s.domain, Port: s.port, Scheme: s.scheme, Subject: s.subject,
-	}, p.cfg.AgentID)
+	return p.applyUserLimit(s, false)
+}
+
+// applyUserLimit charges (or, with peek, only checks) the request's per-user
+// limit and answers the refusal when it is out of budget.
+func (p *Proxy) applyUserLimit(s *requestScope, peek bool) (endSession bool) {
+	rc := policy.RequestContext{Domain: s.domain, Port: s.port, Scheme: s.scheme, Subject: s.subject}
+	var v policy.RequestVerdict
+	if peek {
+		v = p.cfg.Policy.PeekUserLimit(rc, p.cfg.AgentID)
+	} else {
+		v = p.cfg.Policy.ChargeUserLimit(rc, p.cfg.AgentID)
+	}
 	// Set before any event of this request is recorded (the deny below and the
 	// allow at the end both read it).
 	s.limitRule = v.LimitRule
 	if v.Decision != policy.Deny {
 		return false
 	}
-	p.emitDeny(s, v.Reason, denyExtra{LatencyMs: s.latencyMs()})
+	p.emitDeny(s, v.Reason, denyExtra{LatencyMs: s.latencyMs(), JudgeReason: s.judgeReason})
 	p.recordUserLimitDenied(v)
 	status, body, retry := userLimitResponse(v)
 	if retry > 0 {

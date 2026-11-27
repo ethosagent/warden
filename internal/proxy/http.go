@@ -142,14 +142,17 @@ type requestScope struct {
 	// NoMatch): only then does userLimitStage charge a per-user limit.
 	// limitRule is the per-user limit rule that stage resolved; it rides every
 	// event of the request.
-	policyAllowed bool
-	limitRule     string
-	judgeReason   string
-	wasMCP        bool
-	mcpTool       string
-	mcpReason     string
-	mcpSessKey    string
-	closeAfter    bool
+	// chargeAfterJudge marks a judge-decided (NoMatch) request whose limit
+	// is charged only after the judge allowed it (judgedUserLimitStage).
+	policyAllowed    bool
+	chargeAfterJudge bool
+	limitRule        string
+	judgeReason      string
+	wasMCP           bool
+	mcpTool          string
+	mcpReason        string
+	mcpSessKey       string
+	closeAfter       bool
 
 	// sess is the connection's registry session (nil for none): blockStage binds
 	// the request's identities to it.
@@ -467,6 +470,9 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 		return true
 	}
 	if p.judgeGate(s) {
+		return true
+	}
+	if p.judgedUserLimitStage(s) {
 		return true
 	}
 	if p.mcpRequestScan(s) {
