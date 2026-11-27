@@ -220,6 +220,7 @@ func (p *Proxy) forwardH2(s *requestScope) (endSession bool) {
 		return p.badGateway(s)
 	}
 	s.resp = resp
+	s.countResponseBody()
 	return false
 }
 
