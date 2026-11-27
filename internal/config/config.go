@@ -66,6 +66,11 @@ type Policy struct {
 	// (env|echo|aws). Optional sibling of Secrets; omitted => env (byte-identical
 	// to today). LOCAL only this phase (never on the wire).
 	SecretStore SecretStoreConfig `json:"-"`
+	// PerUserSecrets is the CP-local per-user secrets block (W-P3-PUS-02): the
+	// switch and the value-free per-user mappings. json:"-" keeps it off GET
+	// /policy and SettingsWire; workers get the mappings only as a signed-bundle
+	// section (W-P3-PUS-08). Zero value (block absent) = disabled.
+	PerUserSecrets PerUserSecretsConfig `json:"-"`
 	// CacheTTLSeconds is the secret cache time-to-live in seconds.
 	CacheTTLSeconds int `json:"-"`
 	// LogLevel and LogFormat configure observability output.
@@ -270,6 +275,7 @@ func (p Policy) DeepCopy() Policy {
 	// independent backing array is a full deep copy.
 	cp.LLMProviders = append([]LLMProvider(nil), p.LLMProviders...)
 	cp.Upstream.AllowPrivateCIDRs = append([]string(nil), p.Upstream.AllowPrivateCIDRs...)
+	cp.PerUserSecrets = p.PerUserSecrets.deepCopy()
 	return cp
 }
 
@@ -375,9 +381,10 @@ type rawConfig struct {
 		// BlockedUsers: the user block list (see BlockedUser).
 		BlockedUsers []BlockedUser `yaml:"blockedUsers"`
 	} `yaml:"policy"`
-	Secrets     []SecretMapping `yaml:"secrets"`
-	SecretStore *rawSecretStore `yaml:"secretStore"`
-	Cache       struct {
+	Secrets        []SecretMapping    `yaml:"secrets"`
+	SecretStore    *rawSecretStore    `yaml:"secretStore"`
+	PerUserSecrets *rawPerUserSecrets `yaml:"perUserSecrets"`
+	Cache          struct {
 		TTL int `yaml:"ttl"`
 	} `yaml:"cache"`
 	Logging struct {
@@ -563,6 +570,11 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	policy.DNS = parseDNS(raw.DNS)
 	policy.Upstream = parseUpstream(raw.Upstream)
 	policy.Proxy = parseProxy(raw.Proxy)
+	perUser, err := parsePerUserSecrets(raw.PerUserSecrets)
+	if err != nil {
+		return nil, err
+	}
+	policy.PerUserSecrets = perUser
 
 	if err := validate(policy); err != nil {
 		return nil, err
@@ -751,6 +763,9 @@ func validate(p Policy) error {
 			return fmt.Errorf("config: secrets: duplicate placeholder %q", s.Placeholder)
 		}
 		seen[s.Placeholder] = struct{}{}
+	}
+	if err := validatePerUserSecrets(p.PerUserSecrets, p.Secrets); err != nil {
+		return err
 	}
 	if p.CacheTTLSeconds < 0 {
 		return fmt.Errorf("config: cache.ttl must not be negative")

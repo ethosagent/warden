@@ -516,7 +516,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// the secretStore the CP distributes and is never mounted on a route.
 	var userStore secrets.SecretStore
 	if consentCfg != nil {
-		userStore, err = NewUserStore(consentCfg.Store, UserStoreOptions{
+		userStore, err = NewUserStore(ctx, consentCfg.Store, UserStoreOptions{
 			Distributed: pol.SecretStore, Keys: keysCfg, Dev: p.Dev,
 			AWSClient: p.UserStoreAWSClient, Logger: logger,
 		})
@@ -527,6 +527,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			return fail(err)
 		}
 	}
+	// perUserSecrets (W-P3-PUS-02) needs consent.store, the token service and
+	// signed bundles; refuse to start without them rather than serve mappings
+	// no request could use safely.
+	if err := checkPerUserSecretsStartup(pol.PerUserSecrets, consentCfg, userStore, tokenCfg.Enabled, bundlesCfg); err != nil {
+		return fail(err)
+	}
+	logPerUserSecrets(logger, pol.PerUserSecrets)
 
 	// clk is the CP's resolved time port (nil = clock.Real(), the production
 	// default). Console sessions, pending logins and ID-token checks read it.

@@ -691,3 +691,66 @@ func TestVaultStore_ProbeRefusesSubPathMount(t *testing.T) {
 		}
 	}
 }
+
+// TestVaultStore_ProbeAndPersists: the store is persistent and its Probe runs
+// the mount preflight now (with the namespace header), fails closed on a KV v1
+// mount, a missing mount or namespace (404, never an empty store) and a token
+// without access (403), and touches no data path.
+func TestVaultStore_ProbeAndPersists(t *testing.T) {
+	ctx := context.Background()
+	kv, s := newVaultTestStore(t)
+	if !secrets.IsPersistent(s) {
+		t.Fatal("the Vault store must report Persists() true")
+	}
+	p, ok := s.(secrets.Prober)
+	if !ok {
+		t.Fatal("the Vault store must implement secrets.Prober")
+	}
+	if err := p.Probe(ctx); err != nil {
+		t.Fatalf("Probe on KV v2: %v", err)
+	}
+	reqs := kv.Requests()
+	if len(reqs) != 1 || reqs[0].Path != "/v1/sys/internal/ui/mounts/secret" || reqs[0].Namespace != "team-a" {
+		t.Fatalf("Probe requests = %+v, want one mount check with namespace team-a", reqs)
+	}
+
+	kv1 := fakes.NewFakeVaultKV1(t, vaultTestToken)
+	_, s1 := newVaultTestStoreOn(t, kv1)
+	if err := s1.(secrets.Prober).Probe(ctx); !errors.Is(err, secrets.ErrNotKV2) {
+		t.Fatalf("Probe on KV v1 = %v, want ErrNotKV2", err)
+	}
+
+	for name, c := range map[string]struct {
+		status int
+		want   string
+	}{
+		"missing mount or namespace": {http.StatusNotFound, "not found in this namespace (status 404)"},
+		"token without access":       {http.StatusForbidden, "permission denied"},
+		"server error":               {http.StatusInternalServerError, "unexpected status 500"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := fakes.NewFakeVaultKV(t, vaultTestToken)
+			_, st := newVaultTestStoreOn(t, f)
+			f.ForceResponse(http.MethodGet, "/v1/sys/internal/ui/mounts/secret", c.status, `{"errors":["no handler for route"]}`)
+			err := st.(secrets.Prober).Probe(ctx)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("Probe = %v, want %q", err, c.want)
+			}
+			if strings.Contains(err.Error(), vaultTestToken) {
+				t.Fatal("the probe error carries the token")
+			}
+			// Not cached: a later probe that succeeds passes.
+			if err := st.(secrets.Prober).Probe(ctx); err != nil {
+				t.Fatalf("second Probe: %v", err)
+			}
+		})
+	}
+	wrongToken := fakes.NewFakeVaultKV(t, "another-token")
+	st, err := secrets.NewVaultSecretStore(secrets.VaultStoreConfig{Addr: wrongToken.URL(), Token: vaultTestToken}, wrongToken.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.(secrets.Prober).Probe(ctx); err == nil || !strings.Contains(err.Error(), "status 403") {
+		t.Fatalf("Probe with a wrong token = %v, want 403", err)
+	}
+}

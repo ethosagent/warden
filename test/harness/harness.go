@@ -252,6 +252,10 @@ type H struct {
 	// bundleMode (WithBundles) boots the control plane with --bundles set to
 	// it, on top of the versioned policy store and the signing keys.
 	bundleMode string
+	// wantPerUserVault (WithPerUserSecretsVault) boots the control plane with
+	// consent, a Vault consent.store on consentVault and perUserSecrets on.
+	wantPerUserVault bool
+	consentVault     *fakes.FakeVaultKV
 	// bundleModeSet is true once WithBundles was applied (its mode may be the
 	// empty default); without it the harness control plane runs --bundles=off.
 	bundleModeSet bool
@@ -771,6 +775,9 @@ func (h *H) boot() {
 	if h.wantCPAdmin {
 		h.prepareCPAdmin()
 	}
+	if h.wantPerUserVault {
+		h.preparePerUserVault()
+	}
 
 	if h.suppliedTarget != nil {
 		if h.wantWorkerTokens {
@@ -887,6 +894,7 @@ func (h *H) writeCPConfig() string {
 	b.WriteString(h.consoleYAML())
 	b.WriteString(h.keysYAML())
 	b.WriteString(h.tokenServiceYAML())
+	b.WriteString(h.perUserVaultYAML())
 	b.WriteString(h.workerCAYAML())
 	b.WriteString(h.fakeJudgeYAML())
 	b.WriteString(h.auditJSONLogYAML())

@@ -1,11 +1,15 @@
 package controlplane
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/dashboard"
@@ -25,7 +29,66 @@ type UserStoreOptions struct {
 	// AWSClient, when set, replaces the client built from the CP environment or
 	// instance role (tests and the harness inject a fake).
 	AWSClient secrets.AWSSecretsClient
-	Logger    *slog.Logger
+	// VaultClient, when set, is the HTTP client the vault backend uses (tests
+	// and the harness; nil = a default client with the system roots). The
+	// store copies it, caps its timeout and never follows redirects.
+	VaultClient *http.Client
+	// Getenv reads the CP environment (nil = os.Getenv): the vault token comes
+	// from the variable consent.store.vault.tokenEnv names, never from YAML.
+	Getenv func(string) string
+	Logger *slog.Logger
+}
+
+// vaultProbeTimeout bounds the startup preflight of the vault backend.
+const vaultProbeTimeout = 10 * time.Second
+
+// newVaultUserStore builds the Vault KV v2 user store (W-P3-PUS-01) from
+// consent.store.vault and probes it before the control plane serves anything.
+// The token is read from the CP environment variable cfg.Vault.TokenEnv only;
+// no YAML key or wire field carries it, and no error or log line holds it.
+//
+// The probe is the KV v2 mount preflight (sys/internal/ui/mounts/<mount>) with
+// the configured token and namespace. It fails closed: a KV v1 mount
+// (secrets.ErrNotKV2), a missing mount or namespace (404, which is never read
+// as an empty store), a token without access (403) or an unreachable Vault
+// stops startup, because a grant written to the wrong engine would lose its
+// compare-and-swap and every later read would look like a missing grant.
+func newVaultUserStore(ctx context.Context, cfg *config.ConsentStore, opts UserStoreOptions, logger *slog.Logger) (secrets.SecretStore, error) {
+	v := cfg.Vault
+	if v == nil {
+		return nil, errors.New("control-plane: consent.store.backend vault requires consent.store.vault {addr, mount}")
+	}
+	getenv := opts.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	tokenEnv := v.TokenEnv
+	if tokenEnv == "" {
+		tokenEnv = config.DefaultConsentStoreVaultTokenEnv
+	}
+	token := strings.TrimSpace(getenv(tokenEnv))
+	if token == "" {
+		return nil, fmt.Errorf("control-plane: consent.store.backend vault but environment variable %s (consent.store.vault.tokenEnv) is empty", tokenEnv)
+	}
+	st, err := secrets.NewVaultSecretStore(secrets.VaultStoreConfig{
+		Addr: v.Addr, Mount: v.Mount, NamePrefix: cfg.NamePrefix, Token: token, Namespace: v.Namespace,
+	}, opts.VaultClient)
+	if err != nil {
+		return nil, fmt.Errorf("control-plane: consent.store.vault: %w", err)
+	}
+	p, ok := st.(secrets.Prober)
+	if !ok {
+		return nil, errors.New("control-plane: consent.store.vault: the store has no startup probe")
+	}
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), vaultProbeTimeout)
+	defer cancel()
+	if err := p.Probe(pctx); err != nil {
+		return nil, fmt.Errorf("control-plane: consent.store.vault: startup check of mount %q at %s (namespace %q) failed: %w; the mount must be a KV version 2 engine and the token in %s needs a capability on sys/internal/ui/mounts/%s",
+			v.Mount, v.Addr, v.Namespace, err, tokenEnv, v.Mount)
+	}
+	logger.Info("control plane user credential store active",
+		"backend", cfg.Backend, "addr", v.Addr, "mount", v.Mount, "namespace", v.Namespace, "namePrefix", cfg.NamePrefix)
+	return st, nil
 }
 
 // NewUserStore builds the CP-only user credential store from consent.store
@@ -37,12 +100,13 @@ type UserStoreOptions struct {
 // YAML or the wire.
 //
 // It refuses to start (each error naming the keys involved) when:
-//   - the backend is echo without --dev, or vault (until W-P3-PUS-02 wires the
-//     W-P3-PUS-01 store);
+//   - the backend is echo without --dev;
+//   - the backend is vault and its token variable is empty, or the KV v2 mount
+//     preflight fails (see newVaultUserStore);
 //   - consent.store resolves to the same backend as the distributed secretStore
 //     (or keys.store) and either namePrefix is a prefix of the other, so a
 //     worker credential scoped to the secretStore namespace could reach it.
-func NewUserStore(cfg *config.ConsentStore, opts UserStoreOptions) (secrets.SecretStore, error) {
+func NewUserStore(ctx context.Context, cfg *config.ConsentStore, opts UserStoreOptions) (secrets.SecretStore, error) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -59,7 +123,7 @@ func NewUserStore(cfg *config.ConsentStore, opts UserStoreOptions) (secrets.Secr
 	switch cfg.Backend {
 	case config.ConsentStoreBackendEcho:
 		if !opts.Dev {
-			return nil, errors.New("control-plane: consent.store.backend echo is development only and needs --dev (it keeps no value; use aws, or vault once available)")
+			return nil, errors.New("control-plane: consent.store.backend echo is development only and needs --dev (it keeps no value; use aws or vault)")
 		}
 		logger.Warn("control plane ECHO user credential store active (--dev) — NON-PRODUCTION: it keeps no value; never use it for real users")
 		return secrets.NewEchoStore(), nil
@@ -80,11 +144,7 @@ func NewUserStore(cfg *config.ConsentStore, opts UserStoreOptions) (secrets.Secr
 			"backend", cfg.Backend, "region", cfg.AWS.Region, "namePrefix", cfg.NamePrefix)
 		return secrets.NewAWSSecretStore(client, cfg.AWS.Region, cfg.NamePrefix), nil
 	case config.ConsentStoreBackendVault:
-		// TODO(W-P3-PUS-02): build secrets.NewVaultSecretStore (W-P3-PUS-01)
-		// from cfg.Vault, the token read from the CP environment variable
-		// cfg.Vault.TokenEnv, probe the KV v2 mount at startup (fail closed),
-		// and give the store Persists() true.
-		return nil, errors.New("control-plane: consent.store.backend vault needs W-P3-PUS-01 (the Vault KV v2 store is not available in this build; use aws)")
+		return newVaultUserStore(ctx, cfg, opts, logger)
 	default:
 		return nil, fmt.Errorf("control-plane: consent.store.backend %q is invalid", cfg.Backend)
 	}
