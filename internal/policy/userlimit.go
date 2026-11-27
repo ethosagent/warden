@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"hash/fnv"
 	"hash/maphash"
@@ -421,35 +423,46 @@ func (r *compiledUserLimit) matchesDomain(host string) bool {
 }
 
 // bucketKey is the key of a rate bucket: rule name, the user's sub (or
-// anonBucketSub) and the agent id when the rule is per-agent or anonymous.
-// userBucketKey renders it.
+// anonBucketSub) and the agent id when the rule is per-agent or anonymous
+// (empty otherwise). The table keys on the struct so a lookup never builds a
+// string; String renders the documented form.
 type bucketKey struct {
 	rule, sub, agent string
+}
+
+// String renders the key as `ul:<name>:<sub>` plus `:<agentID>` when the rule
+// is per-agent, or `ul:anonymous:anon:<agentID>` for an anonymous request.
+func (k bucketKey) String() string {
+	if k.agent == "" {
+		return "ul:" + k.rule + ":" + k.sub
+	}
+	return "ul:" + k.rule + ":" + k.sub + ":" + k.agent
+}
+
+// maxBucketSubBytes bounds the sub stored in a bucket key. A longer sub (the
+// IdP chooses it) is stored as its SHA-256, so one key never holds more than
+// this many bytes of request-controlled data.
+const maxBucketSubBytes = 255
+
+// bucketSub returns sub, or "sha256:<hex>" of it when it is over
+// maxBucketSubBytes (that case alone allocates).
+func bucketSub(sub string) string {
+	if len(sub) <= maxBucketSubBytes {
+		return sub
+	}
+	sum := sha256.Sum256([]byte(sub))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (r *compiledUserLimit) bucketKey(s *identity.Subject, agentID string) bucketKey {
 	if s == nil || s.Sub == "" {
 		return bucketKey{rule: r.name, sub: anonBucketSub, agent: agentID}
 	}
-	k := bucketKey{rule: r.name, sub: s.Sub}
+	k := bucketKey{rule: r.name, sub: bucketSub(s.Sub)}
 	if r.perAgent {
 		k.agent = agentID
 	}
 	return k
-}
-
-// userBucketKey renders a bucket key as `ul:<name>:<sub>` plus `:<agentID>`
-// when the rule is per-agent, or `ul:anonymous:anon:<agentID>` for an
-// anonymous request. It is the documented form; the table itself keys on the
-// struct so a lookup never builds a string.
-func userBucketKey(rule, sub, agentID string, perAgent, anon bool) string {
-	if anon {
-		return "ul:" + rule + ":" + anonBucketSub + ":" + agentID
-	}
-	if perAgent {
-		return "ul:" + rule + ":" + sub + ":" + agentID
-	}
-	return "ul:" + rule + ":" + sub
 }
 
 // ChargeUserLimit applies the per-user limit rule that matches rc.Subject,

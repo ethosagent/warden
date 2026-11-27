@@ -1,7 +1,12 @@
 package policy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"slices"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -211,15 +216,6 @@ func TestChargeUserLimit_PerAgentAndAnonymous(t *testing.T) {
 	})
 	wantLimit(t, e2.ChargeUserLimit(ulReq("x.test", nil), "agent-a"), Allow, config.UserLimitNameAnonymous)
 	wantLimit(t, e2.ChargeUserLimit(ulReq("x.test", user("anon", "", false)), "agent-a"), Allow, config.UserLimitNameDefault)
-	if got := userBucketKey("eng", "alice", "agent-a", true, false); got != "ul:eng:alice:agent-a" {
-		t.Errorf("per-agent key = %q", got)
-	}
-	if got := userBucketKey("eng", "alice", "agent-a", false, false); got != "ul:eng:alice" {
-		t.Errorf("per-user key = %q", got)
-	}
-	if got := userBucketKey(config.UserLimitNameAnonymous, "", "agent-a", true, true); got != "ul:anonymous:anon:agent-a" {
-		t.Errorf("anonymous key = %q", got)
-	}
 }
 
 func TestChargeUserLimit_CostOnlyRule(t *testing.T) {
@@ -651,5 +647,57 @@ func TestChargeUserLimit_TruncatedGroupsFailClosed(t *testing.T) {
 	rc := ulReq("api.openai.com", truncated("b", "sales"))
 	if got := testing.AllocsPerRun(100, func() { e.ChargeUserLimit(rc, "agent-a") }); got != 0 {
 		t.Errorf("truncated ChargeUserLimit allocates %v, want 0", got)
+	}
+}
+
+// bucketKeys lists the keys in the bucket table, rendered, sorted.
+func bucketKeys(e *Evaluator) []string {
+	var out []string
+	for i := range e.ub.shards {
+		sh := &e.ub.shards[i]
+		sh.mu.Lock()
+		for k := range sh.m {
+			out = append(out, k.String())
+		}
+		sh.mu.Unlock()
+	}
+	sort.Strings(out)
+	return out
+}
+
+func TestUserLimit_BucketKeys(t *testing.T) {
+	e, _ := ulEval(t, config.Policy{
+		UserLimits: []config.UserLimit{
+			{Name: "eng", Match: config.UserLimitMatch{Groups: []string{"eng"}}, PerAgent: true, RateLimit: "5/minute"},
+			{Name: "ops", Match: config.UserLimitMatch{Groups: []string{"ops"}}, RateLimit: "5/minute"},
+		},
+		AnonymousLimit: &config.UserLimit{Name: config.UserLimitNameAnonymous, RateLimit: "5/minute"},
+	})
+	e.ChargeUserLimit(ulReq("x.test", user("alice", "", false, "eng")), "agent-a")
+	e.ChargeUserLimit(ulReq("y.test", user("olga", "", false, "ops")), "agent-a")
+	e.ChargeUserLimit(ulReq("y.test", user("olga", "", false, "ops")), "agent-b")
+	e.ChargeUserLimit(ulReq("x.test", nil), "agent-a")
+	long := strings.Repeat("s", maxBucketSubBytes+1)
+	e.ChargeUserLimit(ulReq("x.test", user(long, "", false, "ops")), "agent-a")
+	sum := sha256.Sum256([]byte(long))
+	want := []string{
+		"ul:anonymous:anon:agent-a",
+		"ul:eng:alice:agent-a",
+		"ul:ops:olga",
+		"ul:ops:sha256:" + hex.EncodeToString(sum[:]),
+	}
+	sort.Strings(want)
+	if got := bucketKeys(e); !slices.Equal(got, want) {
+		t.Fatalf("bucket keys = %q, want %q", got, want)
+	}
+	// The hashed key is one budget: the long sub is limited like any other.
+	for i := 0; i < 4; i++ {
+		e.ChargeUserLimit(ulReq("x.test", user(long, "", false, "ops")), "agent-a")
+	}
+	wantLimit(t, e.ChargeUserLimit(ulReq("x.test", user(long, "", false, "ops")), "agent-a"), Deny, "ops")
+	// A sub at the limit is kept as is.
+	atLimit := strings.Repeat("t", maxBucketSubBytes)
+	if got := bucketSub(atLimit); got != atLimit {
+		t.Fatalf("bucketSub at the limit changed the sub")
 	}
 }
