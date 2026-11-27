@@ -251,3 +251,49 @@ func TestConsentIssuerOfflineImport(t *testing.T) {
 		t.Fatalf("matching import = %+v, %v", res, err)
 	}
 }
+
+// TestConsentIssuerOfflineImportFailsClosed: a served config whose consent block
+// is malformed refuses the import (the binding cannot be proved), while a served
+// config with no consent block imports as before.
+func TestConsentIssuerOfflineImportFailsClosed(t *testing.T) {
+	setup := func(servedBody string) (*OfflinePolicyStore, PolicyDoc) {
+		stateDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(stateDir, "config.yaml"), []byte(servedBody), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		db, err := cpstate.Open(context.Background(), filepath.Join(stateDir, "warden-cp.db"), StateMigrations())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		o, err := OpenPolicyStore(context.Background(), stateDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = o.Close() })
+		p := filepath.Join(t.TempDir(), "policy.yaml")
+		if err := os.WriteFile(p, []byte(basePolicy), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		doc, err := ValidatePolicyDocFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o, doc
+	}
+
+	o, doc := setup(basePolicy + "consent:\n  enabled: true\n  bogus: 1\n")
+	if _, err := o.Import(context.Background(), doc, "", -1, nil); err == nil {
+		t.Fatal("import against a malformed served consent block succeeded, want a refusal")
+	}
+	if h, _ := o.Head(context.Background()); h != 0 {
+		t.Fatalf("head = %d after the refused import, want 0", h)
+	}
+
+	o, doc = setup(basePolicy)
+	if res, err := o.Import(context.Background(), doc, "", -1, nil); err != nil || !res.Changed {
+		t.Fatalf("import with no consent block = %+v, %v; want it to publish", res, err)
+	}
+}

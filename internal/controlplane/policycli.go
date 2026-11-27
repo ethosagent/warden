@@ -181,7 +181,14 @@ func (o *OfflinePolicyStore) Import(ctx context.Context, doc PolicyDoc, msg stri
 		}
 		// The running CP serves this head to workers: it must keep the
 		// identity.issuer binding the CP checks at startup and on every write.
-		if c, err := config.LoadConsent(o.servedPath); err == nil && c.Enabled {
+		// A served config whose consent block cannot be read or parsed fails
+		// closed: the binding cannot be proved, so nothing is written. (No block
+		// loads as disabled; a missing file never gets here, see the Stat above.)
+		c, err := config.LoadConsent(o.servedPath)
+		if err != nil {
+			return PolicyImportResult{}, fmt.Errorf("policy file %s: cannot check the consent issuer binding against the served config %s: %w", doc.path, o.servedPath, err)
+		}
+		if c.Enabled {
 			var id *config.IdentitySettings
 			if doc.wire.Settings != nil {
 				id = doc.wire.Settings.Identity
