@@ -242,6 +242,10 @@ func (i *OIDCIssuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 
 func (i *OIDCIssuer) handleJWKS(w http.ResponseWriter, _ *http.Request) {
 	i.jwksReqs.Add(1)
+	if st := i.jwksDown(); st != 0 {
+		http.Error(w, "fake jwks failure", st)
+		return
+	}
 	i.mu.Lock()
 	keys := make([]map[string]string, 0, len(i.keys))
 	for _, k := range i.keys {
@@ -604,6 +608,15 @@ func Valid(sub, email string, groups ...string) MintOption {
 		if len(groups) > 0 {
 			WithGroups(groups...)(s)
 		}
+	}
+}
+
+// ExpiredBy is a token whose exp was d ago (iat 5 minutes before that).
+func ExpiredBy(d time.Duration) MintOption {
+	return func(s *mintSpec) {
+		now := s.iss.now()
+		WithIAT(now.Add(-d - 5*time.Minute))(s)
+		WithExp(now.Add(-d))(s)
 	}
 }
 

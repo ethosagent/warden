@@ -32,6 +32,8 @@ func fullConsent() config.ConsentConfig {
 		AllowedGroups: []string{"staff"},
 		Session:       config.ConsentSession{Idle: 30 * time.Minute, Absolute: 8 * time.Hour},
 		IdPLink:       config.ConsentIdPLink{Enabled: true, RefreshLifetime: 720 * time.Hour},
+		Offboarding: config.ConsentOffboarding{Mode: config.OffboardingModeObserve, Interval: time.Hour, Concurrency: 4,
+			RequestTimeout: 10 * time.Second, MaxFailures: 3, ReauthWarning: 72 * time.Hour},
 	}
 }
 
@@ -59,7 +61,7 @@ func TestConsentNotOnWire(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, b := range map[string][]byte{"policyWire": pw, "SettingsWire": sj, "Policy": pj} {
-		for _, banned := range []string{"consent", "clientSecretEnv", "warden-portal", "WARDEN_PORTAL_DEX_CLIENT_SECRET", "allowedGroups", "idpLink"} {
+		for _, banned := range []string{"consent", "clientSecretEnv", "warden-portal", "WARDEN_PORTAL_DEX_CLIENT_SECRET", "allowedGroups", "idpLink", "offboarding", "Offboarding", "observe", "reauthWarning", "ReauthWarning"} {
 			if strings.Contains(string(b), banned) {
 				t.Errorf("%s JSON contains %q: %s", name, banned, b)
 			}

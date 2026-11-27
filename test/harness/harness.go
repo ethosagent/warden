@@ -186,6 +186,9 @@ type H struct {
 	// wantConsent (WithConsent) adds the CP-local consent block (the portal
 	// sign-in) on top of the console.
 	wantConsent bool
+	// offboardingMode (WithOffboarding) is consent.offboarding.mode ("" omits
+	// the block: mode off).
+	offboardingMode string
 	// userStoreAWS is the AWS account behind consent.store (WithConsent): the
 	// CP-only user credential store the IdP link writes to.
 	userStoreAWS *fakes.FakeAWSSecretsClient

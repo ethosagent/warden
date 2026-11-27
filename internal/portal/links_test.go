@@ -144,7 +144,7 @@ func TestIdPLinkStored(t *testing.T) {
 	}
 	want := portal.IdPLink{
 		Iss: linkIss, Sub: linkSub, UserKey: uk, Email: "dana@example.com", SecretKey: "idp/" + uk,
-		RefreshRef: secrets.Ref(linkToken).String(), Generation: 1,
+		RefreshRef: secrets.Ref(linkToken).String(), Generation: 1, State: portal.LinkActive,
 		LinkedAt: linkEpoch, RefreshIssuedAt: linkEpoch, RelinkDueAt: linkEpoch.Add(linkLifetime),
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -201,7 +201,8 @@ func TestIdPLinksValueFree(t *testing.T) {
 	allowed := map[string]string{
 		"Iss": "issuer URL", "Sub": "subject", "UserKey": "hash of (iss, sub)", "Email": "display address",
 		"SecretKey": "logical key name", "RefreshRef": "secrets.Ref: hash prefix, last4, length",
-		"LastRefreshStatus": "status word",
+		"LastRefreshStatus": "status word", "State": "link state word", "LastErrorCode": "failure class code",
+		"RotationPendingRef": "secrets.Ref of a rotated token: hash prefix, last4, length",
 	}
 	timeT := reflect.TypeOf(time.Time{})
 	rt := reflect.TypeOf(portal.IdPLink{})
@@ -209,7 +210,7 @@ func TestIdPLinksValueFree(t *testing.T) {
 	for i := range rt.NumField() {
 		f := rt.Field(i)
 		switch {
-		case f.Type == timeT, f.Type.Kind() == reflect.Int64:
+		case f.Type == timeT, f.Type.Kind() == reflect.Int64, f.Type.Kind() == reflect.Bool:
 			continue
 		case f.Type.Kind() == reflect.String:
 			if _, ok := allowed[f.Name]; !ok {
@@ -240,7 +241,8 @@ func TestIdPLinksValueFree(t *testing.T) {
 		cols = append(cols, c)
 	}
 	wantCols := []string{"iss", "sub", "user_key", "email", "secret_key", "refresh_ref", "generation", "linked_at",
-		"refresh_issued_at", "relink_due_at", "last_refresh_at", "last_refresh_status", "offboarded_at"}
+		"refresh_issued_at", "relink_due_at", "last_refresh_at", "last_refresh_status", "offboarded_at",
+		"link_state", "last_ok_at", "consecutive_failures", "last_error_code", "rotation_pending_ref", "email_verified"}
 	if !reflect.DeepEqual(cols, wantCols) {
 		t.Fatalf("idp_links columns = %v, want %v (a new column needs this review)", cols, wantCols)
 	}
@@ -573,4 +575,82 @@ func (c cancelOnPut) Put(ctx context.Context, key, value string) error {
 		return ctx.Err()
 	}
 	return c.MemorySecretStore.Put(ctx, key, value)
+}
+
+// TestIdPLinkSetState: SetState is a generation compare-and-swap, so a
+// verdict computed for an older token is dropped once a login moved the
+// generation; a login stores email_verified and resets the refresh record.
+func TestIdPLinkSetState(t *testing.T) {
+	ctx := context.Background()
+	r := newLinkRig(t, fakes.NewMemorySecretStore())
+	l := link(linkToken)
+	l.EmailVerified = true
+	row, err := r.store.Link(ctx, l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !row.EmailVerified || row.State != portal.LinkActive {
+		t.Fatalf("stored row = %+v", row)
+	}
+	st := row.RefreshState()
+	st.State, st.LastErrorCode, st.ConsecutiveFailures = portal.LinkTokenLost, "refresh_invalid", 1
+	if err := r.store.SetState(ctx, linkIss, linkSub, row.Generation, st); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := r.store.Get(ctx, linkIss, linkSub); got.State != portal.LinkTokenLost || got.Generation != row.Generation {
+		t.Fatalf("after SetState = %+v", got)
+	}
+	relogin, err := r.store.Link(ctx, link("rt-relogin-token-0009"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relogin.State != portal.LinkActive || relogin.LastErrorCode != "" || relogin.ConsecutiveFailures != 0 || relogin.EmailVerified {
+		t.Fatalf("re-login row = %+v", relogin)
+	}
+	if err := r.store.SetState(ctx, linkIss, linkSub, row.Generation, st); !errors.Is(err, portal.ErrStaleGeneration) {
+		t.Fatalf("stale SetState = %v", err)
+	}
+	if got, _ := r.store.Get(ctx, linkIss, linkSub); got.State != portal.LinkActive {
+		t.Fatalf("a stale verdict landed: %+v", got)
+	}
+	if r.store.Ref(linkToken) != secrets.Ref(linkToken).String() {
+		t.Fatal("Ref differs from secrets.Ref")
+	}
+}
+
+// TestIdPLinkAdopt: Adopt takes over a stored token only when it is the
+// pending rotation the row names; a consistent row is returned unchanged and
+// any other stored value is ErrLinkInconsistent.
+func TestIdPLinkAdopt(t *testing.T) {
+	ctx := context.Background()
+	mem := fakes.NewMemorySecretStore()
+	r := newLinkRig(t, mem)
+	row, err := r.store.Link(ctx, link(linkToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.store.Adopt(ctx, linkIss, linkSub); err != nil || got != row {
+		t.Fatalf("Adopt of a consistent row = %+v, %v", got, err)
+	}
+	const rotated = "rt-rotated-token-value-0010"
+	sk := "idp/" + userKey(t)
+	if err := mem.Put(ctx, sk, rotated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.store.Adopt(ctx, linkIss, linkSub); !errors.Is(err, portal.ErrLinkInconsistent) {
+		t.Fatalf("Adopt without a pending marker = %v, want ErrLinkInconsistent", err)
+	}
+	st := row.RefreshState()
+	st.RotationPendingRef = secrets.Ref(rotated).String()
+	if err := r.store.SetState(ctx, linkIss, linkSub, row.Generation, st); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.store.Adopt(ctx, linkIss, linkSub)
+	if err != nil || got.Generation != row.Generation+1 || got.RefreshRef != secrets.Ref(rotated).String() || got.RotationPendingRef != "" {
+		t.Fatalf("Adopt = %+v, %v", got, err)
+	}
+	if tok, stored, err := r.store.TokenAt(ctx, linkIss, linkSub); err != nil || tok != rotated || stored.Generation != got.Generation {
+		t.Fatalf("TokenAt after Adopt = %v, %+v", err, stored)
+	}
+	r.noTokenInLogs(t, rotated)
 }

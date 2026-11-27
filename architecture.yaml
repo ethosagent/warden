@@ -137,6 +137,7 @@ classes:
       - internal/workerca         # worker CA issue/verify, SPIFFE worker ids: pure, x509 creation injected (#88)
       - internal/apikeys   # scoped CP API keys: wak_ format, scope registry, Store port, Index (APIK-01)
       - internal/portal   # consent portal domain: Principal, Blocklist/LinkWriter ports, admission and next rules (CSIG-02)
+      - internal/offboard   # offboarding domain: the IdP refresh job, its LinkStore/TokenClient ports and classification (OFFB-02)
 
   # DEVTOOL — developer tooling; no Warden package may import it. Exempt from
   # layering but not from the global X rules.
@@ -206,6 +207,8 @@ zones:
     - internal/webauth/**   # CP-only browser sign-in and its test fake (#276)
     - internal/portal   # CP-only consent portal domain (CSIG-02)
     - internal/portal/adapters/**   # the SQLite idp_links store (CSIG-03)
+    - internal/offboard   # CP-only offboarding domain (OFFB-02)
+    - internal/offboard/adapters/**   # the OIDC refresh_token client over the shared OIDC HTTP client (OFFB-02)
   shared:
     - internal/config
     - internal/denyreason

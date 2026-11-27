@@ -115,7 +115,9 @@ type Blocklist interface {
 // LogValue leave it out.
 type Link struct {
 	Iss, Sub, Email string
-	RefreshToken    string
+	// EmailVerified is the ID token's email_verified claim.
+	EmailVerified bool
+	RefreshToken  string
 }
 
 // String renders the link without its token.

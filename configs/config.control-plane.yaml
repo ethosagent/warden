@@ -139,6 +139,16 @@ logging:
 #  idpLink:
 #    enabled: true                          # request offline_access, keep the refresh token
 #    refreshLifetime: 720h                  # Dex expiry.refreshTokens.absoluteLifetime
+#  # IdP refresh job (docs/control-plane.md "Offboarding refresh job"). off builds
+#  # nothing; observe refreshes each stored token and records link state only;
+#  # enforce behaves as observe until offboarding enforcement ships.
+#  offboarding:
+#    mode: off                              # off | observe | enforce
+#    interval: 1h                           # 5m-24h, below Dex validIfNotUsedFor (168h)
+#    concurrency: 4
+#    requestTimeout: 10s
+#    maxFailures: 3
+#    reauthWarning: 72h                     # expiring this long before relink_due_at
 #  # CP-only user credential store (docs/control-plane.md "CP-only user credential
 #  # store"). No worker ever gets a credential for it; its namePrefix must not overlap
 #  # secretStore.aws.namePrefix. Credentials come from the CP environment or role only.
