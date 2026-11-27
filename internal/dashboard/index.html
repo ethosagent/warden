@@ -2416,9 +2416,17 @@ function renderUsage(d){
 async function loadUsage(){
   const w=document.getElementById('usageWindow'), so=document.getElementById('usageSort');
   const q='window='+encodeURIComponent(w?w.value:'7d')+'&sort='+encodeURIComponent(so?so.value:'cost');
-  let d=null;
-  try{ d=await jget('/dashboard/api/usage/users?'+q); }catch(e){ d=null; }
-  renderUsage(d||{users:[]});
+  const note=document.getElementById('usage-note');
+  let r=null, d=null;
+  try{ r=await api('GET','/dashboard/api/usage/users?'+q); if(r.ok) d=await r.json(); }catch(e){ r=null; }
+  if(!d){
+    let code=r?('status '+r.status):'no response';
+    if(r){ try{ const j=await r.json(); if(j&&j.error) code=j.error; }catch(e){} }
+    renderUsage({users:[]});
+    if(note){ note.textContent='Usage is unavailable: '+code; note.style.display=''; }
+    return;
+  }
+  renderUsage(d);
 }
 /* A worker enforces the block list only when its heartbeat advertised blocklist/v1. */
 function hasBlockCap(w){ return Array.isArray(w.caps)&&w.caps.indexOf('blocklist/v1')>=0; }

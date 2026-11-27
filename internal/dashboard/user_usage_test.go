@@ -213,20 +213,67 @@ func TestUserUsage_SortLimitAndCache(t *testing.T) {
 		t.Errorf("sort=requests limit=1 = %+v", b.Users)
 	}
 
-	// Cached 30s per (window, sort, limit); a fresh key and an expired entry recompute.
+	// Cached 30s per window: sort and limit are applied per request over the
+	// cached list; a new window and an expired entry recompute.
 	if err := e.store.StoreEvent(analytics.Event{Timestamp: usageNow, Domain: "d", Decision: "allow", UserSub: "carol"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, c := e.get("?sort=requests&limit=1"); len(c.Users) != 1 || c.Users[0].Sub != "bob" {
-		t.Errorf("cached read changed: %+v", c.Users)
+	if _, c := e.get("?sort=requests&limit=50"); len(c.Users) != 2 || c.Users[0].Sub != "bob" {
+		t.Errorf("cached read changed or lost its sort: %+v", c.Users)
 	}
-	if _, c := e.get("?sort=cost&limit=50"); len(c.Users) != 3 {
-		t.Errorf("fresh key must see carol: %+v", c.Users)
+	if _, c := e.get("?window=24h&limit=50"); len(c.Users) != 3 {
+		t.Errorf("a fresh window must see carol: %+v", c.Users)
 	}
 	adv := usageNow.Add(31 * time.Second)
 	e.srv.now = func() time.Time { return adv }
 	if _, c := e.get("?sort=cost"); len(c.Users) != 3 {
 		t.Errorf("expired entry must recompute: %+v", c.Users)
+	}
+}
+
+// from is the UTC day start the stores use, not the raw now-minus-window.
+func TestUserUsage_FromIsDayStart(t *testing.T) {
+	e := newUsageEnv(t, config.Policy{})
+	_, b := e.get("?window=24h")
+	if b.From != "2026-11-26T00:00:00Z" || b.To != "2026-11-27T10:00:00Z" {
+		t.Errorf("from/to = %s / %s", b.From, b.To)
+	}
+}
+
+// A user under two rules: the capped rule that is over its cap is shown and
+// atLimit is true even though an uncapped rule has more spend.
+func TestUserUsage_TwoRules(t *testing.T) {
+	pol := config.Policy{UserLimits: []config.UserLimit{{Name: "capped", DailyCostUSD: 1}, {Name: "free"}}}
+	e := newUsageEnv(t, pol)
+	var evs []analytics.Event
+	evs = append(evs,
+		analytics.Event{Timestamp: usageNow, Domain: "d", Decision: "allow", UserSub: "dana", AgentID: "a", LimitRule: "capped", CostUSD: 1.5},
+		analytics.Event{Timestamp: usageNow, Domain: "d", Decision: "allow", UserSub: "dana", AgentID: "a", LimitRule: "free", CostUSD: 3})
+	if err := e.store.StoreEventsBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	_, b := e.get("")
+	for _, u := range b.Users {
+		if u.Sub != "dana" {
+			continue
+		}
+		if u.LimitRule != "capped" || u.CapUSD != 1 || u.TodayCostUSD != 1.5 || !u.AtLimit {
+			t.Errorf("dana = %+v, want rule capped, cap 1, today 1.5, atLimit", u)
+		}
+		return
+	}
+	t.Fatal("dana missing")
+}
+
+// With no SetUsagePolicy, the live policy (SetLivePolicy) is the source.
+func TestUserUsage_LivePolicyFallback(t *testing.T) {
+	e := newUsageEnv(t, config.Policy{})
+	e.srv.SetLivePolicy(func() config.Policy {
+		return config.Policy{UserLimits: []config.UserLimit{{Name: "eng", DailyCostUSD: 1}}}
+	})
+	_, b := e.get("")
+	if a := b.Users[0]; a.Sub != "alice" || a.CapUSD != 1 || !a.AtLimit {
+		t.Errorf("alice = %+v, want cap 1 from the live policy", a)
 	}
 }
 
@@ -278,6 +325,9 @@ func TestUserUsage_EscapesEmail(t *testing.T) {
 		if strings.Contains(fn, bad) {
 			t.Errorf("renderUsage uses %s", bad)
 		}
+	}
+	if !strings.Contains(page[end:end+1200], "Usage is unavailable") {
+		t.Error("loadUsage must surface the error code instead of an empty list")
 	}
 	if !strings.Contains(fn, "textContent") || !strings.Contains(fn, "drillToUser") {
 		t.Error("renderUsage must use textContent and offer the drill-down")

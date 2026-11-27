@@ -134,26 +134,58 @@ func (s *Server) handleUserUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The payload is a pure function of window, sort and limit (plus the
-	// store, the served policy and the clock), so those are the whole key; NUL
-	// cannot occur in any of them.
-	key := window + "\x00" + sortBy + "\x00" + strconv.Itoa(limit)
+	// The expensive part is a pure function of the window (plus the store, the
+	// served policy and the clock), so the cache holds the unsorted full list
+	// per window; sort and limit are applied per request.
 	now := s.now()
-	body, err := s.userUsageCache.getOrCompute(key, now, userUsageCacheTTL, func() ([]byte, error) {
-		return s.computeUserUsage(r.Context(), uq, window, span, sortBy, limit, now)
+	body, err := s.userUsageCache.getOrCompute(window, now, userUsageCacheTTL, func() ([]byte, error) {
+		return s.computeUserUsage(r.Context(), uq, window, span, now)
 	})
 	if err != nil {
 		// The error can name a store path or SQL; never echo it.
 		writeError(w, http.StatusInternalServerError, "usage_query_failed")
 		return
 	}
-	writeJSONBytes(w, body)
+	var resp userUsageResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		writeError(w, http.StatusInternalServerError, "usage_query_failed")
+		return
+	}
+	sort.SliceStable(resp.Users, func(i, j int) bool {
+		a, b := resp.Users[i], resp.Users[j]
+		if sortBy == "requests" && a.Requests != b.Requests {
+			return a.Requests > b.Requests
+		}
+		return a.CostUSD > b.CostUSD
+	})
+	if len(resp.Users) > limit {
+		resp.Users = resp.Users[:limit]
+	}
+	out, err := marshalJSONLine(resp)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "usage_query_failed")
+		return
+	}
+	writeJSONBytes(w, out)
 }
 
-func (s *Server) computeUserUsage(ctx context.Context, uq analytics.UserUsageQuerier, window string, span time.Duration, sortBy string, limit int, now time.Time) ([]byte, error) {
-	from := now.Add(-span)
-	// Fetch every user the store will return and order and cut here, so
-	// sort=requests ranks the whole window rather than the top spenders.
+// usagePolicyNow is the policy the usage view reads rules and blocks from:
+// the control plane's served view, else the live policy, else the startup one.
+func (s *Server) usagePolicyNow() config.Policy {
+	switch {
+	case s.usagePolicy != nil:
+		return s.usagePolicy()
+	case s.livePolicy != nil:
+		return s.livePolicy()
+	}
+	return s.policy
+}
+
+func (s *Server) computeUserUsage(ctx context.Context, uq analytics.UserUsageQuerier, window string, span time.Duration, now time.Time) ([]byte, error) {
+	// The stores are day-granular: the window starts at the UTC day of now-span.
+	from := now.Add(-span).UTC().Truncate(24 * time.Hour)
+	// The store returns its top MaxUsageUsers by cost; sort=requests ranks
+	// within that pre-cut.
 	usage, err := uq.UsageByUser(ctx, from, now, analytics.MaxUsageUsers)
 	if err != nil {
 		return nil, err
@@ -163,21 +195,11 @@ func (s *Server) computeUserUsage(ctx context.Context, uq analytics.UserUsageQue
 	if err != nil {
 		return nil, err
 	}
-	// Per user: the rule it spent most under today.
-	type ruleCost struct {
-		rule string
-		cost float64
-	}
-	topRule := map[string]ruleCost{}
+	pol := s.usagePolicyNow()
+	caps := ruleCaps(pol)
+	costsBySub := map[string][]analytics.UserRuleCost{}
 	for _, c := range todayCosts {
-		if cur, ok := topRule[c.Sub]; !ok || c.CostUSD > cur.cost {
-			topRule[c.Sub] = ruleCost{c.Rule, c.CostUSD}
-		}
-	}
-
-	pol := s.policy
-	if s.usagePolicy != nil {
-		pol = s.usagePolicy()
+		costsBySub[c.Sub] = append(costsBySub[c.Sub], c)
 	}
 	blocked := map[string]bool{}
 	for _, b := range pol.CostBlockedUsers {
@@ -188,7 +210,7 @@ func (s *Server) computeUserUsage(ctx context.Context, uq analytics.UserUsageQue
 
 	resp := userUsageResponse{
 		Window: window,
-		From:   from.UTC().Format(time.RFC3339),
+		From:   from.Format(time.RFC3339),
 		To:     now.UTC().Format(time.RFC3339),
 		Users:  []userUsageUser{},
 	}
@@ -211,32 +233,8 @@ func (s *Server) computeUserUsage(ctx context.Context, uq analytics.UserUsageQue
 			}
 			out.TopAgents = append(out.TopAgents, userUsageAgent{AgentID: a.AgentID, Requests: a.Requests, CostUSD: a.CostUSD})
 		}
-		if rc, ok := topRule[u.Sub]; ok {
-			out.LimitRule, out.TodayCostUSD = rc.rule, rc.cost
-		} else {
-			for _, ru := range u.Rules {
-				if ru.Rule != "" && ru.Rule != analytics.AnonymousLimitRule {
-					out.LimitRule = ru.Rule
-					break
-				}
-			}
-		}
-		out.CapUSD = ruleCap(pol, out.LimitRule)
-		out.AtLimit = out.CapUSD > 0 && out.TodayCostUSD >= out.CapUSD
+		pickUserRule(&out, u, costsBySub[u.Sub], caps)
 		resp.Users = append(resp.Users, out)
-	}
-	sort.SliceStable(resp.Users, func(i, j int) bool {
-		a, b := resp.Users[i], resp.Users[j]
-		if sortBy == "requests" {
-			if a.Requests != b.Requests {
-				return a.Requests > b.Requests
-			}
-			return a.CostUSD > b.CostUSD
-		}
-		return a.CostUSD > b.CostUSD
-	})
-	if len(resp.Users) > limit {
-		resp.Users = resp.Users[:limit]
 	}
 	if s.costBlockStatus != nil {
 		st := s.costBlockStatus()
@@ -249,28 +247,58 @@ func (s *Server) computeUserUsage(ctx context.Context, uq analytics.UserUsageQue
 	return append(b, '\n'), nil
 }
 
-// ruleCap is the dailyCostUSD of the named rule in pol; 0 (no cap) when the
-// rule is empty or no longer configured. "default" and "anonymous" name the
-// two single rules, as they do in costBlockedUsers and on events.
-func ruleCap(pol config.Policy, name string) float64 {
-	switch name {
-	case "":
-		return 0
-	case "default":
-		if pol.DefaultUserLimit != nil {
-			return pol.DefaultUserLimit.DailyCostUSD
+// pickUserRule fills a user's limit rule, cap, today's cost and atLimit from
+// today's spend per rule. A user can fall under several rules; the one shown
+// is the capped rule closest to (or furthest over) its cap, else the rule with
+// the most spend today, else the first named rule in the window. atLimit is
+// true when ANY capped rule is at or over its cap.
+func pickUserRule(out *userUsageUser, u analytics.UserUsage, today []analytics.UserRuleCost, caps map[string]float64) {
+	bestRatio, bestCost := -1.0, -1.0
+	var capRule, spendRule string
+	var capCost, spendCost float64
+	for _, c := range today {
+		if cp := caps[c.Rule]; cp > 0 {
+			if c.CostUSD >= cp {
+				out.AtLimit = true
+			}
+			if ratio := c.CostUSD / cp; ratio > bestRatio {
+				bestRatio, capRule, capCost = ratio, c.Rule, c.CostUSD
+			}
 		}
-		return 0
-	case analytics.AnonymousLimitRule:
-		if pol.AnonymousLimit != nil {
-			return pol.AnonymousLimit.DailyCostUSD
+		if c.CostUSD > bestCost {
+			bestCost, spendRule, spendCost = c.CostUSD, c.Rule, c.CostUSD
 		}
-		return 0
 	}
+	switch {
+	case capRule != "":
+		out.LimitRule, out.TodayCostUSD = capRule, capCost
+	case spendRule != "":
+		out.LimitRule, out.TodayCostUSD = spendRule, spendCost
+	default:
+		for _, ru := range u.Rules {
+			if ru.Rule != "" && ru.Rule != config.UserLimitNameAnonymous {
+				out.LimitRule = ru.Rule
+				break
+			}
+		}
+	}
+	out.CapUSD = caps[out.LimitRule]
+}
+
+// ruleCaps maps each rule name with a dailyCostUSD to its cap; the two single
+// rules use their reserved names, as they do on events and in costBlockedUsers.
+func ruleCaps(pol config.Policy) map[string]float64 {
+	caps := map[string]float64{}
 	for _, r := range pol.UserLimits {
-		if r.Name == name {
-			return r.DailyCostUSD
+		if r.DailyCostUSD > 0 {
+			caps[r.Name] = r.DailyCostUSD
 		}
 	}
-	return 0
+	if l := pol.DefaultUserLimit; l != nil && l.DailyCostUSD > 0 {
+		caps[config.UserLimitNameDefault] = l.DailyCostUSD
+	}
+	if l := pol.AnonymousLimit; l != nil && l.DailyCostUSD > 0 {
+		caps[config.UserLimitNameAnonymous] = l.DailyCostUSD
+	}
+	return caps
 }

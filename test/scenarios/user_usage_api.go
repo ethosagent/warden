@@ -8,8 +8,8 @@ import (
 	"github.com/ethosagent/warden/test/harness"
 )
 
-// userUsageAPI proves W-P3-PUL-05 end to end: events a worker forwards reach
-// the control plane's real ingest, the per-user daily rollup (W-P3-PUL-07)
+// userUsageAPI proves W-P3-PUL-05 end to end: events handed straight to the
+// control plane's ingest (no worker proxy drives them), the per-user daily rollup (W-P3-PUL-07)
 // totals them, and GET /dashboard/api/usage/users returns the per-user
 // requests, denies by reason, estimated cost and the anonymous bucket.
 func userUsageAPI(t *testing.T, h *harness.H) {
