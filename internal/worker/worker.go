@@ -262,6 +262,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		logger.Info("audit.jsonLog.output is stdout: operational logs moved to stderr so stdout carries only warden.decision.v1 lines")
 	}
 	logger.Info("effective listener config", eff.LogArgs()...)
+	// Per-user limit lint (W-P3-PUL-01): the effective CA, not just the YAML one.
+	limitsPol := pol
+	limitsPol.TLS.CACert = caCert
+	for _, msg := range config.LintUserLimits(limitsPol) {
+		logger.Warn(msg)
+	}
 
 	// Optional upstream DNS override (dns.upstreamResolver). When set, warden's
 	// OWN upstream dials — the proxy's CONNECT tunnels and TLS-terminated
