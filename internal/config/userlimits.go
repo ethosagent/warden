@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethosagent/warden/internal/agentid"
@@ -109,8 +110,21 @@ func copyUserLimits(in []UserLimit) []UserLimit {
 
 // allowUnenforcedUserLimits lifts the not-yet-enforced guard. It is false in
 // production; W-P3-PUL-09 (rateLimit) and W-P3-PUL-04 (dailyCostUSD) replace
-// the guard with the real enforcement. Tests set it to exercise the wire.
-var allowUnenforcedUserLimits = false
+// the guard with the real enforcement. Tests set it to exercise the wire. It
+// is atomic because a test in another package lifts it while background
+// reloads of earlier tests may still be reading it.
+var allowUnenforcedUserLimits atomic.Bool
+
+// LiftUserLimitsGuardForTesting lifts the not-yet-enforced guard until t's
+// cleanup runs. It is for tests in other packages (the control plane's cost
+// block and capability gate tests, W-P3-PUL-08) that must hold a dailyCostUSD
+// rule before the enforcing tickets remove the guard; production code never
+// calls it. Tests that use it must not run in parallel with tests expecting
+// the guard.
+func LiftUserLimitsGuardForTesting(t interface{ Cleanup(func()) }) {
+	allowUnenforcedUserLimits.Store(true)
+	t.Cleanup(func() { allowUnenforcedUserLimits.Store(false) })
+}
 
 // NormalizeUserLimits normalizes and validates the per-user limit rules in p:
 // userLimits, defaultUserLimit and anonymousLimit. Users, groups, agents and
@@ -280,7 +294,7 @@ func sortDedup(in []string) []string {
 // rate limits and W-P3-PUL-04 enforces cost caps, a config that carries a
 // rule would be silently ignored, so it is refused instead.
 func unenforcedUserLimits(p Policy) error {
-	if allowUnenforcedUserLimits {
+	if allowUnenforcedUserLimits.Load() {
 		return nil
 	}
 	switch {

@@ -300,6 +300,11 @@ type Server struct {
 	// blocks is the user block list store; nil without State (and then no
 	// blocked_users overlay is registered).
 	blocks *BlockStore
+	// userCost publishes fleet cost blocks (W-P3-PUL-08); nil with the memory
+	// analytics provider.
+	userCost *userCostAggregator
+	// userCostOffWarn makes the memory-provider warning one line per process.
+	userCostOffWarn sync.Once
 	// agents is the agent registry; nil without State or Config.AgentStore, in
 	// which case the agent routes answer 503 state_dir_required.
 	agents       agentreg.Store
@@ -473,6 +478,7 @@ func New(cfg Config) *Server {
 	s.initBlockStore()
 	s.initAgentStore()
 	s.registerAgentOverlay()
+	s.initUserCost() // last overlay: it sizes the list against the rest of the body
 	s.initApprovals()
 	s.gate = approvals.NewGate(s.cfg.Console.Approvals.Enabled, s.approvals)
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
@@ -539,6 +545,9 @@ func New(cfg Config) *Server {
 // policy file (editor edits refresh synchronously). It also starts the retention
 // prune loop when the store supports it. It returns when ctx is done.
 func (s *Server) Start(ctx context.Context) {
+	// Fleet cost blocks are rebuilt from the rollup before Start returns, so
+	// the first long-poll after a restart carries them (Run serves after).
+	s.startUserCost(ctx)
 	if s.approvals != nil {
 		go s.sweepApprovals(ctx)
 	}
@@ -707,9 +716,20 @@ func (s *Server) Handler() http.Handler {
 	// publishes), and (2) the event→Finding bridge publishes immediate block/reason
 	// Findings onto the CURRENT manager's bus (a reload may have swapped it). Both
 	// nil-safe; fail-open.
+	// The fleet cost aggregator (W-P3-PUL-08) schedules a debounced recompute
+	// from the same hook.
+	var onEvents []func(string, []analytics.Event)
 	if s.integrationsStore != nil {
+		onEvents = append(onEvents, s.pipeline.Observe)
+	}
+	if s.userCost != nil {
+		onEvents = append(onEvents, s.userCost.onEvents)
+	}
+	if len(onEvents) > 0 {
 		ingest.SetOnEvents(func(proxyID string, events []analytics.Event) {
-			s.pipeline.Observe(proxyID, events)
+			for _, fn := range onEvents {
+				fn(proxyID, events)
+			}
 		})
 	}
 	mux.Handle("/central/ingest", ingestAuthErrors(ingest))
@@ -1107,7 +1127,14 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 		_ = yaml.Unmarshal(cur, &root)
 	}
 
+	prev := policyYAMLFromRoot(root)
 	if err := renderPolicyEdit(root, p); err != nil {
+		return err
+	}
+	next := policyYAMLFromRoot(root)
+	if err := s.costCapGuard(ctx,
+		userLimitCaps(prev.UserLimits, prev.DefaultUserLimit, prev.AnonymousLimit),
+		userLimitCaps(next.UserLimits, next.DefaultUserLimit, next.AnonymousLimit)); err != nil {
 		return err
 	}
 

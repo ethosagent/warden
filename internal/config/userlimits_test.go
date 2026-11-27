@@ -227,8 +227,7 @@ func TestUserLimitsGuard_NotYetEnforced(t *testing.T) {
 // With the guard lifted by the test hook, the rules load from YAML and
 // round-trip through the wire decoder.
 func TestUserLimits_LoadAndWireRoundTrip(t *testing.T) {
-	allowUnenforcedUserLimits = true
-	t.Cleanup(func() { allowUnenforcedUserLimits = false })
+	LiftUserLimitsGuardForTesting(t)
 
 	prov, err := NewLocalYAMLProvider(writeTemp(t, `
 policy:
@@ -266,7 +265,7 @@ policy:
 		t.Fatalf("err = %v", err)
 	}
 	// With the guard back on, the same wire is refused whole.
-	allowUnenforcedUserLimits = false
+	allowUnenforcedUserLimits.Store(false)
 	if _, _, err := parseRemotePolicy([]byte(wire)); err == nil || !strings.Contains(err.Error(), "not yet enforced") {
 		t.Fatalf("guard not applied on the wire: %v", err)
 	}
@@ -327,8 +326,7 @@ func TestNormalizeUserLimits_DeepCopyThenLoad(t *testing.T) {
 		t.Fatalf("original mutated: %+v", orig.UserLimits[0])
 	}
 	// The YAML loader and the wire decoder both produce the normalized form.
-	allowUnenforcedUserLimits = true
-	t.Cleanup(func() { allowUnenforcedUserLimits = false })
+	LiftUserLimitsGuardForTesting(t)
 	prov, err := NewLocalYAMLProvider(writeTemp(t, "policy:\n  allowlist: [{domain: a.com}]\n  userLimits: [{name: a, rateLimit: 1/second, match: {groups: [b, a, a]}}]\n  anonymousLimit: {rateLimit: 1/second}\n"))
 	if err != nil {
 		t.Fatal(err)
