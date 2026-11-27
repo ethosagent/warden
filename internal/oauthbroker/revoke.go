@@ -303,7 +303,8 @@ func (p *Provider) githubNotFound(body []byte) bool {
 		return false
 	}
 	rh, th := ru.Hostname(), tu.Hostname()
-	if !strings.EqualFold(rh, th) && !(strings.EqualFold(th, "github.com") && strings.EqualFold(rh, "api.github.com")) {
+	builtin := strings.EqualFold(th, "github.com") && strings.EqualFold(rh, "api.github.com")
+	if !strings.EqualFold(rh, th) && !builtin {
 		return false
 	}
 	var e struct {
