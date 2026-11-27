@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -184,7 +183,7 @@ func (p *Provider) revoke(ctx context.Context, rec TokenRecord, secret Secret) (
 	}
 
 	var req Request
-	req.Method, req.URL = http.MethodPost, endpoint
+	req.Method, req.URL = "POST", endpoint
 	switch p.Type {
 	case config.OAuthProviderGoogle:
 		tok := firstNonEmpty(rec.RefreshToken, rec.AccessToken)
@@ -203,7 +202,7 @@ func (p *Provider) revoke(ctx context.Context, rec TokenRecord, secret Secret) (
 		if mErr != nil {
 			return fail(0)
 		}
-		req.Method, req.Body, req.ContentType = http.MethodDelete, b, "application/json"
+		req.Method, req.Body, req.ContentType = "DELETE", b, "application/json"
 		req.Accept = "application/vnd.github+json"
 		req.BasicUser, req.BasicPass = p.ClientID, secret.Reveal()
 	default: // generic, RFC 7009
@@ -239,13 +238,13 @@ func (p *Provider) revoke(ctx context.Context, rec TokenRecord, secret Secret) (
 		body = body[:MaxRevokeResponseBytes]
 	}
 	switch {
-	case status == http.StatusTooManyRequests || status >= 500:
+	case status == 429 || status >= 500:
 		return status, RevokeRetryable, &RevokeError{Provider: p.ID, Status: status, Retryable: true}
 	case status >= 200 && status < 300:
 		return status, RevokeOK, nil
-	case status == http.StatusNotFound && p.Type != config.OAuthProviderGoogle && p.Type != config.OAuthProviderGeneric:
+	case status == 404 && p.Type != config.OAuthProviderGoogle && p.Type != config.OAuthProviderGeneric:
 		return status, RevokeAlready, nil
-	case status == http.StatusBadRequest && p.Type != config.OAuthProviderGitHub && p.Type != config.OAuthProviderGitHubApp:
+	case status == 400 && p.Type != config.OAuthProviderGitHub && p.Type != config.OAuthProviderGitHubApp:
 		var e struct {
 			Error string `json:"error"`
 		}
