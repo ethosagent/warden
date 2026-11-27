@@ -179,6 +179,17 @@ func (o *OfflinePolicyStore) Import(ctx context.Context, doc PolicyDoc, msg stri
 		if err := o.checkCredential(doc); err != nil {
 			return PolicyImportResult{}, err
 		}
+		// The running CP serves this head to workers: it must keep the
+		// identity.issuer binding the CP checks at startup and on every write.
+		if c, err := config.LoadConsent(o.servedPath); err == nil && c.Enabled {
+			var id *config.IdentitySettings
+			if doc.wire.Settings != nil {
+				id = doc.wire.Settings.Identity
+			}
+			if err := consentIssuerBinding(&c, id); err != nil {
+				return PolicyImportResult{}, fmt.Errorf("policy file %s: %w", doc.path, err)
+			}
+		}
 	}
 	if expectedHead < 0 {
 		head, err := o.st.Head(ctx)

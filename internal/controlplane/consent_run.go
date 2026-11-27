@@ -68,17 +68,23 @@ func resolveConsent(logger *slog.Logger, configPath, servedPath, stateDir string
 // consent is off. The error is a *dashboard.IssuerMismatchError (400
 // identity_issuer_mismatch).
 func (s *Server) checkConsentIssuer(id *config.IdentitySettings) error {
-	if s.cfg.Consent == nil {
+	return consentIssuerBinding(s.cfg.Consent, id)
+}
+
+// consentIssuerBinding is the pure form of checkConsentIssuer, shared with the
+// offline policy import (which has no Server).
+func consentIssuerBinding(consent *config.ConsentConfig, id *config.IdentitySettings) error {
+	if consent == nil {
 		return nil
 	}
 	got := ""
 	if id != nil {
 		got = id.Issuer
 	}
-	if got != "" && sameIssuer(s.cfg.Consent.OIDC.Issuer, got) {
+	if got != "" && sameIssuer(consent.OIDC.Issuer, got) {
 		return nil
 	}
-	return &dashboard.IssuerMismatchError{Err: fmt.Errorf("identity.issuer %q must equal consent.oidc.issuer %q while consent is enabled", got, s.cfg.Consent.OIDC.Issuer)}
+	return &dashboard.IssuerMismatchError{Err: fmt.Errorf("identity.issuer %q must equal consent.oidc.issuer %q while consent is enabled", got, consent.OIDC.Issuer)}
 }
 
 // checkIssuerBindings runs the two identity.issuer guards (the token-service

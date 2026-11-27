@@ -68,9 +68,10 @@ func TestConsentIssuerBindingNilIdentity(t *testing.T) {
 		c := fullConsent()
 		cfg.Consent = &c
 		srv := New(cfg)
+		before := readFile(t, cfg.PolicyPath)
 		wantMismatch(t, "nil identity", srv.writeSettings(config.SettingsWire{}))
-		if strings.Contains(readFile(t, cfg.PolicyPath), "identity_issuer_mismatch") {
-			t.Fatal("served file touched")
+		if after := readFile(t, cfg.PolicyPath); after != before {
+			t.Fatalf("served file changed by a refused write:\n%s\nvs\n%s", before, after)
 		}
 		if err := srv.writeSettings(config.SettingsWire{Identity: matchingIdentity()}); err != nil {
 			t.Fatalf("matching identity rejected: %v", err)
@@ -190,10 +191,63 @@ func TestConsentIssuerHeadChecked(t *testing.T) {
 	t.Setenv("WARDEN_CONSOLE_SECRET", "console-secret")
 	t.Setenv("WARDEN_PORTAL_DEX_CLIENT_SECRET", "portal-secret")
 	err = bootErr(t, Params{ConfigPath: cfg, StateDir: stateDir, PolicyStore: PolicyStoreVersioned})
-	if !strings.Contains(err.Error(), "identity_issuer_mismatch") && !strings.Contains(err.Error(), "consent.oidc.issuer") {
+	if !strings.Contains(err.Error(), "--policy-store=versioned: the head policy breaks an identity.issuer binding") {
 		t.Fatalf("Run err = %v, want the head issuer mismatch", err)
 	}
 	if strings.Contains(err.Error(), "portal-secret") {
 		t.Error("error carries the secret value")
+	}
+}
+
+// TestConsentIssuerOfflineImport: `warden policy import` (OfflinePolicyStore.Import)
+// refuses a doc whose identity.issuer breaks the consent binding recorded in
+// the state dir's served config, and accepts a matching one.
+func TestConsentIssuerOfflineImport(t *testing.T) {
+	stateDir := t.TempDir()
+	served := filepath.Join(stateDir, "config.yaml")
+	if err := os.WriteFile(served, []byte(readFile(t, consentPolicyFile(t, ""))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Create the store as a CP of this build would, then close it.
+	db, err := cpstate.Open(context.Background(), filepath.Join(stateDir, "warden-cp.db"), StateMigrations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	write := func(identity string) string {
+		p := filepath.Join(t.TempDir(), "policy.yaml")
+		if err := os.WriteFile(p, []byte(readFile(t, writePolicyFile(t, "api.openai.com"))+identity), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	open := func() *OfflinePolicyStore {
+		o, err := OpenPolicyStore(context.Background(), stateDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = o.Close() })
+		return o
+	}
+	o := open()
+	for name, identity := range map[string]string{"other issuer": otherIssuerDoc, "no identity block": ""} {
+		doc, err := ValidatePolicyDocFile(write(identity))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = o.Import(context.Background(), doc, "", -1, nil)
+		wantMismatch(t, name, err)
+		if h, _ := o.Head(context.Background()); h != 0 {
+			t.Fatalf("%s: head = %d after a refused import, want 0", name, h)
+		}
+	}
+	doc, err := ValidatePolicyDocFile(write(identityBlockYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := o.Import(context.Background(), doc, "", -1, nil); err != nil || !res.Changed {
+		t.Fatalf("matching import = %+v, %v", res, err)
 	}
 }
