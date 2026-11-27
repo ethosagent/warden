@@ -30,6 +30,7 @@ func TestCheckSecretsScript(t *testing.T) {
 		{name: "bindpw_literal", files: map[string]string{dexDir + "b.yaml": "bindPW: hunter2\n"}, wantErr: dexDir + "b.yaml:1", secret: "hunter2"},
 		{name: "clientsecret_literal", files: map[string]string{"deploy/compose/docker-compose.identity.yml": "services:\n  a:\n    clientSecret: x\n"}, wantErr: "deploy/compose/docker-compose.identity.yml:3", secret: "clientSecret: x"},
 		{name: "quoted_literal", files: map[string]string{dexDir + "a.yaml": "secret: \"abc\"\n"}, wantErr: dexDir + "a.yaml:1", secret: "abc"},
+		{name: "portal_client_literal", files: map[string]string{dexDir + "config.yaml": "staticClients:\n  - id: warden-portal\n    secret: abc\n"}, wantErr: dexDir + "config.yaml:3", secret: "abc"},
 		{name: "scan_paths_env", files: map[string]string{"deploy/compose/other/a.yaml": "secret: abc\n"}, env: []string{"SECRET_SCAN_PATHS=deploy/compose/other"}, wantErr: "deploy/compose/other/a.yaml:1", secret: "abc"},
 	}
 	script := filepath.Join(repoRoot(t), "scripts", "check-secrets.sh")

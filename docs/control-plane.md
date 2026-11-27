@@ -906,6 +906,49 @@ runs in the background with backoff, so an unreachable IdP never blocks startup 
 one `console_login` line (`result`, `reason`, `sub`, `duration_ms`), never a code, state,
 verifier, nonce or token.
 
+## Consent sign-in config (`consent:`)
+
+The `consent:` block configures the employee consent portal's sign-in: a
+dedicated `warden-portal` OIDC client, separate from the console's. Like
+`console:` it is control-plane-local: read from `--config` only (never the
+served copy under `--state-dir`, where a different block is ignored with a
+warning), never sent to workers, and kept byte-identical by the dashboard
+writers. An absent block or `enabled: false` changes nothing and mounts no
+route. This section covers the config surface; the portal routes arrive in
+later tickets of the consent sign-in feature.
+
+```yaml
+consent:
+  enabled: true
+  oidc:
+    issuer: https://idp.example.com        # must equal identity.issuer
+    clientID: warden-portal                # default
+    clientSecretEnv: WARDEN_PORTAL_DEX_CLIENT_SECRET   # env var NAME, never the secret
+    redirectURL: https://warden.example.com/portal/callback  # path exactly /portal/callback
+    # internalIssuerURL: http://dex:5556   # development split-horizon only
+  allowedGroups: []                        # empty: any user of the issuer
+  session:
+    idle: 30m                              # 0 < idle <= absolute <= 24h
+    absolute: 8h
+  idpLink:
+    enabled: true                          # request offline_access, keep the refresh token
+    refreshLifetime: 720h                  # the IdP's absolute refresh lifetime
+```
+
+- Scopes are fixed: `openid email profile groups`, plus `offline_access` while
+  `idpLink` is enabled.
+- The session defaults are shorter than the console's (1h / 12h) because a portal
+  session can approve third-party access for agents.
+- Startup refuses to run an enabled block unless `console.auth` is `oidc`,
+  `--state-dir` is set, the `clientSecretEnv` variable is non-empty (the error
+  names the variable, never its value), and `consent.oidc.issuer` equals
+  `identity.issuer` (a portal `sub` must match a data-plane `sub`). There is no dev
+  or demo bypass: use the Dex compose recipe (`deploy/compose/dex`).
+- While consent is enabled, a settings write that changes `identity.issuer` away
+  from `consent.oidc.issuer` is refused with 400 `identity_issuer_mismatch`.
+- `https` issuer unless `internalIssuerURL` is set; `redirectURL` is `https`
+  unless its host is loopback, and must differ from `console.oidc.redirectURL`.
+
 ## API keys (`console.apiKeys`)
 
 Scripts and CI can call the admin API with a scoped, expiring `wak_` key instead of

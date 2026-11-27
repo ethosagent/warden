@@ -313,6 +313,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			"hint", "set console.auth: oidc (see docs/control-plane.md, \"Migrating from none to oidc\")")
 	}
 
+	// The consent block, like console:, comes from --config only. Nil (absent or
+	// enabled: false) means no portal route, table or goroutine below.
+	consentCfg, err := resolveConsent(logger, configPath, servedPath, stateDir, consoleCfg, pol.Identity.Issuer, os.Getenv)
+	if err != nil {
+		return fail(err)
+	}
+
 	if err := checkAdminAuditFlags(consoleCfg, stateDir, p); err != nil {
 		return fail(err)
 	}
@@ -650,6 +657,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		AlertDBPath:         alertDBPath,
 		SecretStore:         secretStore,
 		Console:             consoleCfg,
+		Consent:             consentCfg,
 		ClientSecret:        clientSecret,
 		Now:                 clk.Now,
 

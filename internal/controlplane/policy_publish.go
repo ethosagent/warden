@@ -269,6 +269,9 @@ func (s *Server) writeVersioned(ctx context.Context, w versionedWrite) (int64, b
 		if err := s.checkIssuerCollision(doc.Settings.Identity); err != nil {
 			return 0, false, err
 		}
+		if err := s.checkConsentIssuer(doc.Settings.Identity); err != nil {
+			return 0, false, err
+		}
 	}
 	// A draft holds only the credential fingerprint, so a save that changes the
 	// credential can never be held; refuse it by name instead of turning it into
