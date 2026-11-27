@@ -36,10 +36,17 @@ func ForceFrom(ctx context.Context) bool {
 type WorkersLackCapabilityError struct {
 	// Workers are the proxy ids of the connected workers lacking the capability.
 	Workers []string
+	// Feature names what the workers cannot enforce, for the error text; empty
+	// is identity require mode.
+	Feature string
 }
 
 func (e *WorkersLackCapabilityError) Error() string {
-	return "workers_lack_capability: connected workers do not support identity require mode; upgrade them or retry with force=true as an admin"
+	feature := e.Feature
+	if feature == "" {
+		feature = "identity require mode"
+	}
+	return "workers_lack_capability: connected workers do not support " + feature + "; upgrade them or retry with force=true as an admin"
 }
 
 // workersLackResponse is the 409 body for a WorkersLackCapabilityError.

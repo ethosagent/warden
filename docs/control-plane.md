@@ -3279,6 +3279,26 @@ A worker that pins the key and verifies the envelope is described in
   issuer is refused the same way), because the
   two token kinds are told apart by their issuer. Nothing but the issuer URL and
   public thumbprints is added: no key material reaches the bundle, logs or audit.
+- **Per-user sections.** With `perUserSecrets.enabled` the payload carries two
+  more sections, both covered by the signature and both absent otherwise (with
+  the block absent or disabled the payload bytes, the ETag and the publish log
+  are unchanged; the legacy wire never carries them). `sections.perUserSecrets`
+  is the value-free mapping list (`placeholder`, `provider`, `scopes`, `domains`,
+  `in`, `agents`) plus `workerCacheTTLSeconds`. `sections.userGrantEpochs` is
+  `{userKey: epoch}`, keyed by the hashed user key (never a `sub` or an email);
+  an epoch is the publish-log seq of the revocation, so it only grows. A worker
+  that does not know the sections ignores them. The control plane re-reads the
+  block from the served config on every build and runs the startup checks
+  (consent.store, token service, signed bundles, registered providers) again:
+  an enabled block that fails them is not served, and the section last served
+  stays. A change of the block appends a `per_user_secrets` row first, like a
+  JWKS change. A revocation (`EpochStore.Bump`, called by the portal revoke and
+  offboarding) appends a `user_grant` row, records the epoch and signs a bundle
+  that wakes the long poll. Entries older than 2 x `workerCacheTTL` are pruned
+  by a one-minute ticker, which appends no row. A save that enables the block or
+  adds an agent to a mapping is refused with `409 workers_lack_capability` while
+  a connected worker bound to that agent lacks `usersecrets/v1`; an admin may
+  pass `force=true`, which the admin audit records with the worker ids.
 - **Credential.** `settings.secrets.accessKeyId` and `secretAccessKey` are not in
   the signed payload. They travel in the envelope's unsigned `credentials`
   sidecar and the payload carries their SHA-256. Nothing logs either.

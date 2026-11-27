@@ -113,6 +113,15 @@ const CapAgentRegV1 = "agentreg/v1"
 // tell which workers enforce require.
 const CapIdentityRequireV1 = "identity/require-v1"
 
+// CapUserSecretsV1 is the capability a worker advertises when it enforces
+// per-user secret mappings (W-P3-PUS-09): it swaps a per-user placeholder for
+// the calling user's access token and drops cached tokens on a userGrantEpochs
+// bump. An old worker forwards the literal placeholder (nothing leaks), so the
+// control plane refuses to enable a mapping for an agent whose connected
+// worker lacks it (W-P3-PUS-08). A worker that does not know the sections
+// ignores them.
+const CapUserSecretsV1 = "usersecrets/v1"
+
 // heartbeatBody is the JSON a worker POSTs to /control/heartbeat. It carries no
 // secret, token or request data.
 type heartbeatBody struct {

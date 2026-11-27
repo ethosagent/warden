@@ -95,6 +95,11 @@ const (
 	// or off) while the served policy did not.
 	publishReasonTokenIssuer = "token_issuer"
 	publishReasonRestore     = "restore"
+	// publishReasonPerUserSecrets marks a row appended because the signed
+	// perUserSecrets section changed while the served policy did not
+	// (W-P3-PUS-08); publishReasonUserGrant marks an EpochStore.Bump.
+	publishReasonPerUserSecrets = "per_user_secrets"
+	publishReasonUserGrant      = "user_grant"
 )
 
 // wireOverlay merges serve-time data into the served wire: data that must reach
@@ -254,7 +259,11 @@ func (ps *policyServer) Refresh() { ps.refresh(false) }
 func (ps *policyServer) refresh(resign bool) {
 	ps.refreshMu.Lock()
 	defer ps.refreshMu.Unlock()
-	ctx := context.Background()
+	ps.refreshLocked(context.Background(), resign)
+}
+
+// refreshLocked is refresh with refreshMu already held.
+func (ps *policyServer) refreshLocked(ctx context.Context, resign bool) {
 	wire, fps, head, err := ps.loadPolicy(ctx)
 	if err != nil {
 		var oe *overlayError

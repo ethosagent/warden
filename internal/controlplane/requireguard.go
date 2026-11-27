@@ -57,11 +57,21 @@ func (s *Server) requireGuard(ctx context.Context, live *config.SettingsWire, in
 	lacking, total := s.registry.WorkersLackingCap(config.CapIdentityRequireV1, func(agentID string) bool {
 		return requireModeFor(&in, agentID) && !requireModeFor(live, agentID)
 	})
+	return s.forceWorkersLack(ctx, lacking, total, "require_mode_forced", "")
+}
+
+// forceWorkersLack is the shared tail of the rollout guards: nil when no
+// connected worker lacks the capability, otherwise a
+// *dashboard.WorkersLackCapabilityError naming them, unless the request carries
+// force=true from an admin, which records force and the worker ids on the
+// request's admin audit row and logs event. feature names what the workers
+// cannot enforce ("" = identity require mode).
+func (s *Server) forceWorkersLack(ctx context.Context, lacking []string, total int, event, feature string) error {
 	if len(lacking) == 0 {
 		return nil
 	}
 	if !dashboard.ForceFrom(ctx) {
-		return &dashboard.WorkersLackCapabilityError{Workers: lacking}
+		return &dashboard.WorkersLackCapabilityError{Workers: lacking, Feature: feature}
 	}
 	// Only an admin may force. console.auth none has no roles: its write guard
 	// is the bearer token, which is admin by definition.
@@ -78,7 +88,7 @@ func (s *Server) requireGuard(ctx context.Context, live *config.SettingsWire, in
 	putList(d, adminaudit.DetailWorkersLacking, lacking)
 	d[adminaudit.DetailWorkersLacking+adminaudit.DetailCountSuffix] = strconv.Itoa(total)
 	adminaudit.Annotate(ctx, "", d)
-	s.cfg.Logger.Warn("require_mode_forced", "workers", lacking)
+	s.cfg.Logger.Warn(event, "workers", lacking)
 	return nil
 }
 

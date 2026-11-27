@@ -177,6 +177,15 @@ type Config struct {
 	// SecretStore above: no route (/central/secrets, the dashboard secret
 	// store) and no worker ever reads it.
 	UserStore secrets.SecretStore
+	// PerUserLoad and PerUserCheck feed the signed-bundle sections perUserSecrets
+	// and userGrantEpochs (W-P3-PUS-08). PerUserLoad returns the perUserSecrets
+	// block as it stands in the served config now; PerUserCheck is
+	// checkPerUserSecretsStartup bound to this control plane. The publisher calls
+	// both on every build and serves an enabled block only once PerUserCheck
+	// accepts it. Nil PerUserLoad = the feature is not wired: no section is ever
+	// served and the bundle is what it was before the feature.
+	PerUserLoad  func() (config.PerUserSecretsConfig, error)
+	PerUserCheck func(config.PerUserSecretsConfig) error
 	// ClientSecret is the console OIDC client secret, read by Run from the
 	// environment variable console.oidc.clientSecretEnv names. It is never logged.
 	ClientSecret string
@@ -579,6 +588,8 @@ func (s *Server) Start(ctx context.Context) {
 
 	// Token table retention (tokenService.enabled), on the control plane's clock.
 	s.runTokenRetention(ctx)
+	// Revocation epochs older than 2 x workerCacheTTL (per-user secrets only).
+	s.runEpochPrune(ctx)
 	if s.policy.bundlesOn() {
 		go s.policy.resignLoop(ctx, s.cfg.Clock)
 	}
