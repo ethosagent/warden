@@ -1,4 +1,4 @@
-package oauthbroker_test
+package grantstore_test
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ethosagent/warden/internal/oauthbroker"
+	"github.com/ethosagent/warden/internal/oauthbroker/adapters/grantstore"
 	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/test/fakes"
 )
@@ -67,7 +68,7 @@ func TestLoadGrantMissing(t *testing.T) {
 	vs, _ := vaultStore(t)
 	for name, s := range map[string]secrets.SecretStore{"memory": fakes.NewMemorySecretStore(), "vault": vs} {
 		t.Run(name, func(t *testing.T) {
-			_, _, err := oauthbroker.LoadGrant(context.Background(), s, grantUserKey, grantProvider)
+			_, _, err := grantstore.LoadGrant(context.Background(), s, grantUserKey, grantProvider)
 			if !errors.Is(err, oauthbroker.ErrGrantMissing) {
 				t.Fatalf("err = %v, want ErrGrantMissing", err)
 			}
@@ -79,11 +80,11 @@ func TestLoadGrantMissing(t *testing.T) {
 func TestLoadGrantStoreErrorIsNotMissing(t *testing.T) {
 	m := fakes.NewMemorySecretStore()
 	m.SetErrors(errors.New("backend down"), nil, nil, nil)
-	_, _, err := oauthbroker.LoadGrant(context.Background(), m, grantUserKey, grantProvider)
+	_, _, err := grantstore.LoadGrant(context.Background(), m, grantUserKey, grantProvider)
 	if err == nil || errors.Is(err, oauthbroker.ErrGrantMissing) {
 		t.Fatalf("err = %v, want a non-missing error", err)
 	}
-	if _, _, err := oauthbroker.LoadGrant(context.Background(), m, "bad", grantProvider); err == nil || errors.Is(err, oauthbroker.ErrGrantMissing) {
+	if _, _, err := grantstore.LoadGrant(context.Background(), m, "bad", grantProvider); err == nil || errors.Is(err, oauthbroker.ErrGrantMissing) {
 		t.Fatalf("bad userKey err = %v", err)
 	}
 }
@@ -93,7 +94,7 @@ func TestLoadGrantCorruptRecord(t *testing.T) {
 	if err := m.Put(context.Background(), grantKeyFor(t), "not json "+grantToken); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := oauthbroker.LoadGrant(context.Background(), m, grantUserKey, grantProvider)
+	_, _, err := grantstore.LoadGrant(context.Background(), m, grantUserKey, grantProvider)
 	if err == nil || errors.Is(err, oauthbroker.ErrGrantMissing) {
 		t.Fatalf("err = %v", err)
 	}
@@ -104,7 +105,7 @@ func TestStoreRotatedVaultVersionConflict(t *testing.T) {
 	s, kv := vaultStore(t)
 	ctx := context.Background()
 	putRec(t, s, grantRec("g1", "R1"))
-	rec, read, err := oauthbroker.LoadGrant(ctx, s, grantUserKey, grantProvider)
+	rec, read, err := grantstore.LoadGrant(ctx, s, grantUserKey, grantProvider)
 	if err != nil || !read.Versioned || read.N != 1 {
 		t.Fatalf("load = %v %+v", err, read)
 	}
@@ -112,7 +113,7 @@ func TestStoreRotatedVaultVersionConflict(t *testing.T) {
 	putRec(t, s, grantRec("g1", "R-OTHER"))
 	before, _ := kv.Value("warden-cp/" + grantKeyFor(t))
 	rec.RefreshToken = "R-MINE"
-	err = oauthbroker.StoreRotated(ctx, s, grantUserKey, grantProvider, rec, read)
+	err = grantstore.StoreRotated(ctx, s, grantUserKey, grantProvider, rec, read)
 	if !errors.Is(err, oauthbroker.ErrGrantChanged) {
 		t.Fatalf("err = %v, want ErrGrantChanged", err)
 	}
@@ -126,7 +127,7 @@ func TestStoreRotatedVaultCASHeld(t *testing.T) {
 	s, kv := vaultStore(t)
 	ctx := context.Background()
 	putRec(t, s, grantRec("g1", "R1"))
-	rec, read, err := oauthbroker.LoadGrant(ctx, s, grantUserKey, grantProvider)
+	rec, read, err := grantstore.LoadGrant(ctx, s, grantUserKey, grantProvider)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,11 +136,11 @@ func TestStoreRotatedVaultCASHeld(t *testing.T) {
 		putRec(t, s, grantRec("g1", "R-RACE"))
 	})
 	rec.RefreshToken = "R2"
-	err = oauthbroker.StoreRotated(ctx, s, grantUserKey, grantProvider, rec, read)
+	err = grantstore.StoreRotated(ctx, s, grantUserKey, grantProvider, rec, read)
 	if !errors.Is(err, oauthbroker.ErrGrantChanged) {
 		t.Fatalf("err = %v, want ErrGrantChanged", err)
 	}
-	got, _, err := oauthbroker.LoadGrant(ctx, s, grantUserKey, grantProvider)
+	got, _, err := grantstore.LoadGrant(ctx, s, grantUserKey, grantProvider)
 	if err != nil || got.RefreshToken != "R-RACE" {
 		t.Fatalf("stored = %+v, %v; the racing write must survive", got, err)
 	}
@@ -151,20 +152,20 @@ func TestStoreRotatedSuccessAndIdempotentRetry(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			putRec(t, s, grantRec("g1", "R1"))
-			rec, read, err := oauthbroker.LoadGrant(ctx, s, grantUserKey, grantProvider)
+			rec, read, err := grantstore.LoadGrant(ctx, s, grantUserKey, grantProvider)
 			if err != nil {
 				t.Fatal(err)
 			}
 			rec.RefreshToken = "R2"
-			if err := oauthbroker.StoreRotated(ctx, s, grantUserKey, grantProvider, rec, read); err != nil {
+			if err := grantstore.StoreRotated(ctx, s, grantUserKey, grantProvider, rec, read); err != nil {
 				t.Fatalf("store = %v", err)
 			}
-			got, _, err := oauthbroker.LoadGrant(ctx, s, grantUserKey, grantProvider)
+			got, _, err := grantstore.LoadGrant(ctx, s, grantUserKey, grantProvider)
 			if err != nil || got.RefreshToken != "R2" {
 				t.Fatalf("after store = %+v, %v", got, err)
 			}
 			// A retry with the same stale read version: our own write already landed.
-			if err := oauthbroker.StoreRotated(ctx, s, grantUserKey, grantProvider, rec, read); err != nil {
+			if err := grantstore.StoreRotated(ctx, s, grantUserKey, grantProvider, rec, read); err != nil {
 				t.Errorf("idempotent retry = %v, want nil", err)
 			}
 		})
@@ -175,21 +176,21 @@ func TestStoreRotatedNonVersionedReconnect(t *testing.T) {
 	m := fakes.NewMemorySecretStore()
 	ctx := context.Background()
 	putRec(t, m, grantRec("g1", "R1"))
-	rec, read, err := oauthbroker.LoadGrant(ctx, m, grantUserKey, grantProvider)
+	rec, read, err := grantstore.LoadGrant(ctx, m, grantUserKey, grantProvider)
 	if err != nil || read.Versioned {
 		t.Fatalf("load = %v %+v", err, read)
 	}
 	putRec(t, m, grantRec("g2", "R-NEW")) // reconnect: new grant_id
 	puts := m.Puts
 	rec.RefreshToken = "R2"
-	err = oauthbroker.StoreRotated(ctx, m, grantUserKey, grantProvider, rec, read)
+	err = grantstore.StoreRotated(ctx, m, grantUserKey, grantProvider, rec, read)
 	if !errors.Is(err, oauthbroker.ErrGrantChanged) {
 		t.Fatalf("err = %v, want ErrGrantChanged", err)
 	}
 	if m.Puts != puts {
 		t.Error("a Put happened after the grant changed")
 	}
-	got, _, _ := oauthbroker.LoadGrant(ctx, m, grantUserKey, grantProvider)
+	got, _, _ := grantstore.LoadGrant(ctx, m, grantUserKey, grantProvider)
 	if got.GrantID != "g2" || got.RefreshToken != "R-NEW" {
 		t.Errorf("stored = %+v", got)
 	}
@@ -201,7 +202,7 @@ func TestStoreRotatedDeletedKey(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			putRec(t, s, grantRec("g1", "R1"))
-			rec, read, err := oauthbroker.LoadGrant(ctx, s, grantUserKey, grantProvider)
+			rec, read, err := grantstore.LoadGrant(ctx, s, grantUserKey, grantProvider)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -209,11 +210,11 @@ func TestStoreRotatedDeletedKey(t *testing.T) {
 				t.Fatal(err)
 			}
 			rec.RefreshToken = "R2"
-			err = oauthbroker.StoreRotated(ctx, s, grantUserKey, grantProvider, rec, read)
+			err = grantstore.StoreRotated(ctx, s, grantUserKey, grantProvider, rec, read)
 			if !errors.Is(err, oauthbroker.ErrGrantChanged) {
 				t.Fatalf("err = %v, want ErrGrantChanged", err)
 			}
-			if _, _, err := oauthbroker.LoadGrant(ctx, s, grantUserKey, grantProvider); !errors.Is(err, oauthbroker.ErrGrantMissing) {
+			if _, _, err := grantstore.LoadGrant(ctx, s, grantUserKey, grantProvider); !errors.Is(err, oauthbroker.ErrGrantMissing) {
 				t.Errorf("key was recreated: %v", err)
 			}
 		})
@@ -224,12 +225,12 @@ func TestStoreRotatedGrantIDMismatch(t *testing.T) {
 	m := fakes.NewMemorySecretStore()
 	ctx := context.Background()
 	putRec(t, m, grantRec("g1", "R1"))
-	_, read, err := oauthbroker.LoadGrant(ctx, m, grantUserKey, grantProvider)
+	_, read, err := grantstore.LoadGrant(ctx, m, grantUserKey, grantProvider)
 	if err != nil {
 		t.Fatal(err)
 	}
 	puts := m.Puts
-	err = oauthbroker.StoreRotated(ctx, m, grantUserKey, grantProvider, grantRec("other", "R2"), read)
+	err = grantstore.StoreRotated(ctx, m, grantUserKey, grantProvider, grantRec("other", "R2"), read)
 	if !errors.Is(err, oauthbroker.ErrGrantChanged) || m.Puts != puts {
 		t.Fatalf("err = %v puts %d->%d", err, puts, m.Puts)
 	}
@@ -239,10 +240,10 @@ func TestStoreRotatedTransportErrorIsNotConflict(t *testing.T) {
 	m := fakes.NewMemorySecretStore()
 	ctx := context.Background()
 	putRec(t, m, grantRec("g1", "R1"))
-	rec, read, _ := oauthbroker.LoadGrant(ctx, m, grantUserKey, grantProvider)
+	rec, read, _ := grantstore.LoadGrant(ctx, m, grantUserKey, grantProvider)
 	m.SetErrors(nil, errors.New("connection reset"), nil, nil)
 	rec.RefreshToken = "R2"
-	err := oauthbroker.StoreRotated(ctx, m, grantUserKey, grantProvider, rec, read)
+	err := grantstore.StoreRotated(ctx, m, grantUserKey, grantProvider, rec, read)
 	if err == nil || errors.Is(err, oauthbroker.ErrGrantChanged) {
 		t.Fatalf("err = %v, want a non-conflict error", err)
 	}
