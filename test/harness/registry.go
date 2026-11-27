@@ -87,6 +87,7 @@ var Excluded = map[string]string{
 	"approvals.Store":                 "the control plane's own change_drafts and change_approvals tables on the cpstate SQLite DB (approvals/adapters/sqlstore); the harness runs the real one, a fake would hide the compare-and-swap transitions and the unique and append-only constraints the approvals gate depends on",
 	"approvals.ReplayStore":           "the draft_replays table on the cpstate SQLite DB (approvals/adapters/sqlstore); the harness runs the real one, a fake would hide the settle-once compare-and-swap that discards a late replay result",
 	"keys.Signer":                     "local CPU-only signing over stdlib crypto (GenerateLocal/NewLocalSigner); no external system behind the port, and a fake would hide the JOSE wire encodings (r||s, RFC 7638 kids) the verifiers pin",
+	"oauthbroker.GrantStore":          "the control plane's own pending_authorizations, connect_attempts and oauth_grants tables on the cpstate SQLite DB (oauthbroker/adapters/sqlite); no external system behind it, the harness will run the real one once the CP wires the broker (W-P3-BRKR-03), and a fake would hide the single-statement caps, the DELETE ... RETURNING single use and the compare-and-set transitions that oauthbrokertest.Run pins for every implementation",
 
 	// Worker CA enrollment (W-P2-WCA-02), on the cpstate SQLite DB like the stores above.
 	"controlplane.EnrollmentTokenStore": "the control plane's own enrollment tokens; the harness runs the real one, a fake would hide the single-use transaction and the data_version reload",
