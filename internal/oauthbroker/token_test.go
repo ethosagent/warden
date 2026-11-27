@@ -136,3 +136,15 @@ func TestTokenRecordRedactionInsideWrapper(t *testing.T) {
 		t.Errorf("Marshal must still carry the token: %s, %v", stored, err)
 	}
 }
+
+// A caller that bypasses Marshal gets the redacted JSON, which Parse refuses:
+// a stored grant written that way fails closed instead of using a placeholder token.
+func TestTokenRecordParseRejectsRedactedJSON(t *testing.T) {
+	b, err := json.Marshal(sampleRecord())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseTokenRecord(b); !errors.Is(err, ErrTokenRecord) {
+		t.Errorf("ParseTokenRecord(json.Marshal(record)) = %v, want ErrTokenRecord", err)
+	}
+}

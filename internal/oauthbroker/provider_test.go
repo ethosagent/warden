@@ -194,7 +194,6 @@ func TestRegistryKeySecretRetry(t *testing.T) {
 	if _, err := p.ClientSecret(context.Background()); !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
 	}
-	p.failTTL = 0 // the failure window is covered by TestClientSecretSingleflightAndFailureCache
 	// An empty stored value is also unavailable.
 	res.mu.Lock()
 	res.err = nil
@@ -389,5 +388,51 @@ func TestRegistryDoesNotAliasExtraParams(t *testing.T) {
 	// Scope slices carry no spare capacity to append into.
 	if s := normalizeScopes([]string{"a", "b", "a"}); cap(s) != len(s) {
 		t.Errorf("cap %d != len %d", cap(s), len(s))
+	}
+}
+
+func TestClientSecretFailureCacheExpires(t *testing.T) {
+	cfg := []config.OAuthProviderConfig{{ID: "g", Type: "google", ClientID: "c", ClientSecretKey: "oauth-clients/g"}}
+	res := &countingResolver{err: errors.New("down")}
+	var mu sync.Mutex
+	now := time.Unix(1000, 0)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	r, _ := newReg(t, cfg, Options{Resolver: res, Now: clock})
+	p, _ := r.Get("g")
+	base := res.calls
+	p.ClientSecret(context.Background()) //nolint:errcheck // cached failure
+	if res.calls != base {
+		t.Fatalf("failure inside the window re-read the store (%d calls)", res.calls-base)
+	}
+	mu.Lock()
+	now = now.Add(secretFailCache + time.Second)
+	mu.Unlock()
+	res.mu.Lock()
+	res.err = nil
+	res.mu.Unlock()
+	s, err := p.ClientSecret(context.Background())
+	if err != nil || s.Reveal() != "v" || res.calls != base+1 {
+		t.Errorf("after the window: %v, %v, calls %d (want one fresh read)", s, err, res.calls-base)
+	}
+}
+
+func TestClientSecretHonoursCallerDeadline(t *testing.T) {
+	cfg := []config.OAuthProviderConfig{{ID: "g", Type: "google", ClientID: "c", ClientSecretKey: "oauth-clients/g"}}
+	gate := make(chan struct{})
+	defer close(gate)
+	r, _ := NewRegistry(cfg, Options{LookupEnv: noEnv, Logger: slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))})
+	p, _ := r.Get("g")
+	p.resolver = &countingResolver{gate: gate}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := p.ClientSecret(ctx); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrProviderUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("err = %v, want ErrProviderUnavailable wrapping the deadline", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ClientSecret ignored the caller's deadline while the store hung")
 	}
 }

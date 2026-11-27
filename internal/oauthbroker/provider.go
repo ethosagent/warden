@@ -49,6 +49,9 @@ type SecretResolver interface {
 // outage costs one store call per window rather than one per request.
 const secretFailCache = 5 * time.Second
 
+// secretReadTimeout bounds the shared consent.store read.
+const secretReadTimeout = 10 * time.Second
+
 // Options are the injected dependencies of NewRegistry.
 type Options struct {
 	// LookupEnv reads a clientSecretEnv variable at startup (os.LookupEnv in
@@ -118,44 +121,66 @@ func (p *Provider) CapScopes(requested []string) (capped, rejected []string) {
 // a failure is ErrProviderUnavailable (503 provider_unavailable); the underlying
 // error is wrapped for the operator log but never carries the secret.
 func (p *Provider) ClientSecret(ctx context.Context) (Secret, error) {
-	p.mu.Lock()
-	if !p.secret.IsZero() {
-		s := p.secret
-		p.mu.Unlock()
-		return s, nil
+	if r, done := p.cachedSecret(); done {
+		return r.s, r.err
 	}
-	if p.secretKey == "" || p.resolver == nil {
-		p.mu.Unlock()
-		return Secret{}, fmt.Errorf("%w: provider %s", ErrProviderUnavailable, p.ID)
-	}
-	if p.failErr != nil && p.now != nil && p.now().Sub(p.failAt) < p.failTTL {
-		err := p.failErr
-		p.mu.Unlock()
-		return Secret{}, err
-	}
-	p.mu.Unlock()
-
 	// The store is called without p.mu held, and concurrent callers share one
-	// read, so an outage does not queue every connect behind a slow call.
-	v, err, _ := p.sf.Do("secret", func() (any, error) {
-		val, err := p.resolver.ResolveSecret(context.WithoutCancel(ctx), p.secretKey)
+	// read, so an outage does not queue every connect behind a slow call. The
+	// shared read has its own deadline and each caller also honours its ctx.
+	ch := p.sf.DoChan("secret", func() (any, error) {
+		// Re-check under the lock: a read that finished after our caller's
+		// check but before we joined the group must not trigger a second one.
+		if r, done := p.cachedSecret(); done {
+			return r, nil
+		}
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), secretReadTimeout)
+		defer cancel()
+		val, err := p.resolver.ResolveSecret(rctx, p.secretKey)
 		if err == nil && val == "" {
 			err = errors.New("empty secret")
 		}
-		return val, err
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if err != nil {
+			p.failErr = fmt.Errorf("%w: provider %s: %w", ErrProviderUnavailable, p.ID, err)
+			if p.now != nil {
+				p.failAt = p.now()
+			}
+			return secretResult{Secret{}, p.failErr}, nil
+		}
+		p.secret = NewSecret(val)
+		p.failErr = nil
+		return secretResult{p.secret, nil}, nil
 	})
+	select {
+	case r := <-ch:
+		res := r.Val.(secretResult)
+		return res.s, res.err
+	case <-ctx.Done():
+		return Secret{}, fmt.Errorf("%w: provider %s: %w", ErrProviderUnavailable, p.ID, ctx.Err())
+	}
+}
+
+type secretResult struct {
+	s   Secret
+	err error
+}
+
+// cachedSecret reports a final answer without calling the store: the cached
+// secret, a configuration error, or a failure still inside its window.
+func (p *Provider) cachedSecret() (secretResult, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err != nil {
-		p.failErr = fmt.Errorf("%w: provider %s: %w", ErrProviderUnavailable, p.ID, err)
-		if p.now != nil {
-			p.failAt = p.now()
-		}
-		return Secret{}, p.failErr
+	if !p.secret.IsZero() {
+		return secretResult{p.secret, nil}, true
 	}
-	p.secret = NewSecret(v.(string))
-	p.failErr = nil
-	return p.secret, nil
+	if p.secretKey == "" || p.resolver == nil {
+		return secretResult{Secret{}, fmt.Errorf("%w: provider %s", ErrProviderUnavailable, p.ID)}, true
+	}
+	if p.failErr != nil && p.now != nil && p.now().Sub(p.failAt) < p.failTTL {
+		return secretResult{Secret{}, p.failErr}, true
+	}
+	return secretResult{}, false
 }
 
 func (p *Provider) String() string {
