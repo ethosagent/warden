@@ -250,7 +250,7 @@ func (i *IngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, e := range env.Events {
-		if err := i.store.StoreAggregatedEvent(AggregatedEvent{Event: e, ProxyID: proxyID}); err != nil {
+		if err := i.store.StoreAggregatedEvent(AggregatedEvent{Event: e, ProxyID: proxyID, AgentID: e.AgentID}); err != nil {
 			http.Error(w, "store failed", http.StatusInternalServerError)
 			return
 		}

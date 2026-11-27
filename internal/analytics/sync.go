@@ -52,14 +52,18 @@ func (w *SyncWorker) id() string {
 }
 
 // eventUID derives the stable dedup identifier for a local event: a truncated
-// SHA-256 over the worker's proxy id and the event's local rowid (NUL-separated
-// so the two inputs can never ambiguously concatenate). The local events table
-// uses an AUTOINCREMENT primary key, so rowids are never reused after deletion
-// and survive process restarts — re-reading the same event always yields the
-// same UID (retry-stable), and distinct events always yield distinct UIDs even
-// when their semantic fields (timestamp/domain/method) are identical.
-func eventUID(proxyID string, rowID int64) string {
-	sum := sha256.Sum256([]byte(proxyID + "\x00" + strconv.FormatInt(rowID, 10)))
+// SHA-256 over the local database's random epoch, the worker's proxy id and the
+// event's local rowid (NUL-separated so the inputs can never ambiguously
+// concatenate). The local events table uses an AUTOINCREMENT primary key, so
+// rowids are never reused after deletion and survive process restarts —
+// re-reading the same event always yields the same UID (retry-stable), and
+// distinct events always yield distinct UIDs even when their semantic fields
+// (timestamp/domain/method) are identical. The epoch (SQLiteStore.uidEpoch)
+// is created once per database file, so a recreated database or a second
+// replica with the same proxy id starts a fresh UID space instead of reusing
+// rowid-derived UIDs the control plane would drop as duplicates.
+func eventUID(epoch, proxyID string, rowID int64) string {
+	sum := sha256.Sum256([]byte(epoch + "\x00" + proxyID + "\x00" + strconv.FormatInt(rowID, 10)))
 	return hex.EncodeToString(sum[:12]) // 24 hex chars: plenty for per-fleet uniqueness
 }
 
@@ -100,7 +104,7 @@ func (w *SyncWorker) SyncOnce() error {
 	// drop legitimate events — duplicates-on-retry is the safer failure mode.
 	if id := w.id(); id != "" {
 		for i := range events {
-			events[i].UID = eventUID(id, ids[i])
+			events[i].UID = eventUID(w.local.uidEpoch, id, ids[i])
 		}
 	}
 

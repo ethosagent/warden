@@ -6,10 +6,27 @@ import (
 )
 
 // AggregatedEvent wraps an Event with multi-node metadata.
+//
+// The outer AgentID shadows the embedded Event.AgentID. The stores resolve the
+// pair to one value (resolvedAgentID: the outer field when set, else the
+// event's) and write it back to both on store and on read, so Go callers see
+// the same agent either way. It is tagged json:"-" so a marshalled
+// AggregatedEvent carries the agent exactly once, under the embedded event's
+// "agent_id" key: the same key the fleet API's []Event responses use
+// (W-P3-PUL-07).
 type AggregatedEvent struct {
 	Event
 	ProxyID string
-	AgentID string
+	AgentID string `json:"-"`
+}
+
+// resolvedAgentID is the agent an aggregated event is attributed to: the outer
+// AgentID when the ingest path set it, else the worker-stamped Event.AgentID.
+func (e AggregatedEvent) resolvedAgentID() string {
+	if e.AgentID != "" {
+		return e.AgentID
+	}
+	return e.Event.AgentID
 }
 
 // AggregatedFilter extends EventFilter with multi-node filter fields.
@@ -31,6 +48,11 @@ type CentralStore struct {
 	// by maxEvents.
 	seen      map[string]struct{}
 	maxEvents int
+	// usage is the per-user daily rollup (see usage.go). It is updated only
+	// for events that were stored (not dedup-skipped) and is pruned to
+	// UsageRetentionDays, independent of maxEvents.
+	usage *usageRollup
+	now   func() time.Time
 }
 
 var (
@@ -44,7 +66,7 @@ func NewCentralStore(maxEvents int) *CentralStore {
 	if maxEvents <= 0 {
 		maxEvents = defaultMaxEvents
 	}
-	return &CentralStore{maxEvents: maxEvents, seen: make(map[string]struct{})}
+	return &CentralStore{maxEvents: maxEvents, seen: make(map[string]struct{}), usage: newUsageRollup(), now: time.Now}
 }
 
 // StoreEvent satisfies the AnalyticsStore interface. The event is stored with
@@ -60,6 +82,8 @@ func (c *CentralStore) StoreAggregatedEvent(e AggregatedEvent) error {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now()
 	}
+	agent := e.resolvedAgentID()
+	e.AgentID, e.Event.AgentID = agent, agent
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if uid := e.EventUID(); uid != "" {
@@ -69,6 +93,9 @@ func (c *CentralStore) StoreAggregatedEvent(e AggregatedEvent) error {
 		c.seen[uid] = struct{}{}
 	}
 	c.events = append(c.events, e)
+	now := c.now()
+	c.usage.add(e.Event, now)
+	c.usage.prune(now)
 	// Prune oldest (beginning of slice) if over cap, forgetting their uids so
 	// seen stays bounded by maxEvents.
 	if len(c.events) > c.maxEvents {
