@@ -313,6 +313,11 @@ type WorkerView struct {
 	// the worker does not advertise identity/require-v1: it keeps attribute mode
 	// and lets token-less traffic through. Set by the control plane per snapshot.
 	NoIdentityRequire bool `json:"noIdentityRequire"`
+	// NoUserSecrets is true when the served bundle carries per-user secret
+	// mappings for the worker's agent and the worker does not advertise
+	// usersecrets/v1: it forwards the placeholder and may keep serving a cached
+	// per-user token after a revoke. Set by the control plane per snapshot.
+	NoUserSecrets bool `json:"noUserSecrets"`
 	// AgentID is the registered agent the worker's latest heartbeat says it
 	// serves, and IdentityMode the identity mode it says it runs. Both are
 	// validated by the control plane and empty for a worker that reports none.

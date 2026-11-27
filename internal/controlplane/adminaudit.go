@@ -18,6 +18,7 @@ import (
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys/adapters/metastore"
+	oauthbrokersqlite "github.com/ethosagent/warden/internal/oauthbroker/adapters/sqlite"
 	tokensvcsqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
 )
 
@@ -55,6 +56,9 @@ func StateMigrations() []cpstate.Migration {
 	// Feature-gated like the keys one: applied only with
 	// console.approvals.enabled (stateMigrationsWithApprovals).
 	migs = append(migs, sqlstore.Migrations()...)
+	// Feature-gated: applied only when the OAuth broker is enabled
+	// (stateMigrationsWithBroker, consent.providers set).
+	migs = append(migs, oauthbrokersqlite.Migrations()...)
 	return migs
 }
 

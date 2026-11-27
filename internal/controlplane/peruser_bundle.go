@@ -77,6 +77,7 @@ func (ps *policyServer) resolvePerUser() {
 	}
 	if !cfg.Enabled {
 		b.pu, b.puPairs = perUserState{}, nil
+		b.storePUAgents()
 		b.puRecovered()
 		return
 	}
@@ -99,6 +100,21 @@ func (ps *policyServer) resolvePerUser() {
 	}
 	b.pu = perUserState{raw: raw, ttl: cfg.WorkerCacheTTL}
 	b.puPairs = perUserPairs(cfg)
+	b.storePUAgents()
+}
+
+// storePUAgents publishes the agents b.puPairs names for lock-free readers.
+// The caller holds refreshMu.
+func (b *bundlePublisher) storePUAgents() {
+	if b.pu.raw == nil {
+		b.puAgents.Store(nil)
+		return
+	}
+	m := make(map[string]bool, len(b.puPairs))
+	for a := range b.puPairs {
+		m[a] = true
+	}
+	b.puAgents.Store(&m)
 }
 
 // puStale marks the served per-user section stale: the block in the config is

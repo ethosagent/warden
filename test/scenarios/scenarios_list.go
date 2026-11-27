@@ -288,6 +288,10 @@ var All = slices.Concat(
 		// bump wakes a held long poll with a larger epoch. In-process only.
 		{Name: "peruser_bundle_sections", Opts: consentStoreVaultOpts(), Run: perUserBundleSections},
 		{Name: "peruser_bundle_sections_off", Opts: bundlesOfferOpts(), Run: perUserBundleSectionsOff},
+		// Epoch bump on revoke and the usersecrets/v1 report (W-P3-PORT-05): the
+		// adapter bump wakes a held long poll with the user key's epoch, lists the
+		// connected workers lacking usersecrets/v1 and the fleet view flags them.
+		{Name: "grant_epoch_revoke_report", Opts: consentStoreVaultOpts(), Run: grantEpochRevokeReport},
 		// Held long-poll (W-P1-WTOK-09): a revoke out of process returns that
 		// token's held /policy with 401 while another token's stays parked.
 		{Name: "worker_token_longpoll_revoke", Opts: workerTokenOpts(), Run: workerTokenLongPollRevoke},
