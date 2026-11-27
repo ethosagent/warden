@@ -148,6 +148,24 @@ logging:
 #    namePrefix: warden-cp/
 #    aws:
 #      region: us-east-1
+#  # OAuth providers the broker connects employees to (needs the store above; the broker
+#  # is not mounted yet). Exactly one of clientSecretEnv or clientSecretKey
+#  # (oauth-clients/<id> in consent.store). Secrets are read once: rotating one needs a
+#  # control-plane restart. google/github/githubApp get built-in https endpoints;
+#  # generic needs authURL and tokenURL. authURL/tokenURL carry no query string.
+#  # allowedScopes is the cap no agent or portal request can exceed.
+#  providers:
+#    - id: google
+#      type: google
+#      clientID: 1234.apps.googleusercontent.com
+#      clientSecretKey: oauth-clients/google
+#      allowedScopes: [openid, email, https://www.googleapis.com/auth/drive.readonly]
+#      defaultScopes: [openid, email]
+#      allowedAccountDomains: [example.com]
+#      requireEmailMatch: true
+#  connect:
+#    redirectURL: https://localhost:7070/connect/callback  # same origin as oidc.redirectURL; default derived
+#    pendingTTL: 15m                        # 1m-1h
 
 # Worker CA (CONTROL PLANE ONLY, never served to workers; docs/control-plane.md "Worker CA").
 # The compose recipe's cp-bootstrap service creates the chain and key below with
