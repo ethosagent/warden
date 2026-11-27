@@ -37,12 +37,16 @@ type AuditEvent struct {
 	GrantID    string
 	PendingID  string
 	Scopes     []string
+	// System marks a row written by the broker itself (the orphan sweep), not
+	// by a signed-in user: the actor is the system and Sub and Email are empty.
+	System bool
 }
 
 // Audit actions of connect.
 const (
 	AuditActionGranted = "connect.granted"
 	AuditActionDenied  = "connect.denied"
+	AuditActionRevoked = "connect.revoked"
 )
 
 // AuditSink records connect decisions. Ready reports whether a record could
@@ -143,6 +147,10 @@ const (
 // identityAllowance returns the identity scopes a provider may grant beyond its
 // allowedScopes: openid and email everywhere; for google also profile and the
 // userinfo URLs Google answers email and profile with. Nothing else.
+//
+// Note: profile and userinfo.profile go beyond the ticket's openid + email.
+// They are identity-only (name and picture, no API access) and Google returns
+// them alongside email, so a real connect would otherwise hit scope_exceeded.
 func identityAllowance(p *Provider) []string {
 	if p.Type != config.OAuthProviderGoogle {
 		return identityScopes

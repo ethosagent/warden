@@ -254,3 +254,24 @@ func TestConnectCallbackSignedOutPage(t *testing.T) {
 		t.Errorf("headers = %v", rec.Header())
 	}
 }
+
+// TestBrokerAuditSystemRow: the orphan sweep's connect.revoked row is written
+// by the system actor with auth_method system, naming the grant and provider and
+// no secret reference.
+func TestBrokerAuditSystemRow(t *testing.T) {
+	r, _, _, _ := callbackRig(t)
+	rec := &fakeRecorder{}
+	r.srv.enableAdminAudit(rec, rec.probe, fakeMAC)
+	err := brokerAudit{s: r.srv}.Record(context.Background(), oauthbroker.AuditEvent{
+		Action: oauthbroker.AuditActionRevoked, Outcome: adminaudit.OutcomeOK, Reason: "orphan_key_deleted",
+		System: true, Provider: "google", GrantID: "g1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := wantOneRow(t, rec)
+	if row.Action != "connect.revoked" || row.AuthMethod != adminaudit.AuthMethodSystem || row.Actor.Sub != "system" ||
+		row.Target != "grant:google" || row.TargetRef != "grant_id:g1" || row.Details["reason"] != "orphan_key_deleted" {
+		t.Fatalf("row = %+v", row)
+	}
+}

@@ -142,13 +142,19 @@ func (b *Broker) OrphanedGrants() int {
 	return b.metrics.orphans
 }
 
-// SweepOrphans deletes consent.store keys under users/<userKey>/<provider>
-// whose grant row is missing or revoked: the leftover of a revoke or a blocked
-// connect whose Delete failed. Each key is re-checked under the grant's
-// GrantLocks entry, and a key is never touched while its row is connecting,
-// active or reconsent_required. Keys not shaped users/<userKey>/<provider> are
-// left alone (CountOrphans still reports them). It returns how many keys it
-// deleted; a store error stops the pass and is returned.
+// SweepOrphans deletes the consent.store key of a grant that was revoked but
+// whose key survived (a revoke or blocked connect whose Delete failed). It is
+// deliberately narrow, because a Delete is permanent and a control plane with
+// an empty, wrong or restored --state-dir, or a second one sharing the store,
+// sees rows that do not match the keys. A key is deleted only when, under the
+// grant's GrantLocks entry, its grant row EXISTS, is revoked, and the stored
+// TokenRecord parses with a grant_id equal to the row's. A missing row, a live
+// row, an unparseable record or another grant's record is never deleted (the
+// orphan gauge still counts missing and revoked rows, and a key not shaped
+// users/<userKey>/<provider> is left alone). Each deletion is logged with a
+// user-key prefix and the provider, and recorded as connect.revoked by the
+// system actor when admin audit is on. It returns how many keys it deleted; a
+// store error stops the pass and is returned.
 func (b *Broker) SweepOrphans(ctx context.Context) (int, error) {
 	if b.vault == nil || b.grantKey == nil {
 		return 0, nil
@@ -178,9 +184,6 @@ func (b *Broker) SweepOrphans(ctx context.Context) (int, error) {
 			deleted++
 		}
 	}
-	if deleted > 0 {
-		b.logger.Info("oauth_orphan_keys_deleted", "count", deleted)
-	}
 	return deleted, nil
 }
 
@@ -190,13 +193,36 @@ func (b *Broker) sweepOrphan(ctx context.Context, userKey, provider, key string)
 	g, err := b.store.GetGrant(ctx, userKey, provider)
 	switch {
 	case errors.Is(err, ErrNotFound):
+		return false, nil
 	case err != nil:
 		return false, err
 	case g.State != GrantRevoked:
 		return false, nil
 	}
+	raw, err := b.vault.Get(ctx, key)
+	switch {
+	case err == nil:
+	case b.notFound(err):
+		return false, nil
+	default:
+		return false, err
+	}
+	rec, perr := ParseTokenRecord([]byte(raw))
+	if perr != nil || rec.GrantID != g.GrantID {
+		return false, nil
+	}
 	if err := b.vault.Delete(ctx, key); err != nil && !b.notFound(err) {
 		return false, err
+	}
+	b.logger.Info("oauth_orphan_key_deleted", "provider", provider, "user_key", ShortHash(userKey))
+	if b.audit != nil {
+		ev := AuditEvent{
+			Action: AuditActionRevoked, Outcome: OutcomeOK, Reason: "orphan_key_deleted",
+			System: true, Provider: provider, GrantID: g.GrantID,
+		}
+		if aerr := b.audit.Record(context.WithoutCancel(ctx), ev); aerr != nil {
+			b.logger.Error("connect: audit append failed", "provider", provider, "action", ev.Action)
+		}
 	}
 	return true, nil
 }

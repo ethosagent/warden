@@ -1050,8 +1050,11 @@ func TestSweepOrphans(t *testing.T) {
 	_ = e.vault.Put(ctx, "users/"+wantUserKey("ghost")+"/google", "{}") // no row
 	_ = e.vault.Put(ctx, "users/malformed", "{}")
 	n, err := e.b.SweepOrphans(ctx)
-	if err != nil || n != 2 {
-		t.Fatalf("SweepOrphans = %d, %v, want 2", n, err)
+	if err != nil || n != 1 {
+		t.Fatalf("SweepOrphans = %d, %v, want 1 (only the revoked grant's key; a key with no row is never deleted)", n, err)
+	}
+	if _, ok := e.vault.Value("users/" + wantUserKey("ghost") + "/google"); !ok {
+		t.Fatal("a key with no grant row was deleted")
 	}
 	e.noKey(t, cbSub, "google")
 	if _, ok := e.vault.Value("users/malformed"); !ok {
@@ -1070,5 +1073,83 @@ func TestSweepOrphans(t *testing.T) {
 	_ = e.vault.Put(ctx, e.keyOf("dave", "google"), "{}")
 	if n, _ := e.b.SweepOrphans(ctx); n != 0 {
 		t.Fatalf("swept %d keys, want none (a connecting grant owns its key)", n)
+	}
+}
+
+// TestSweepOrphansNarrow: the sweep never deletes on a missing row (an empty or
+// restored state dir), never a record of another grant, never junk; the
+// matching revoked case is deleted with a system audit row and a log line that
+// carries a user-key prefix only.
+func TestSweepOrphansNarrow(t *testing.T) {
+	e := newCBEnv(t)
+	ctx := context.Background()
+	for _, sub := range []string{"alice", "bob"} {
+		if _, err := e.b.Callback(ctx, e.connect(t, sub, "google", false, "drive.readonly").req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Empty grants table (a wrong or fresh --state-dir): keys present, no rows.
+	e2 := newCBEnv(t)
+	for _, sub := range []string{"alice", "bob"} {
+		_ = e2.vault.Put(ctx, e2.keyOf(sub, "google"), `{"v":1}`)
+	}
+	keys, _ := memVault{e2.vault}.Keys(ctx)
+	if n, err := e2.b.SweepOrphans(ctx); err != nil || n != 0 {
+		t.Fatalf("empty table: deleted %d, %v; want 0 deletes", n, err)
+	}
+	if after, _ := (memVault{e2.vault}).Keys(ctx); len(after) != len(keys) || len(keys) != 2 {
+		t.Fatalf("keys %d -> %d, want 2 untouched", len(keys), len(after))
+	}
+	if n, _ := e2.b.CountOrphans(ctx); n != 2 {
+		t.Fatalf("the gauge counts %d, want the 2 keys without rows", n)
+	}
+
+	// Revoked row, but the key holds another grant's record (the user
+	// reconnected after a restore): kept.
+	if _, err := e.store.RevokeGrant(ctx, wantUserKey("alice"), "google", ""); err != nil {
+		t.Fatal(err)
+	}
+	other := e.record(t, "alice", "google")
+	other.GrantID = "some-other-grant"
+	data, _ := other.Marshal()
+	_ = e.vault.Put(ctx, e.keyOf("alice", "google"), string(data))
+	// Revoked row and unparseable record: kept.
+	if _, err := e.store.RevokeGrant(ctx, wantUserKey("bob"), "google", ""); err != nil {
+		t.Fatal(err)
+	}
+	_ = e.vault.Put(ctx, e.keyOf("bob", "google"), "not json")
+	if n, err := e.b.SweepOrphans(ctx); err != nil || n != 0 {
+		t.Fatalf("mismatched or unparseable: deleted %d, %v; want 0", n, err)
+	}
+	e.record(t, "alice", "google")
+
+	// Revoked row whose key holds its own grant: deleted, audited by the
+	// system, logged without the full user key.
+	if _, err := e.b.Callback(ctx, e.connect(t, "carol", "google", false, "drive.readonly").req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.store.RevokeGrant(ctx, wantUserKey("carol"), "google", ""); err != nil {
+		t.Fatal(err)
+	}
+	before := len(e.audit.all())
+	if n, err := e.b.SweepOrphans(ctx); err != nil || n != 1 {
+		t.Fatalf("matching revoked grant: deleted %d, %v; want 1", n, err)
+	}
+	e.noKey(t, "carol", "google")
+	evs := e.audit.all()[before:]
+	if len(evs) != 1 || evs[0].Action != oauthbroker.AuditActionRevoked || !evs[0].System || evs[0].Provider != "google" {
+		t.Fatalf("audit = %+v", evs)
+	}
+	var line string
+	for _, l := range strings.Split(e.logs.String(), "\n") {
+		if strings.Contains(l, `"msg":"oauth_orphan_key_deleted"`) {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatal("no orphan deletion log line")
+	}
+	if strings.Contains(line, wantUserKey("carol")) || !strings.Contains(line, oauthbroker.ShortHash(wantUserKey("carol"))) {
+		t.Errorf("the deletion line must carry a user-key prefix only: %s", line)
 	}
 }
