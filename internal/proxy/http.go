@@ -1141,7 +1141,11 @@ func (p *Proxy) forward(s *requestScope) (endSession bool) {
 
 	// Reused conn: charge the per-user limit once (a stale redial below re-sends
 	// the same request and is not charged again), then serialize once so a
-	// stale redial can re-send identical bytes.
+	// stale redial can re-send identical bytes. The charge is made before the
+	// first write because no dial is needed here; so, like an h2 stream (see
+	// forwardH2), a stale-conn redial that the SSRF dialer then refuses has
+	// already been charged. That needs a stale keep-alive conn and a
+	// destination that started resolving to a refused address: rare.
 	if p.chargeUserLimitNow(s) {
 		return true
 	}

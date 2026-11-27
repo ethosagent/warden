@@ -635,3 +635,28 @@ func TestUserLimit_RefusedTunnelNotCharged(t *testing.T) {
 		t.Errorf("buckets = %d, want 1 after one dialed tunnel", n)
 	}
 }
+
+// TestUserLimit_H2SSRFRefusedIsCharged pins a known gap: the h2 transport
+// dials the upstream inside RoundTrip, after the charge, so an h2 stream the
+// SSRF dialer refuses has already consumed budget (on HTTP/1.1 it has not, see
+// TestUserLimit_SSRFDeniedNotCharged). The stream still gets 502 with the
+// ssrf_* deny. Follow-up: own the h2 upstream connection
+// (http2.Transport.NewClientConn + ClientConn.ReserveNewRequest) so the dial
+// happens before the charge; this test then flips to "not charged".
+func TestUserLimit_H2SSRFRefusedIsCharged(t *testing.T) {
+	e := newIDEnvCfg(t, IdentityModeAttribute, limitEdit(config.Policy{UserLimits: []config.UserLimit{engRule("5/hour")}}, nil))
+	e.p.dialTLS = func(string, string, *tls.Config) (*tls.Conn, error) {
+		return nil, &SSRFError{Reason: SSRFReasonBlocked, AddrClass: "private"}
+	}
+	cc := e.h2("")
+	if st := h2Get(t, cc, map[string]string{"X-Warden-Identity": "Bearer tok-alice"}); st != http.StatusBadGateway {
+		t.Fatalf("SSRF-refused h2 stream = %d, want 502", st)
+	}
+	if n := bucketsOf(e); n != 1 {
+		t.Errorf("buckets = %d, want 1: the h2 stream is charged before the transport dials (known gap)", n)
+	}
+	evs := waitEvents(t, e.store, 1)
+	if len(evs) != 1 || evs[0].Decision != "deny" || !strings.HasPrefix(evs[0].Reason, "ssrf_") || evs[0].Protocol != "http2" {
+		t.Errorf("events = %+v, want one ssrf_* deny on http2", evs)
+	}
+}
