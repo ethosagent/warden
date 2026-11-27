@@ -313,6 +313,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			"hint", "set console.auth: oidc (see docs/control-plane.md, \"Migrating from none to oidc\")")
 	}
 
+	// The consent block, like console:, comes from --config only. Nil (absent or
+	// enabled: false) means no portal route, table or goroutine below.
+	consentCfg, err := resolveConsent(logger, configPath, servedPath, stateDir, consoleCfg, pol.Identity.Issuer, os.Getenv)
+	if err != nil {
+		return fail(err)
+	}
+
 	if err := checkAdminAuditFlags(consoleCfg, stateDir, p); err != nil {
 		return fail(err)
 	}
@@ -650,6 +657,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		AlertDBPath:         alertDBPath,
 		SecretStore:         secretStore,
 		Console:             consoleCfg,
+		Consent:             consentCfg,
 		ClientSecret:        clientSecret,
 		Now:                 clk.Now,
 
@@ -780,6 +788,16 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 				_ = srv.integrationsStore.Close() // Start never ran, so nothing else closes it
 			}
 			return fail(errors.New("control-plane: --policy-store=versioned: the head policy failed to load (see the log above); refusing to start"))
+		}
+		// Workers get the head from policy_versions, which `warden policy import`
+		// can write while the CP is stopped: the issuer bindings checked against
+		// the served YAML at startup must hold for the head too.
+		wire, _, _, _ := srv.policy.snapshot()
+		if err := srv.checkIssuerBindings(wire.Settings); err != nil {
+			if srv.integrationsStore != nil {
+				_ = srv.integrationsStore.Close() // Start never ran, so nothing else closes it
+			}
+			return fail(fmt.Errorf("control-plane: --policy-store=versioned: the head policy breaks an identity.issuer binding: %w", err))
 		}
 		// First versioned start: the served YAML becomes version 1, with the
 		// served /policy bytes and ETag unchanged (W-P1-PVER-07). Not

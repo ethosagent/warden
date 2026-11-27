@@ -166,6 +166,11 @@ type Config struct {
 	// sessions, login and role enforcement on /dashboard/ and /central/secrets;
 	// the zero value (Auth "" == none) changes no behaviour.
 	Console config.ConsoleConfig
+	// Consent is the CP-local consent sign-in config, resolved from --config by
+	// resolveConsent. Nil (the default) means the portal is off and nothing is
+	// mounted; when set, the settings writers keep identity.issuer equal to
+	// Consent.OIDC.Issuer.
+	Consent *config.ConsentConfig
 	// ClientSecret is the console OIDC client secret, read by Run from the
 	// environment variable console.oidc.clientSecretEnv names. It is never logged.
 	ClientSecret string
@@ -1337,6 +1342,9 @@ func (s *Server) writeSettingsChecked(ctx context.Context, in config.SettingsWir
 		return s.publishSettings(ctx, in, meta, check)
 	}
 	if err := s.checkIssuerCollision(in.Identity); err != nil {
+		return err
+	}
+	if err := s.checkConsentIssuer(in.Identity); err != nil {
 		return err
 	}
 	s.writeMu.Lock()
