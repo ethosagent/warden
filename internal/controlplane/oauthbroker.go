@@ -120,6 +120,7 @@ func (s *Server) initBroker() {
 		hc.Callback = b
 	}
 	s.brokerHTTP = oauthbrokerhttp.New(hc)
+	s.initUserTokens(now)
 }
 
 // brokerVault adapts consent.store (secrets.SecretStore) to

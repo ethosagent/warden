@@ -43,7 +43,7 @@ func TestGrantStoreConformanceSchema(t *testing.T) {
 		"connect_attempts": {"state_hash", "pending_id", "iss", "sub", "user_key", "provider", "scopes_json", "verifier",
 			"browser_hash", "created_at", "expires_at"},
 		"oauth_grants": {"user_key", "iss", "sub", "provider", "grant_id", "prev_grant_id", "state", "scopes_json", "provider_account_id",
-			"provider_account_login", "granted_at", "updated_at", "last_used_at", "revoked_at"},
+			"provider_account_login", "granted_at", "updated_at", "last_used_at", "revoked_at", "last_refresh_at", "last_refresh_status"},
 	}
 	for table, cols := range want {
 		rows, err := db.SQL().Query(`SELECT name, type FROM pragma_table_info(?)`, table)
@@ -257,4 +257,38 @@ func TestDefaultLimits(t *testing.T) {
 	if got := (oauthbroker.Limits{MaxLiveAttempts: 5}).WithDefaults(); got.MaxLiveAttempts != 5 || got.MaxOpenPendingsPerUser != 20 {
 		t.Fatalf("WithDefaults = %+v", got)
 	}
+}
+
+// TestRecordRefresh: the refresh bookkeeping columns (oauthbroker/0004) are set
+// only on the row that still holds the grant id, accept only the closed status
+// words, and are read back through GetGrant.
+func TestRecordRefresh(t *testing.T) {
+	ctx := context.Background()
+	clk := clocktest.NewFake(oauthbrokertest.Start)
+	s := New(openDB(t), Options{Clock: clk})
+	g, err := s.BeginGrant(ctx, oauthbroker.GrantRef{UserKey: "u1", Iss: "https://idp.example.test", Sub: "s", Provider: "google"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActivateGrant(ctx, g.GrantID, []string{"a"}, oauthbroker.Account{}); err != nil {
+		t.Fatal(err)
+	}
+	at := clk.Now().Add(time.Minute)
+	if err := s.RecordRefresh(ctx, "u1", "google", g.GrantID, oauthbroker.RefreshStatusWritebackFailed, at); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetGrant(ctx, "u1", "google")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastRefreshStatus != oauthbroker.RefreshStatusWritebackFailed || !got.LastRefreshAt.Equal(at) {
+		t.Fatalf("last refresh = %v %q", got.LastRefreshAt, got.LastRefreshStatus)
+	}
+	if err := s.RecordRefresh(ctx, "u1", "google", "other-grant", oauthbroker.RefreshStatusOK, at); !errors.Is(err, oauthbroker.ErrNotFound) {
+		t.Fatalf("a stale grant id stamped the row: %v", err)
+	}
+	if err := s.RecordRefresh(ctx, "u1", "google", g.GrantID, "free text", at); !errors.Is(err, oauthbroker.ErrInvalid) {
+		t.Fatalf("an unknown status was accepted: %v", err)
+	}
+	var _ oauthbroker.RefreshRecorder = s
 }

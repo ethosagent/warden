@@ -50,6 +50,7 @@ var Fakes = map[string]FakeEntry{
 	"config.ConfigProvider":    entry("fakes.FakeConfigProvider", newConfigProviderFake, configProviderConformance),
 	"secrets.SecretProvider":   entry("fakes.FakeSecretProvider", newSecretProviderFake, secretProviderConformance),
 	"secrets.SecretStore":      entry("fakes.NewFakeSecretStore", func(testing.TB) *fakes.FakeSecretStore { return fakes.NewFakeSecretStore() }, secretStoreConformance),
+	"secrets.VersionedStore":   entry("fakes.NewFakeSecretStore", func(testing.TB) *fakes.FakeSecretStore { return fakes.NewFakeSecretStore() }, versionedStoreConformance),
 	"analytics.AnalyticsStore": entry("fakes.FakeAnalyticsStore", func(testing.TB) *fakes.FakeAnalyticsStore { return &fakes.FakeAnalyticsStore{} }, analyticsStoreConformance),
 	"proxy.Dialer":             entry("harness mappingDialer (via New)", newDialerFake, dialerConformance),
 	"proxy.NameResolver":       entry("dnstest.New + proxy.NewUpstreamResolver", newNameResolverFake, nameResolverConformance),
@@ -88,6 +89,7 @@ var Excluded = map[string]string{
 	"approvals.Store":                 "the control plane's own change_drafts and change_approvals tables on the cpstate SQLite DB (approvals/adapters/sqlstore); the harness runs the real one, a fake would hide the compare-and-swap transitions and the unique and append-only constraints the approvals gate depends on",
 	"approvals.ReplayStore":           "the draft_replays table on the cpstate SQLite DB (approvals/adapters/sqlstore); the harness runs the real one, a fake would hide the settle-once compare-and-swap that discards a late replay result",
 	"keys.Signer":                     "local CPU-only signing over stdlib crypto (GenerateLocal/NewLocalSigner); no external system behind the port, and a fake would hide the JOSE wire encodings (r||s, RFC 7638 kids) the verifiers pin",
+	"oauthbroker.WritebackAlerter":    "the one-method seam the control plane binds to its own finding bus (publishFinding) for the user_token_writeback_failed finding; no external system behind it, and controlplane.TestUserTokenWritebackFinding pins the finding it publishes",
 	"oauthbroker.GrantStore":          "the control plane's own pending_authorizations, connect_attempts and oauth_grants tables on the cpstate SQLite DB (oauthbroker/adapters/sqlite); no external system behind it, the harness runs the real one (WithOAuthBroker), and a fake would hide the single-statement caps, the DELETE ... RETURNING single use and the compare-and-set transitions that oauthbrokertest.Run pins for every implementation",
 
 	// Worker CA enrollment (W-P2-WCA-02), on the cpstate SQLite DB like the stores above.
@@ -235,8 +237,8 @@ func secretStoreConformance(t *testing.T, f *fakes.FakeSecretStore) {
 	var s secrets.SecretStore = f
 	ctx := context.Background()
 
-	if _, err := s.Get(ctx, "k"); !errors.Is(err, secrets.ErrSecretNotFound) {
-		t.Fatalf("Get(absent) error = %v, want ErrSecretNotFound", err)
+	if _, err := s.Get(ctx, "k"); !errors.Is(err, secrets.ErrSecretNotFound) || !errors.Is(err, secrets.ErrNotFound) {
+		t.Fatalf("Get(absent) error = %v, want ErrNotFound and ErrSecretNotFound", err)
 	}
 	if err := s.Put(ctx, "k", "v1"); err != nil {
 		t.Fatal(err)
@@ -284,8 +286,38 @@ func secretStoreConformance(t *testing.T, f *fakes.FakeSecretStore) {
 	if err := s.Delete(ctx, "k"); err != nil {
 		t.Errorf("Delete of an absent key must be idempotent, got %v", err)
 	}
-	if _, err := s.Get(ctx, "k"); !errors.Is(err, secrets.ErrSecretNotFound) {
-		t.Errorf("Get after Delete error = %v, want ErrSecretNotFound", err)
+	if _, err := s.Get(ctx, "k"); !errors.Is(err, secrets.ErrNotFound) {
+		t.Errorf("Get after Delete error = %v, want ErrNotFound", err)
+	}
+}
+
+// --- secrets.VersionedStore ---
+
+func versionedStoreConformance(t *testing.T, f *fakes.FakeSecretStore) {
+	var s secrets.VersionedStore = f
+	ctx := context.Background()
+
+	if _, _, err := s.GetVersion(ctx, "k"); !errors.Is(err, secrets.ErrNotFound) {
+		t.Fatalf("GetVersion(absent) error = %v, want ErrNotFound", err)
+	}
+	if err := s.PutIfVersion(ctx, "k", "v1", 0); err != nil {
+		t.Fatalf("PutIfVersion(absent, 0) = %v; version 0 must create", err)
+	}
+	if err := s.PutIfVersion(ctx, "k", "other", 0); !errors.Is(err, secrets.ErrVersionConflict) {
+		t.Fatalf("PutIfVersion(existing, 0) = %v, want ErrVersionConflict", err)
+	}
+	v, ver, err := s.GetVersion(ctx, "k")
+	if err != nil || v != "v1" || ver != 1 {
+		t.Fatalf("GetVersion = %q, %d, %v; want v1 at version 1", v, ver, err)
+	}
+	if err := s.PutIfVersion(ctx, "k", "v2", ver); err != nil {
+		t.Fatalf("PutIfVersion(current) = %v", err)
+	}
+	if err := s.PutIfVersion(ctx, "k", "stale", ver); !errors.Is(err, secrets.ErrVersionConflict) {
+		t.Fatalf("PutIfVersion(stale) = %v, want ErrVersionConflict", err)
+	}
+	if v, ver, _ := s.GetVersion(ctx, "k"); v != "v2" || ver != 2 {
+		t.Errorf("after a conflict GetVersion = %q, %d; want v2 at version 2, unchanged", v, ver)
 	}
 }
 

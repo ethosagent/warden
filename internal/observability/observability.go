@@ -39,6 +39,10 @@
 //	SetBundleState:               warden.bundle.seq, warden.bundle.age_seconds, warden.bundle.stale
 //	                              gauges, no labels (a kid is never a label)
 //	RecordSignInStarted(outcome): started, reused, rate_limited, issuer_unreachable
+//	RecordCPUserTokenRefresh:     warden.cp.user_token.refresh.total{provider,outcome}; outcome is the closed
+//	                              set of oauthbroker user-token refresh outcomes, anything else is "other";
+//	                              no user, agent or sub label (provider is a registered id or "other")
+//	RecordCPUserTokenWritebackFailure: warden.cp.user_token.writeback_failures.total, no labels
 //	RecordBlocklist*:             unlabelled (an entry count and a closed-session count)
 //
 // Disabled mode is free: when Config.Enabled is false (or the *Metrics is nil)
@@ -102,29 +106,31 @@ type Metrics struct {
 	provider *sdkmetric.MeterProvider
 	meter    metric.Meter
 
-	requests       metric.Int64Counter
-	blocked        metric.Int64Counter
-	secretSwaps    metric.Int64Counter
-	scanFindings   metric.Int64Counter
-	judge          metric.Int64Counter
-	scoped         metric.Int64Counter
-	identityVerify metric.Int64Counter
-	signInStarted  metric.Int64Counter
-	auditLines     metric.Int64Counter
-	auditErrors    metric.Int64Counter
-	auditDropped   metric.Int64Counter
-	addedLatency   metric.Float64Histogram
-	breakerOpen    metric.Int64UpDownCounter
-	cacheStale     metric.Int64UpDownCounter
-	buildInfo      metric.Int64Gauge
-	blocklistSize  metric.Int64Gauge
-	blocklistCut   metric.Int64Counter
-	clockSkew      metric.Float64Gauge
-	certRenewals   metric.Int64Counter
-	bundleRejected metric.Int64Counter
-	bundleSeq      metric.Int64Gauge
-	bundleAge      metric.Float64Gauge
-	bundleStale    metric.Int64Gauge
+	requests           metric.Int64Counter
+	blocked            metric.Int64Counter
+	secretSwaps        metric.Int64Counter
+	scanFindings       metric.Int64Counter
+	judge              metric.Int64Counter
+	scoped             metric.Int64Counter
+	identityVerify     metric.Int64Counter
+	signInStarted      metric.Int64Counter
+	cpUserTokenRefresh metric.Int64Counter
+	cpUserTokenWBFail  metric.Int64Counter
+	auditLines         metric.Int64Counter
+	auditErrors        metric.Int64Counter
+	auditDropped       metric.Int64Counter
+	addedLatency       metric.Float64Histogram
+	breakerOpen        metric.Int64UpDownCounter
+	cacheStale         metric.Int64UpDownCounter
+	buildInfo          metric.Int64Gauge
+	blocklistSize      metric.Int64Gauge
+	blocklistCut       metric.Int64Counter
+	clockSkew          metric.Float64Gauge
+	certRenewals       metric.Int64Counter
+	bundleRejected     metric.Int64Counter
+	bundleSeq          metric.Int64Gauge
+	bundleAge          metric.Float64Gauge
+	bundleStale        metric.Int64Gauge
 }
 
 // ShutdownFunc flushes and closes the meter provider. It is always non-nil; in
@@ -300,6 +306,18 @@ func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metr
 		metric.WithDescription("Challenge-mode sign-in requests by outcome (started, reused, rate_limited, issuer_unreachable)."),
 	); err != nil {
 		return nil, fmt.Errorf("observability: identity sign-in counter: %w", err)
+	}
+	if m.cpUserTokenRefresh, err = meter.Int64Counter(
+		"warden.cp.user_token.refresh.total",
+		metric.WithDescription("Control-plane per-user token mints by provider and outcome (cache, stored, refreshed, grant_missing, scope_insufficient, reconsent_required, unavailable)."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: cp user token refresh counter: %w", err)
+	}
+	if m.cpUserTokenWBFail, err = meter.Int64Counter(
+		"warden.cp.user_token.writeback_failures.total",
+		metric.WithDescription("Rotated refresh tokens the control plane could not persist after every retry."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: cp user token writeback counter: %w", err)
 	}
 	if m.clockSkew, err = meter.Float64Gauge(
 		"warden.controlplane.clock_skew_seconds",
@@ -655,6 +673,37 @@ func (m *Metrics) RecordSignInStarted(outcome string) {
 	m.signInStarted.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("outcome", outcome),
 	))
+}
+
+// userTokenOutcomes is the closed outcome set of RecordCPUserTokenRefresh.
+var userTokenOutcomes = map[string]bool{
+	"cache": true, "stored": true, "refreshed": true, "grant_missing": true, "scope_insufficient": true,
+	"reconsent_required": true, "unavailable": true,
+}
+
+// RecordCPUserTokenRefresh increments warden.cp.user_token.refresh.total
+// {provider,outcome}. provider must already be a registered provider id or
+// "other" (the caller maps it); an unknown outcome is recorded as "other".
+func (m *Metrics) RecordCPUserTokenRefresh(provider, outcome string) {
+	if m == nil {
+		return
+	}
+	if !userTokenOutcomes[outcome] {
+		outcome = "other"
+	}
+	m.cpUserTokenRefresh.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("provider", provider),
+		attribute.String("outcome", outcome),
+	))
+}
+
+// RecordCPUserTokenWritebackFailure increments
+// warden.cp.user_token.writeback_failures.total (no labels).
+func (m *Metrics) RecordCPUserTokenWritebackFailure() {
+	if m == nil {
+		return
+	}
+	m.cpUserTokenWBFail.Add(context.Background(), 1)
 }
 
 // RecordBlocklistEntries sets the warden.blocklist.entries gauge to the number

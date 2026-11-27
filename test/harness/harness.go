@@ -266,6 +266,10 @@ type H struct {
 	// bundleMode (WithBundles) boots the control plane with --bundles set to
 	// it, on top of the versioned policy store and the signing keys.
 	bundleMode string
+	// wantPerUserVault (WithPerUserSecretsVault) boots the control plane with
+	// consent, a Vault consent.store on consentVault and perUserSecrets on.
+	wantPerUserVault bool
+	consentVault     *fakes.FakeVaultKV
 	// bundleModeSet is true once WithBundles was applied (its mode may be the
 	// empty default); without it the harness control plane runs --bundles=off.
 	bundleModeSet bool
@@ -712,6 +716,12 @@ func New(t testing.TB, opts ...Option) *H {
 	for _, opt := range opts {
 		opt(h)
 	}
+	if h.wantPerUserVault && (h.wantConsent || h.wantBroker) {
+		// Each option renders its own consent block (oidc client, store,
+		// providers); merging them would silently drop one side's config.
+		t.Fatal("harness: WithPerUserSecretsVault owns the consent block (vault store and google provider); " +
+			"it cannot combine with WithConsent or WithOAuthBroker")
+	}
 	// Baseline BEFORE boot: only goroutines the harness itself starts can
 	// outlive it.
 	h.leakBaseline = runtime.NumGoroutine()
@@ -787,6 +797,9 @@ func (h *H) boot() {
 	}
 	if h.wantCPAdmin {
 		h.prepareCPAdmin()
+	}
+	if h.wantPerUserVault {
+		h.preparePerUserVault()
 	}
 
 	if h.suppliedTarget != nil {
@@ -908,6 +921,7 @@ func (h *H) writeCPConfig() string {
 	b.WriteString(h.brokerYAML())
 	b.WriteString(h.keysYAML())
 	b.WriteString(h.tokenServiceYAML())
+	b.WriteString(h.perUserVaultYAML())
 	b.WriteString(h.workerCAYAML())
 	b.WriteString(h.fakeJudgeYAML())
 	b.WriteString(h.auditJSONLogYAML())

@@ -2829,15 +2829,15 @@ consent:
   enabled: true
   # oidc, session, idpLink ... as above
   store:
-    backend: aws                 # aws | vault (not yet available) | echo (--dev only)
+    backend: aws                 # aws | vault | echo (--dev only)
     namePrefix: warden-cp/       # default; must end with /
     aws:
       region: us-east-1          # required for aws
-    # vault:                     # accepted once the Vault KV v2 store lands
-    #   addr: https://vault.example.com:8200
-    #   mount: secret
-    #   namespace: team          # optional
-    #   tokenEnv: VAULT_TOKEN    # env var NAME, never the token
+    # vault:                     # with backend: vault (KV version 2 only)
+    #   addr: https://vault.example.com:8200   # https unless the host is loopback
+    #   mount: secret            # a KV v2 mount; not sys, auth, identity or cubbyhole
+    #   namespace: team          # optional (Vault Enterprise / HCP)
+    #   tokenEnv: VAULT_TOKEN    # env var NAME (default VAULT_TOKEN), never the token
 ```
 
 Logical keys (built only by the `secrets.UserKey` helpers; `<userKey>` is a
@@ -2859,7 +2859,7 @@ With the default prefix the backend name of `idp/<userKey>` is
   token field, and the strict parser rejects one.
 - **Persistence.** With `consent.idpLink.enabled` (the default) the control
   plane refuses to start unless `consent.store` is configured with a backend
-  that keeps values (aws today); no store and `echo` are refused, naming
+  that keeps values (aws or vault); no store and `echo` are refused, naming
   `consent.idpLink.enabled` and `consent.store.backend`. Set
   `idpLink.enabled: false` to run consent sign-in without a store.
 - **Startup refusals.** The control plane refuses to start, naming both keys,
@@ -2868,9 +2868,8 @@ With the default prefix the backend name of `idp/<userKey>` is
   case-insensitively, and with the default prefix filled in). For AWS the region and
   account are not taken into account: a worker grant on a prefix usually spans
   regions, and the account behind a credential is not known before calling AWS.
-  It also refuses a `consent.store` that nests with `keys.store.aws.namePrefix`,
-  `backend: echo` without `--dev` (echo keeps no value), and, for now,
-  `backend: vault`. A settings write, rollback, applied draft or `warden policy
+  It also refuses a `consent.store` that nests with `keys.store.aws.namePrefix`
+  and `backend: echo` without `--dev` (echo keeps no value). A settings write, rollback, applied draft or `warden policy
   import` that would move `secretStore` onto the `consent.store` namespace is
   refused with 400 `{"error":"user_store_overlap","detail":...}`.
 - **Reserved namespaces.** `idp/`, `users/`, `revoking/` and `oauth-clients/`
@@ -2924,19 +2923,109 @@ is widened:
 }
 ```
 
-The Vault equivalent, once the Vault backend lands: a policy attached only to
-the control plane's token, and no worker policy that names the path.
+#### Vault KV v2 backend (`backend: vault`)
+
+The Vault store speaks the KV version 2 HTTP API. The token is read once at
+startup from the control plane's environment variable named by `tokenEnv`
+(default `VAULT_TOKEN`); no YAML key, settings field or bundle carries it, and
+no log line or error holds it. Before it serves anything the control plane
+probes the mount (`GET /v1/sys/internal/ui/mounts/<mount>`, the preflight the
+`vault kv` CLI runs) with that token and namespace, and refuses to start when:
+
+- the variable is empty (the error names it);
+- the mount is not a KV version 2 engine rooted at exactly `mount`
+  (`secrets.ErrNotKV2`; a KV v1 mount would silently ignore compare-and-swap
+  and turn `metadata/` into an ordinary secret);
+- the mount or the namespace does not exist (404). A 404 at startup is never
+  read as an empty store;
+- the token has no capability on the mount (403), or Vault is unreachable.
+
+`addr` must be https unless the host is loopback (the token travels on every
+request), redirects are never followed, and `mount` may not be a Vault system
+path (`sys`, `auth`, `identity`, `cubbyhole`). Every new key is written with
+`max_versions=1`, so an overwritten refresh token is not recoverable from
+Vault's version history.
+
+A policy attached only to the control plane's token, and no worker policy that
+names the path (use your mount and prefix if you changed them):
 
 ```hcl
 # warden-cp: the control plane token only
 path "secret/data/warden-cp/*"     { capabilities = ["create", "read", "update", "delete"] }
-path "secret/metadata/warden-cp/*" { capabilities = ["read", "list", "delete"] }
+# Every write first sets max_versions=1 on the key's metadata, so writes need
+# create and update on metadata/ too; Delete removes every version there.
+path "secret/metadata/warden-cp/*" { capabilities = ["create", "read", "update", "list", "delete"] }
 ```
+
+The startup probe needs no rule of its own: Vault answers
+`sys/internal/ui/mounts/<mount>` for a token that holds any capability on a
+path inside the mount, and the two rules above are inside it. Do not grant a
+broader path such as `secret/*` to make the probe pass; a 403 from the probe
+means the token or the namespace is wrong.
+
+Two mount-level settings are recommended as a backstop:
+
+- `vault write secret/config max_versions=1`: even a key written outside
+  Warden keeps one version.
+- `cas_required`: the store writes with `options.cas` (compare-and-swap) where
+  it reads a version first, and a plain `Put` fails on a `cas_required=true`
+  mount. Leave `cas_required` off on the consent.store mount (or the key
+  metadata) until every writer of it uses compare-and-swap.
+
+`List` walks `metadata/` and can return a key whose `Get` is not found (its
+data was soft-deleted); callers treat that as absent.
 
 Upgrade note: an existing `secrets[]` placeholder or `auth[]` credential value
 under `idp/`, `users/`, `revoking/` or `oauth-clients/` now fails validation with
 the message above; rename it before upgrading. Other placeholders are
 unaffected.
+
+## Per-user secrets config (`perUserSecrets:`)
+
+`perUserSecrets` turns on per-user credentials (P3 "Act as the user"): a
+per-user placeholder is swapped for the calling user's own access token,
+minted by the control plane from the grant that user connected in the consent
+portal. It is a CP-local top-level block, a sibling of `secretStore`. It is
+off by default; with the block absent or `enabled: false`, `GET /policy`, its
+ETag, the signed bundle and worker behaviour are unchanged. The block is never
+on `GET /policy` or the settings wire; workers receive the value-free mappings
+only as a signed-bundle section. It holds no secret: grants live only in
+`consent.store`.
+
+```yaml
+perUserSecrets:
+  enabled: true
+  workerCacheTTL: 5m              # default 5m; allowed 30s to 15m
+  mappings:
+    - placeholder: GOOGLE_USER    # 8-128 characters of [A-Za-z0-9_{}-]
+      provider: google            # a consent.providers id
+      scopes: [https://www.googleapis.com/auth/gmail.readonly]
+      domains: [gmail.googleapis.com]   # required; allowlist domain grammar
+      in: [header]                # header and/or query; default [header]
+      agents: [support-bot]       # required; the bound agent ids allowed
+```
+
+Validation (only while `enabled` is true, so a half-written disabled block in
+the served copy never blocks a start): `domains` is required and uses the
+allowlist grammar (exact, `*.suffix`, `~regex`); `in` is `header` and/or
+`query` (the body is not supported, so a mapping never buffers a body);
+`provider` is a provider id (`^[a-z][a-z0-9-]{0,31}$`); every agent is a valid
+agent id; scopes are non-empty, without whitespace and without duplicates.
+A per-user placeholder must not equal, contain or be contained in a static
+`secrets[]` placeholder or another mapping's placeholder, because the static
+swap replaces substrings (`GOOGLE` and `GOOGLE_USER` are refused together).
+The strict parser rejects any other key, so no value or token field exists.
+
+With `enabled: true` the control plane refuses to start, naming the missing
+key, unless:
+
+- `consent.store` is configured (with `consent.enabled`) on a backend that
+  keeps values (aws or vault);
+- `tokenService.enabled` is true (only a bound Warden token can release a
+  user's credential);
+- `--bundles` is `offer` or `require` (the mappings and revocations reach
+  workers only in the signed bundle);
+- every mapping's `provider` is listed in `consent.providers`.
 
 ## Worker CA (`workerCA:`)
 

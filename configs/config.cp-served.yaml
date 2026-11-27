@@ -21,3 +21,20 @@ observability:
   enabled: true
   metrics:
     enabled: true              # Prometheus /metrics on the admin listener
+
+# Per-user secrets (P3, off by default; CP-local, never on GET /policy). A
+# per-user placeholder is swapped for the CALLING user's own access token,
+# minted by the control plane from the grant the user connected in the consent
+# portal. Enabling it needs consent.store (aws or vault), consent.providers with
+# the provider, tokenService.enabled and --bundles offer|require; the control
+# plane refuses to start without them. See docs/control-plane.md.
+# perUserSecrets:
+#   enabled: true
+#   workerCacheTTL: 5m            # default 5m; allowed 30s-15m
+#   mappings:
+#     - placeholder: GOOGLE_USER  # 8-128 of [A-Za-z0-9_{}-]; must not overlap secrets[]
+#       provider: google          # a consent.providers id
+#       scopes: [https://www.googleapis.com/auth/gmail.readonly]
+#       domains: [gmail.googleapis.com]   # required; allowlist domain grammar
+#       in: [header]              # header and/or query (default [header])
+#       agents: [support-bot]     # required; bound agent ids

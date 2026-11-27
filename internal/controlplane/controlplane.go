@@ -235,6 +235,9 @@ type Config struct {
 	// with the broker migrations enabled. Start runs its 1-minute sweeper. Nil
 	// means the broker is off: no sweeper, no tables.
 	GrantStore oauthbroker.GrantStore
+	// UserTokenMetrics receives the CP user-token instruments
+	// (observability.Metrics implements it); nil records nothing.
+	UserTokenMetrics oauthbroker.EngineMetrics
 	// OAuthRegistry is the provider registry built from consent.providers
 	// (oauthbroker.NewRegistry) when the broker is enabled. With GrantStore,
 	// Consent and the portal it mounts /connect/start (W-P3-BRKR-03); nil keeps
@@ -394,6 +397,9 @@ type Server struct {
 	// takes (the callback, the reconciler, and the refresh, revoke and
 	// offboarding code that follows); one set per control plane.
 	grantLocks *oauthbroker.GrantLocks
+	// userTokens is the user-token refresh engine (W-P3-PUS-03), built with the
+	// broker when consent.store is set; nil otherwise. W-P3-PUS-07 mounts it.
+	userTokens *oauthbroker.Engine
 	// audit is the admin audit middleware's state; nil when cfg.AdminAudit is
 	// (admin audit disabled), in which case no route is wrapped.
 	audit *adminAuditor

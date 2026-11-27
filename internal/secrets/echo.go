@@ -67,6 +67,8 @@ func NewEchoStore() *EchoStore {
 // Get returns the key ITSELF as the "value" — the defining echo contract. It
 // requires no prior Put (the echo value is derived purely from the key) and
 // errors only on an empty key.
+// It therefore never returns ErrNotFound: no non-empty key is ever missing
+// from the echo backend.
 func (s *EchoStore) Get(_ context.Context, key string) (string, error) {
 	if key == "" {
 		return "", ErrEmptyKey

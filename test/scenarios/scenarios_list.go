@@ -297,6 +297,7 @@ var All = slices.Concat(
 		// revoking/ and oauth-clients/ are hidden from the list and refused on
 		// POST and DELETE with 403 reserved_key.
 		{Name: "reserved_user_secret_namespaces", Opts: strictAuthOpts(), Run: reservedUserSecretNamespaces},
+		{Name: "consent_store_vault", Opts: consentStoreVaultOpts(), Run: consentStoreVault},
 		// Held long-poll (W-P1-WTOK-09): a revoke out of process returns that
 		// token's held /policy with 401 while another token's stays parked.
 		{Name: "worker_token_longpoll_revoke", Opts: workerTokenOpts(), Run: workerTokenLongPollRevoke},

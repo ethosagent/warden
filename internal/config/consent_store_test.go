@@ -75,6 +75,13 @@ func TestConsentStore(t *testing.T) {
 		{"vault without block", "  store:\n    backend: vault\n", "consent.store.vault {addr, mount}"},
 		{"vault bad addr", "  store:\n    backend: vault\n    vault:\n      addr: vault:8200\n      mount: secret\n", "vault.addr"},
 		{"vault no mount", "  store:\n    backend: vault\n    vault:\n      addr: https://v\n", "vault.mount is required"},
+		{"vault plain http", "  store:\n    backend: vault\n    vault:\n      addr: http://vault.example.com:8200\n      mount: secret\n", "must use https unless its host is loopback"},
+		{"vault loopback http", "  store:\n    backend: vault\n    vault:\n      addr: http://127.0.0.1:8200\n      mount: secret\n", ""},
+		{"vault localhost http", "  store:\n    backend: vault\n    vault:\n      addr: http://localhost:8200\n      mount: secret\n", ""},
+		{"vault sys mount", "  store:\n    backend: vault\n    vault:\n      addr: https://v\n      mount: sys\n", "reserved Vault system path"},
+		{"vault auth sub mount", "  store:\n    backend: vault\n    vault:\n      addr: https://v\n      mount: Auth/kv\n", "reserved Vault system path"},
+		{"vault cubbyhole mount", "  store:\n    backend: vault\n    vault:\n      addr: https://v\n      mount: cubbyhole\n", "reserved Vault system path"},
+		{"vault identity mount", "  store:\n    backend: vault\n    vault:\n      addr: https://v\n      mount: identity\n", "reserved Vault system path"},
 		{"vault bad tokenEnv", "  store:\n    backend: vault\n    vault:\n      addr: https://v\n      mount: m\n      tokenEnv: \"1X\"\n", "tokenEnv"},
 		// Credentials are never YAML: the strict parse refuses any such key.
 		{"aws credential key", "  store:\n    backend: aws\n    aws:\n      region: us-east-1\n      secretAccessKey: x\n", "field secretAccessKey not found"},

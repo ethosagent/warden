@@ -65,13 +65,19 @@ func (s *awsSecretStore) keyFromName(name string) string {
 }
 
 // Get resolves key to its raw value via GetSecretValue. It logs nothing here
-// (the value is in hand); callers reference it by Ref, never raw.
+// (the value is in hand); callers reference it by Ref, never raw. A missing
+// secret matches both ErrNotFound and ErrSecretNotFound.
 func (s *awsSecretStore) Get(_ context.Context, key string) (string, error) {
 	if key == "" {
 		return "", ErrEmptyKey
 	}
 	val, err := s.client.GetSecretValue(s.name(key))
 	if err != nil {
+		if errors.Is(err, ErrSecretNotFound) && !errors.Is(err, ErrNotFound) {
+			// Keep ErrSecretNotFound for existing AWS callers and add the
+			// backend-neutral ErrNotFound every SecretStore wraps.
+			return "", fmt.Errorf("secrets: aws get %q: %w: %w", key, ErrNotFound, err)
+		}
 		return "", fmt.Errorf("secrets: aws get %q: %w", key, err)
 	}
 	return val, nil
