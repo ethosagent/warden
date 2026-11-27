@@ -1,0 +1,284 @@
+package oauthbroker
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/ethosagent/warden/internal/config"
+)
+
+type fakeResolver struct {
+	mu    sync.Mutex
+	vals  map[string]string
+	err   error
+	calls int
+}
+
+func (f *fakeResolver) ResolveSecret(_ context.Context, key string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.vals[key], nil
+}
+
+func noEnv(string) (string, bool) { return "", false }
+
+func newReg(t *testing.T, cfgs []config.OAuthProviderConfig, o Options) (*Registry, *bytes.Buffer) {
+	t.Helper()
+	var buf bytes.Buffer
+	if o.Logger == nil {
+		o.Logger = slog.New(slog.NewJSONHandler(&buf, nil))
+	}
+	if o.LookupEnv == nil {
+		o.LookupEnv = noEnv
+	}
+	r, err := NewRegistry(cfgs, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r, &buf
+}
+
+func TestRegistryDefaults(t *testing.T) {
+	res := &fakeResolver{vals: map[string]string{"oauth-clients/google": "g-secret", "oauth-clients/github": "h-secret", "oauth-clients/ghapp": "a-secret"}}
+	r, logs := newReg(t, []config.OAuthProviderConfig{
+		{ID: "google", Type: "google", ClientID: "gcid", ClientSecretKey: "oauth-clients/google"},
+		{ID: "github", Type: "github", ClientID: "hcid", ClientSecretKey: "oauth-clients/github"},
+		{ID: "ghapp", Type: "githubApp", ClientID: "acid", ClientSecretKey: "oauth-clients/ghapp"},
+	}, Options{Resolver: res})
+
+	g, err := r.Get("google")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.AuthURL != "https://accounts.google.com/o/oauth2/v2/auth" ||
+		g.TokenURL != "https://oauth2.googleapis.com/token" ||
+		g.RevokeURL != "https://oauth2.googleapis.com/revoke" || g.UserinfoURL != "" {
+		t.Errorf("google endpoints = %+v", g)
+	}
+	if want := map[string]string{"access_type": "offline", "prompt": "consent"}; !reflect.DeepEqual(g.ExtraAuthParams, want) {
+		t.Errorf("google params = %v, want %v", g.ExtraAuthParams, want)
+	}
+	for _, id := range []string{"github", "ghapp"} {
+		h, _ := r.Get(id)
+		if h.AuthURL != "https://github.com/login/oauth/authorize" ||
+			h.TokenURL != "https://github.com/login/oauth/access_token" ||
+			h.RevokeURL != "https://api.github.com/applications/{client_id}/grant" ||
+			h.UserinfoURL != "https://api.github.com/user" {
+			t.Errorf("%s endpoints = %+v", id, h)
+		}
+		if len(h.ExtraAuthParams) != 0 {
+			t.Errorf("%s params = %v, want none", id, h.ExtraAuthParams)
+		}
+	}
+	h, _ := r.Get("github")
+	if got := h.RevokeEndpoint(); got != "https://api.github.com/applications/hcid/grant" {
+		t.Errorf("RevokeEndpoint = %q", got)
+	}
+	if line := logs.String(); !strings.Contains(line, `"msg":"oauth_providers_loaded"`) || !strings.Contains(line, `"ids":["ghapp","github","google"]`) {
+		t.Errorf("startup log = %s", line)
+	}
+}
+
+func TestRegistryOverridesAndPinnedDefaults(t *testing.T) {
+	r, _ := newReg(t, []config.OAuthProviderConfig{
+		{ID: "ghe", Type: "github", ClientID: "c", ClientSecretKey: "oauth-clients/ghe",
+			AuthURL: "https://ghe.example.com/login/oauth/authorize", TokenURL: "https://ghe.example.com/login/oauth/access_token",
+			RevokeURL: "https://ghe.example.com/api/v3/applications/{client_id}/grant", UserinfoURL: "https://ghe.example.com/api/v3/user"},
+		{ID: "google", Type: "google", ClientID: "c", ClientSecretKey: "oauth-clients/google",
+			ExtraAuthParams: map[string]string{"prompt": "select_account", "hd": "example.com"}},
+		{ID: "gen", Type: "generic", ClientID: "c", ClientSecretKey: "oauth-clients/gen",
+			AuthURL: "https://gen.example.com/a", TokenURL: "https://gen.example.com/t"},
+	}, Options{})
+	ghe, _ := r.Get("ghe")
+	if ghe.TokenURL != "https://ghe.example.com/login/oauth/access_token" || ghe.RevokeEndpoint() != "https://ghe.example.com/api/v3/applications/c/grant" {
+		t.Errorf("override ignored: %+v", ghe)
+	}
+	g, _ := r.Get("google")
+	if g.ExtraAuthParams["prompt"] != "select_account" || g.ExtraAuthParams["access_type"] != "offline" || g.ExtraAuthParams["hd"] != "example.com" {
+		t.Errorf("google params = %v", g.ExtraAuthParams)
+	}
+	gen, _ := r.Get("gen")
+	if gen.RevokeURL != "" || gen.UserinfoURL != "" || gen.RevokeEndpoint() != "" {
+		t.Errorf("generic must have no implicit endpoints: %+v", gen)
+	}
+	// Mutating a returned map or the config input must not change the registry's view of google defaults.
+	if g2, _ := r.Get("google"); g2 != g {
+		t.Error("Get must return the same provider")
+	}
+}
+
+func TestRegistryGetAndList(t *testing.T) {
+	r, logs := newReg(t, []config.OAuthProviderConfig{
+		{ID: "zeta", Type: "github", ClientID: "c", ClientSecretKey: "oauth-clients/zeta"},
+		{ID: "alpha", Type: "github", ClientID: "c", ClientSecretKey: "oauth-clients/alpha"},
+	}, Options{})
+	if _, err := r.Get("unknown"); !errors.Is(err, ErrUnknownProvider) {
+		t.Errorf("Get(unknown) = %v, want ErrUnknownProvider", err)
+	}
+	if got := r.List(); !reflect.DeepEqual(got, []string{"alpha", "zeta"}) {
+		t.Errorf("List = %v", got)
+	}
+	r.List()[0] = "tampered"
+	if r.List()[0] != "alpha" {
+		t.Error("List must return a copy")
+	}
+	_ = logs
+	// No providers: empty registry, no log line.
+	e, elogs := newReg(t, nil, Options{})
+	if e.Len() != 0 || len(e.List()) != 0 || elogs.Len() != 0 {
+		t.Errorf("empty registry: len=%d list=%v log=%q", e.Len(), e.List(), elogs.String())
+	}
+	if _, err := e.Get("google"); !errors.Is(err, ErrUnknownProvider) {
+		t.Errorf("empty Get = %v", err)
+	}
+}
+
+func TestRegistryRejectsInvalidConfig(t *testing.T) {
+	bad := []config.OAuthProviderConfig{{ID: "_x", Type: "github", ClientID: "c", ClientSecretKey: "oauth-clients/_x"}}
+	if _, err := NewRegistry(bad, Options{LookupEnv: noEnv}); err == nil || !strings.Contains(err.Error(), "consent.providers[0].id") {
+		t.Errorf("err = %v, want id validation", err)
+	}
+	insecure := []config.OAuthProviderConfig{{ID: "x", Type: "github", ClientID: "c", ClientSecretKey: "oauth-clients/x", TokenURL: "http://evil.example.com/t"}}
+	if _, err := NewRegistry(insecure, Options{LookupEnv: noEnv}); err == nil {
+		t.Error("non-loopback http token URL must be refused by the registry too")
+	}
+}
+
+func TestRegistryEnvSecret(t *testing.T) {
+	cfg := []config.OAuthProviderConfig{{ID: "gh", Type: "github", ClientID: "c", ClientSecretEnv: "GH_SECRET"}}
+	if _, err := NewRegistry(cfg, Options{LookupEnv: noEnv}); err == nil || !strings.Contains(err.Error(), "GH_SECRET") {
+		t.Errorf("missing env must be fatal and name the variable, got %v", err)
+	}
+	empty := func(string) (string, bool) { return "", true }
+	if _, err := NewRegistry(cfg, Options{LookupEnv: empty}); err == nil || !strings.Contains(err.Error(), "GH_SECRET") {
+		t.Errorf("empty env must be fatal, got %v", err)
+	}
+	if _, err := NewRegistry(cfg, Options{}); err == nil {
+		t.Error("nil LookupEnv with an env secret must be an error")
+	}
+	r, _ := newReg(t, cfg, Options{LookupEnv: func(k string) (string, bool) {
+		if k == "GH_SECRET" {
+			return "s3cr3t", true
+		}
+		return "", false
+	}})
+	p, _ := r.Get("gh")
+	s, err := p.ClientSecret(context.Background())
+	if err != nil || s.Reveal() != "s3cr3t" {
+		t.Errorf("ClientSecret = %v, %v", s, err)
+	}
+}
+
+func TestRegistryKeySecretRetry(t *testing.T) {
+	cfg := []config.OAuthProviderConfig{{ID: "google", Type: "google", ClientID: "c", ClientSecretKey: "oauth-clients/google"}}
+	res := &fakeResolver{err: errors.New("store down")}
+	r, logs := newReg(t, cfg, Options{Resolver: res})
+	if !strings.Contains(logs.String(), `"level":"WARN"`) || !strings.Contains(logs.String(), "oauth_client_secret_unavailable") {
+		t.Errorf("startup read failure must log WARN, got %s", logs.String())
+	}
+	p, _ := r.Get("google")
+	if _, err := p.ClientSecret(context.Background()); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	// An empty stored value is also unavailable.
+	res.mu.Lock()
+	res.err = nil
+	res.mu.Unlock()
+	if _, err := p.ClientSecret(context.Background()); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("empty secret err = %v, want ErrProviderUnavailable", err)
+	}
+	res.mu.Lock()
+	res.vals = map[string]string{"oauth-clients/google": "late-secret"}
+	res.mu.Unlock()
+	s, err := p.ClientSecret(context.Background())
+	if err != nil || s.Reveal() != "late-secret" {
+		t.Fatalf("retry on first use = %v, %v", s, err)
+	}
+	res.mu.Lock()
+	calls := res.calls
+	res.mu.Unlock()
+	if _, _ = p.ClientSecret(context.Background()); res.calls != calls {
+		t.Error("a successful read must be cached")
+	}
+	// No resolver at all.
+	r2, _ := newReg(t, cfg, Options{})
+	p2, _ := r2.Get("google")
+	if _, err := p2.ClientSecret(context.Background()); !errors.Is(err, ErrProviderUnavailable) {
+		t.Errorf("no resolver err = %v", err)
+	}
+}
+
+func TestProviderRedaction(t *testing.T) {
+	const secret = "TOP-SECRET-CLIENT-VALUE"
+	var logs bytes.Buffer
+	res := &fakeResolver{vals: map[string]string{"oauth-clients/google": secret}}
+	r, _ := newReg(t, []config.OAuthProviderConfig{
+		{ID: "google", Type: "google", ClientID: "cid", ClientSecretKey: "oauth-clients/google"},
+		{ID: "gh", Type: "github", ClientID: "cid2", ClientSecretEnv: "E"},
+	}, Options{Resolver: res, LookupEnv: func(string) (string, bool) { return secret, true }})
+	for _, id := range []string{"google", "gh"} {
+		p, _ := r.Get(id)
+		s, err := p.ClientSecret(context.Background())
+		if err != nil || s.Reveal() != secret {
+			t.Fatalf("secret not loaded: %v", err)
+		}
+		slog.New(slog.NewJSONHandler(&logs, nil)).Info("p", "provider", p, "secret", s)
+		outs := []string{
+			fmt.Sprintf("%v", p), fmt.Sprintf("%+v", p), fmt.Sprintf("%#v", p),
+			fmt.Sprintf("%#v", s), fmt.Sprintf("%v", s), fmt.Sprintf("%+v", struct{ S Secret }{s}),
+			logs.String(),
+		}
+		j, _ := json.Marshal(s)
+		outs = append(outs, string(j))
+		for i, o := range outs {
+			if strings.Contains(o, secret) {
+				t.Errorf("%s output %d leaks the secret: %s", id, i, o)
+			}
+		}
+	}
+}
+
+func TestProviderCapScopes(t *testing.T) {
+	r, _ := newReg(t, []config.OAuthProviderConfig{
+		{ID: "google", Type: "google", ClientID: "c", ClientSecretKey: "oauth-clients/google",
+			AllowedScopes: []string{"openid", "drive", "drive"}, DefaultScopes: []string{"openid"}},
+		{ID: "ghapp", Type: "githubApp", ClientID: "c", ClientSecretKey: "oauth-clients/ghapp"},
+	}, Options{})
+	g, _ := r.Get("google")
+	if !reflect.DeepEqual(g.AllowedScopes, []string{"drive", "openid"}) {
+		t.Errorf("AllowedScopes = %v (want sorted, de-duplicated)", g.AllowedScopes)
+	}
+	capped, rej := g.CapScopes([]string{"drive", "gmail.send"})
+	if !reflect.DeepEqual(capped, []string{"drive"}) || !reflect.DeepEqual(rej, []string{"gmail.send"}) {
+		t.Errorf("cap = %v rejected %v", capped, rej)
+	}
+	// githubApp has no scopes: any requested scope is outside the cap.
+	a, _ := r.Get("ghapp")
+	if _, rej := a.CapScopes([]string{"repo"}); !reflect.DeepEqual(rej, []string{"repo"}) {
+		t.Errorf("githubApp rejected = %v", rej)
+	}
+}
+
+func TestRegistryDoesNotAliasConfig(t *testing.T) {
+	cfg := []config.OAuthProviderConfig{{ID: "g", Type: "google", ClientID: "c", ClientSecretKey: "oauth-clients/g",
+		AllowedScopes: []string{"a"}, AllowedAccountDomains: []string{"example.com"}, ExtraAuthParams: map[string]string{"login_hint": "x"}}}
+	r, _ := newReg(t, cfg, Options{})
+	cfg[0].AllowedScopes[0] = "zzz"
+	cfg[0].AllowedAccountDomains[0] = "evil.com"
+	p, _ := r.Get("g")
+	if p.AllowedScopes[0] != "a" || p.AllowedAccountDomains[0] != "example.com" {
+		t.Errorf("registry aliases the config slices: %+v", p)
+	}
+}

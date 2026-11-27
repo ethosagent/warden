@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/ethosagent/warden/internal/config"
 )
 
 // The golden value is computed independently of this package:
@@ -101,5 +103,23 @@ func TestKeyBuilders(t *testing.T) {
 				t.Errorf("%s(%q) = %q, %v; want ErrInvalidUserKey", name, k, got, err)
 			}
 		}
+	}
+}
+
+// config duplicates the provider-id grammar (it cannot import secrets); the two
+// must agree for every id consent.providers accepts.
+func TestProviderIDGrammarMatchesConfig(t *testing.T) {
+	for _, id := range []string{"google", "github", "a", "a-b", "a1", "_x", "-x", "1a", "A", "ab_c", "", strings.Repeat("a", 32), strings.Repeat("a", 33), "x.y", "x/y", "é"} {
+		if got, want := config.ValidOAuthProviderID(id), ValidProviderID(id); got != want {
+			t.Errorf("id %q: config.ValidOAuthProviderID = %v, secrets.ValidProviderID = %v", id, got, want)
+		}
+	}
+}
+
+// consent.providers[].clientSecretKey must equal secrets.ClientSecretKey(id).
+func TestConfigClientSecretKeyMatchesSecrets(t *testing.T) {
+	want, err := ClientSecretKey("google")
+	if err != nil || want != config.ReservedClientSecretNamespace+"/google" {
+		t.Errorf("ClientSecretKey = %q, %v", want, err)
 	}
 }

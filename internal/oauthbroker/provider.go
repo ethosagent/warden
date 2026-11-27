@@ -1,0 +1,267 @@
+package oauthbroker
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/url"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/ethosagent/warden/internal/config"
+)
+
+// Built-in endpoints. They are constants on purpose: a google or github
+// provider with no override always talks to exactly these hosts. The only way
+// to change them is an operator's explicit authURL/tokenURL/revokeURL/
+// userinfoURL in the CP-local config (GitHub Enterprise Server), validated as
+// https (loopback excepted) at load.
+const (
+	GoogleAuthURL   = "https://accounts.google.com/o/oauth2/v2/auth"
+	GoogleTokenURL  = "https://oauth2.googleapis.com/token"
+	GoogleRevokeURL = "https://oauth2.googleapis.com/revoke"
+
+	GitHubAuthURL     = "https://github.com/login/oauth/authorize"
+	GitHubTokenURL    = "https://github.com/login/oauth/access_token"
+	GitHubRevokeURL   = "https://api.github.com/applications/{client_id}/grant"
+	GitHubUserinfoURL = "https://api.github.com/user"
+)
+
+// Sentinel errors. Handlers map ErrUnknownProvider to 404/400 and
+// ErrProviderUnavailable to 503 provider_unavailable.
+var (
+	ErrUnknownProvider     = errors.New("oauthbroker: unknown provider")
+	ErrProviderUnavailable = errors.New("oauthbroker: provider client secret unavailable")
+)
+
+// SecretResolver reads a logical consent.store key (oauth-clients/<id>); the
+// control plane wires it to consent.store (W-P3-BRKR-06).
+type SecretResolver interface {
+	ResolveSecret(ctx context.Context, key string) (string, error)
+}
+
+// Options are the injected dependencies of NewRegistry.
+type Options struct {
+	// LookupEnv reads a clientSecretEnv variable at startup (os.LookupEnv in
+	// production). It is injected because this is a domain package.
+	LookupEnv func(string) (string, bool)
+	// Resolver reads clientSecretKey secrets; nil means none can be read yet and
+	// they report ErrProviderUnavailable until a resolver exists.
+	Resolver SecretResolver
+	Logger   *slog.Logger
+}
+
+// Provider is one configured OAuth provider with its endpoint defaults applied.
+// It is immutable after NewRegistry. It prints only non-secret fields under
+// every formatting verb and in slog.
+type Provider struct {
+	ID       string
+	Type     string
+	ClientID string
+	// AuthURL, TokenURL, RevokeURL and UserinfoURL are absolute https (or
+	// loopback http) URLs. RevokeURL may hold {client_id}; use RevokeEndpoint.
+	AuthURL     string
+	TokenURL    string
+	RevokeURL   string
+	UserinfoURL string
+	// AllowedScopes is the operator's cap; DefaultScopes is a subset of it. Both
+	// are sorted and de-duplicated. A githubApp provider has none.
+	AllowedScopes []string
+	DefaultScopes []string
+	// ExtraAuthParams are merged into the authorization URL after the broker's
+	// own parameters (config validation bars overriding those).
+	ExtraAuthParams       map[string]string
+	AllowedAccountDomains []string
+	RequireEmailMatch     bool
+
+	secretKey string // logical consent.store key, when the secret is not from env
+	resolver  SecretResolver
+
+	mu     sync.Mutex
+	secret Secret
+}
+
+// RevokeEndpoint returns RevokeURL with {client_id} replaced by the
+// path-escaped client id, or "" when the provider has no revoke endpoint.
+func (p *Provider) RevokeEndpoint() string {
+	if p.RevokeURL == "" {
+		return ""
+	}
+	return strings.ReplaceAll(p.RevokeURL, "{client_id}", url.PathEscape(p.ClientID))
+}
+
+// CapScopes caps requested to this provider's AllowedScopes; see CapScopes.
+func (p *Provider) CapScopes(requested []string) (capped, rejected []string) {
+	return CapScopes(requested, p.AllowedScopes)
+}
+
+// ClientSecret returns the client secret. An env secret was read at startup. A
+// consent.store secret is read on first use when startup could not read it, and
+// a failure is ErrProviderUnavailable (503 provider_unavailable); the underlying
+// error is wrapped for the operator log but never carries the secret.
+func (p *Provider) ClientSecret(ctx context.Context) (Secret, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.secret.IsZero() {
+		return p.secret, nil
+	}
+	if p.secretKey == "" || p.resolver == nil {
+		return Secret{}, fmt.Errorf("%w: provider %s", ErrProviderUnavailable, p.ID)
+	}
+	v, err := p.resolver.ResolveSecret(ctx, p.secretKey)
+	if err != nil || v == "" {
+		if err == nil {
+			err = errors.New("empty secret")
+		}
+		return Secret{}, fmt.Errorf("%w: provider %s: %w", ErrProviderUnavailable, p.ID, err)
+	}
+	p.secret = NewSecret(v)
+	return p.secret, nil
+}
+
+func (p *Provider) String() string {
+	if p == nil {
+		return "Provider(nil)"
+	}
+	return fmt.Sprintf("Provider{id=%s type=%s client_id=%s auth=%s token=%s client_secret=%s}", p.ID, p.Type, p.ClientID, p.AuthURL, p.TokenURL, redacted)
+}
+
+// GoString keeps %#v from walking the struct (and its secret).
+func (p *Provider) GoString() string { return p.String() }
+
+// LogValue implements slog.LogValuer with non-secret fields only.
+func (p *Provider) LogValue() slog.Value {
+	if p == nil {
+		return slog.StringValue("nil")
+	}
+	return slog.GroupValue(
+		slog.String("id", p.ID),
+		slog.String("type", p.Type),
+		slog.String("client_id", p.ClientID),
+		slog.String("client_secret", redacted),
+	)
+}
+
+// Registry holds the configured providers. It is fixed after NewRegistry; a
+// change needs a CP restart.
+type Registry struct {
+	byID map[string]*Provider
+	ids  []string
+}
+
+// NewRegistry validates cfgs (the same rules as config load), applies the
+// built-in endpoint defaults and reads every clientSecretEnv. A missing or
+// empty variable is a fatal error naming it. A clientSecretKey that cannot be
+// read now logs WARN and is retried on first use. It logs one INFO line
+// oauth_providers_loaded when there is at least one provider; with none it
+// returns an empty registry and logs nothing.
+func NewRegistry(cfgs []config.OAuthProviderConfig, opts Options) (*Registry, error) {
+	if err := config.ValidateOAuthProviders(cfgs); err != nil {
+		return nil, err
+	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	r := &Registry{byID: make(map[string]*Provider, len(cfgs))}
+	for _, c := range cfgs {
+		p, err := buildProvider(c, opts, logger)
+		if err != nil {
+			return nil, err
+		}
+		r.byID[p.ID] = p
+		r.ids = append(r.ids, p.ID)
+	}
+	sort.Strings(r.ids)
+	if len(r.ids) > 0 {
+		logger.Info("oauth_providers_loaded", "ids", r.ids)
+	}
+	return r, nil
+}
+
+func buildProvider(c config.OAuthProviderConfig, opts Options, logger *slog.Logger) (*Provider, error) {
+	p := &Provider{
+		ID:                    c.ID,
+		Type:                  c.Type,
+		ClientID:              c.ClientID,
+		AuthURL:               c.AuthURL,
+		TokenURL:              c.TokenURL,
+		RevokeURL:             c.RevokeURL,
+		UserinfoURL:           c.UserinfoURL,
+		AllowedScopes:         normalizeScopes(c.AllowedScopes),
+		DefaultScopes:         normalizeScopes(c.DefaultScopes),
+		AllowedAccountDomains: append([]string(nil), c.AllowedAccountDomains...),
+		RequireEmailMatch:     c.RequireEmailMatch,
+		resolver:              opts.Resolver,
+	}
+	switch c.Type {
+	case config.OAuthProviderGoogle:
+		p.AuthURL = firstNonEmpty(c.AuthURL, GoogleAuthURL)
+		p.TokenURL = firstNonEmpty(c.TokenURL, GoogleTokenURL)
+		p.RevokeURL = firstNonEmpty(c.RevokeURL, GoogleRevokeURL)
+		p.ExtraAuthParams = map[string]string{"access_type": "offline", "prompt": "consent"}
+	case config.OAuthProviderGitHub, config.OAuthProviderGitHubApp:
+		p.AuthURL = firstNonEmpty(c.AuthURL, GitHubAuthURL)
+		p.TokenURL = firstNonEmpty(c.TokenURL, GitHubTokenURL)
+		p.RevokeURL = firstNonEmpty(c.RevokeURL, GitHubRevokeURL)
+		p.UserinfoURL = firstNonEmpty(c.UserinfoURL, GitHubUserinfoURL)
+	}
+	if len(c.ExtraAuthParams) > 0 && p.ExtraAuthParams == nil {
+		p.ExtraAuthParams = make(map[string]string, len(c.ExtraAuthParams))
+	}
+	for k, v := range c.ExtraAuthParams { // operator values override type defaults
+		p.ExtraAuthParams[k] = v
+	}
+
+	switch {
+	case c.ClientSecretEnv != "":
+		if opts.LookupEnv == nil {
+			return nil, fmt.Errorf("oauthbroker: provider %q uses clientSecretEnv %s but no environment lookup was supplied", c.ID, c.ClientSecretEnv)
+		}
+		v, ok := opts.LookupEnv(c.ClientSecretEnv)
+		if !ok || v == "" {
+			return nil, fmt.Errorf("oauthbroker: provider %q: environment variable %s (consent.providers clientSecretEnv) is not set", c.ID, c.ClientSecretEnv)
+		}
+		p.secret = NewSecret(v)
+	default:
+		p.secretKey = c.ClientSecretKey
+		if opts.Resolver != nil {
+			if _, err := p.ClientSecret(context.Background()); err != nil {
+				logger.Warn("oauth_client_secret_unavailable", "provider", c.ID, "err", err.Error())
+			}
+		}
+	}
+	return p, nil
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// Get returns the provider id or ErrUnknownProvider.
+func (r *Registry) Get(id string) (*Provider, error) {
+	if p, ok := r.byID[id]; ok {
+		return p, nil
+	}
+	return nil, ErrUnknownProvider
+}
+
+// List returns the configured provider ids, sorted.
+func (r *Registry) List() []string { return append([]string(nil), r.ids...) }
+
+// Providers returns the configured providers in List order.
+func (r *Registry) Providers() []*Provider {
+	out := make([]*Provider, 0, len(r.ids))
+	for _, id := range r.ids {
+		out = append(out, r.byID[id])
+	}
+	return out
+}
+
+// Len returns the number of providers.
+func (r *Registry) Len() int { return len(r.ids) }

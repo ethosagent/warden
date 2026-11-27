@@ -134,6 +134,7 @@ classes:
       - internal/approvals   # change drafts, the approval state machine, the Store port and Service (APPR-01)
       - internal/bundle   # signed policy bundle payload, envelope, Sign and Verify (pure; #95)
       - internal/workerca         # worker CA issue/verify, SPIFFE worker ids: pure, x509 creation injected (#88)
+      - internal/oauthbroker   # OAuth broker domain: provider registry, scope caps, token record (BRKR-01)
       - internal/apikeys   # scoped CP API keys: wak_ format, scope registry, Store port, Index (APIK-01)
 
   # DEVTOOL — developer tooling; no Warden package may import it. Exempt from
@@ -200,6 +201,7 @@ zones:
     - internal/approvals/adapters/**   # the SQLite change-draft store (APPR-01)
     - internal/workerca/adapters/signer/**  # x509.CreateCertificate lives here: only the control plane issues worker certs (#88)
     - internal/apikeys/**   # CP-only API keys: domain and its SQLite adapter (APIK-01)
+    - internal/oauthbroker   # CP-only OAuth broker: per-user provider grants (BRKR-01)
   shared:
     - internal/config
     - internal/denyreason

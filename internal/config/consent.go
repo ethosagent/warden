@@ -37,7 +37,8 @@ const (
 //
 // The struct deliberately leaves room for the keys later tickets add: `store`
 // (the CP-only user credential store, W-P3-CSIG-06), `providers` and `connect`
-// (W-P3-BRKR-01), `publicURL` (W-P3-JIT-01) and `offboarding` (W-P3-OFFB-02).
+// (W-P3-BRKR-01), `publicURL` (W-P3-JIT-01) and `offboarding` (W-P3-OFFB-02);
+// store, providers and connect are declared now.
 // A key not declared here fails the strict parse until its ticket adds it.
 type ConsentConfig struct {
 	Enabled bool
@@ -50,6 +51,11 @@ type ConsentConfig struct {
 	// W-P3-CSIG-06), or nil when the block is absent. No worker ever holds a
 	// credential for it; see ConsentStore.
 	Store *ConsentStore
+	// Providers are the OAuth providers the broker connects employees to
+	// (`consent.providers`, W-P3-BRKR-01); empty means no broker.
+	Providers []OAuthProviderConfig
+	// Connect is `consent.connect`: callback URL and pending TTL.
+	Connect ConsentConnect
 }
 
 // ConsentOIDC is the portal's OIDC client registration. Scopes are not
@@ -109,7 +115,9 @@ type rawConsent struct {
 		RefreshLifetime string `yaml:"refreshLifetime"`
 	} `yaml:"idpLink"`
 	// A pointer tells an absent store (no CP-only store) from a configured one.
-	Store *rawConsentStore `yaml:"store"`
+	Store     *rawConsentStore   `yaml:"store"`
+	Providers []rawOAuthProvider `yaml:"providers"`
+	Connect   rawConsentConnect  `yaml:"connect"`
 }
 
 // defaultConsent is the block with every default applied (disabled).
@@ -118,6 +126,7 @@ func defaultConsent() ConsentConfig {
 		OIDC:    ConsentOIDC{ClientID: DefaultConsentClientID},
 		Session: ConsentSession{Idle: DefaultConsentIdle, Absolute: DefaultConsentAbsolute},
 		IdPLink: ConsentIdPLink{Enabled: true, RefreshLifetime: DefaultConsentRefreshLifetime},
+		Connect: ConsentConnect{PendingTTL: DefaultConnectPendingTTL},
 	}
 }
 
@@ -163,6 +172,12 @@ func parseConsent(r *rawConsent) (ConsentConfig, error) {
 		c.IdPLink.Enabled = *r.IdPLink.Enabled
 	}
 	c.Store = parseConsentStore(r.Store)
+	c.Providers = parseOAuthProviders(r.Providers)
+	conn, err := parseConsentConnect(r.Connect, c.OIDC.RedirectURL)
+	if err != nil {
+		return ConsentConfig{}, err
+	}
+	c.Connect = conn
 	return c, nil
 }
 
@@ -209,7 +224,10 @@ func validateConsent(c ConsentConfig, consoleRedirect string) error {
 	if c.IdPLink.RefreshLifetime <= 0 {
 		return fmt.Errorf("config: consent.idpLink.refreshLifetime (%s) must be > 0", c.IdPLink.RefreshLifetime)
 	}
-	return validateConsentStore(c.Store)
+	if err := validateConsentStore(c.Store); err != nil {
+		return err
+	}
+	return validateConsentProviders(c)
 }
 
 func sameURL(a, b string) bool {

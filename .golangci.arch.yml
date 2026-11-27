@@ -42,6 +42,7 @@ linters:
             - ${base-path}/internal/approvals/**
             - ${base-path}/internal/bundle/**
             - ${base-path}/internal/workerca/**
+            - ${base-path}/internal/oauthbroker/**
             - ${base-path}/internal/apikeys/**
             - ${base-path}/internal/policy/**
             - ${base-path}/internal/scan/**
@@ -118,6 +119,7 @@ linters:
             - ${base-path}/internal/approvals/**
             - ${base-path}/internal/bundle/**
             - ${base-path}/internal/workerca/**
+            - ${base-path}/internal/oauthbroker/**
             - ${base-path}/internal/apikeys/**
             - '!${base-path}/cmd/**'
             - '!${base-path}/internal/worker/**'
@@ -225,6 +227,7 @@ linters:
             - '!${base-path}/internal/approvals/**'
             - '!${base-path}/internal/bundle/**'
             - '!${base-path}/internal/workerca/**'
+            - '!${base-path}/internal/oauthbroker/**'
             - '!${base-path}/internal/apikeys/**'
             - '!${base-path}/tools/**'
             - '!${base-path}/internal/archtest/**'
