@@ -577,6 +577,9 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	policy.Upstream = parseUpstream(raw.Upstream)
 	policy.Proxy = parseProxy(raw.Proxy)
 
+	if err := NormalizeUserLimits(&policy); err != nil {
+		return nil, err
+	}
 	if err := validate(policy); err != nil {
 		return nil, err
 	}
@@ -616,7 +619,7 @@ func validate(p Policy) error {
 	if err := ValidateCostBlockedUsers(p.CostBlockedUsers); err != nil {
 		return err
 	}
-	if err := ValidateUserLimits(&p); err != nil {
+	if err := ValidateUserLimits(p); err != nil {
 		return err
 	}
 	if err := unenforcedUserLimits(p); err != nil {

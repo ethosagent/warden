@@ -421,7 +421,7 @@ func (s *Server) candidateWire(head policyWire, render func(root map[string]yaml
 func (s *Server) publishPolicy(ctx context.Context, p config.Policy, meta dashboard.WriteMeta) error {
 	return s.writeEdit(ctx, func(w *policyWire) error {
 		cand, err := s.candidateWire(*w, func(root map[string]yaml.Node) error {
-			return renderPolicyBlock(root, policyYAMLOfPolicy(p))
+			return renderPolicyEdit(root, p)
 		})
 		if err != nil {
 			return err

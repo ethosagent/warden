@@ -1107,7 +1107,7 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 		_ = yaml.Unmarshal(cur, &root)
 	}
 
-	if err := renderPolicyBlock(root, policyYAMLOfPolicy(p)); err != nil {
+	if err := renderPolicyEdit(root, p); err != nil {
 		return err
 	}
 
@@ -2031,4 +2031,32 @@ func policyOfWire(w policyWire) config.Policy {
 		Allowlist: w.Allowlist, Denylist: w.Denylist,
 		UserLimits: w.UserLimits, DefaultUserLimit: w.DefaultUserLimit, AnonymousLimit: w.AnonymousLimit,
 	}
+}
+
+// hasUserLimits reports whether py carries any of the three per-user limit keys.
+func (py policyYAML) hasUserLimits() bool {
+	return len(py.UserLimits) > 0 || py.DefaultUserLimit != nil || py.AnonymousLimit != nil
+}
+
+// policyYAMLFromRoot reads the per-user limit keys of root's current policy
+// block. A missing or unreadable block yields none.
+func policyYAMLFromRoot(root map[string]yaml.Node) policyYAML {
+	var cur policyYAML
+	if node, ok := root["policy"]; ok {
+		_ = node.Decode(&cur)
+	}
+	return cur
+}
+
+// renderPolicyEdit writes a dashboard policy edit into root's policy block.
+// The editors own allow/deny only: an edit whose Policy carries no per-user
+// limit keys keeps the ones already in root (the file's, or the head doc's in
+// versioned mode), so saving an allowlist never deletes a limit rule.
+func renderPolicyEdit(root map[string]yaml.Node, p config.Policy) error {
+	py := policyYAMLOfPolicy(p)
+	if !py.hasUserLimits() {
+		cur := policyYAMLFromRoot(root)
+		py.UserLimits, py.DefaultUserLimit, py.AnonymousLimit = cur.UserLimits, cur.DefaultUserLimit, cur.AnonymousLimit
+	}
+	return renderPolicyBlock(root, py)
 }

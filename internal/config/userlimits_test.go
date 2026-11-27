@@ -6,7 +6,11 @@ import (
 	"testing"
 )
 
-func okRule(name string) UserLimit { return UserLimit{Name: name, RateLimit: "10/minute"} }
+func okMatch() UserLimitMatch { return UserLimitMatch{Groups: []string{"eng"}} }
+
+func okRule(name string) UserLimit {
+	return UserLimit{Name: name, RateLimit: "10/minute", Match: okMatch()}
+}
 
 func TestValidateUserLimits(t *testing.T) {
 	tooMany := make([]UserLimit, MaxUserLimits+1)
@@ -19,19 +23,22 @@ func TestValidateUserLimits(t *testing.T) {
 		wantErr string // empty: must pass
 	}{
 		{"valid rate only", Policy{UserLimits: []UserLimit{okRule("a")}}, ""},
-		{"valid cost only", Policy{UserLimits: []UserLimit{{Name: "a", DailyCostUSD: 5}}}, ""},
-		{"bad rate period", Policy{UserLimits: []UserLimit{{Name: "a", RateLimit: "10/fortnight"}}}, "policy.userLimits[0].rateLimit"},
-		{"bad rate on second rule", Policy{UserLimits: []UserLimit{okRule("a"), {Name: "b", RateLimit: "x"}}}, "policy.userLimits[1].rateLimit"},
-		{"neither limit", Policy{UserLimits: []UserLimit{okRule("a"), {Name: "b"}}}, "policy.userLimits[1]"},
+		{"valid cost only", Policy{UserLimits: []UserLimit{{Name: "a", DailyCostUSD: 5, Match: okMatch()}}}, ""},
+		{"bad rate period", Policy{UserLimits: []UserLimit{{Name: "a", RateLimit: "10/fortnight", Match: okMatch()}}}, "policy.userLimits[0].rateLimit"},
+		{"bad rate on second rule", Policy{UserLimits: []UserLimit{okRule("a"), {Name: "b", RateLimit: "x", Match: okMatch()}}}, "policy.userLimits[1].rateLimit"},
+		{"neither limit", Policy{UserLimits: []UserLimit{okRule("a"), {Name: "b", Match: okMatch()}}}, "policy.userLimits[1]"},
 		{"duplicate name", Policy{UserLimits: []UserLimit{okRule("a"), okRule("a")}}, "policy.userLimits[1].name"},
 		{"reserved default", Policy{UserLimits: []UserLimit{okRule("default")}}, "policy.userLimits[0].name"},
 		{"reserved anonymous", Policy{UserLimits: []UserLimit{okRule("x"), okRule("anonymous")}}, "policy.userLimits[1].name"},
-		{"missing name", Policy{UserLimits: []UserLimit{{RateLimit: "1/second"}}}, "policy.userLimits[0].name"},
+		{"missing name", Policy{UserLimits: []UserLimit{{RateLimit: "1/second", Match: okMatch()}}}, "policy.userLimits[0].name"},
 		{"bad name charset", Policy{UserLimits: []UserLimit{okRule("a b")}}, "policy.userLimits[0].name"},
-		{"negative cost", Policy{UserLimits: []UserLimit{{Name: "a", DailyCostUSD: -1}}}, "policy.userLimits[0].dailyCostUSD"},
-		{"huge cost", Policy{UserLimits: []UserLimit{{Name: "a", DailyCostUSD: 1e6 + 1}}}, "policy.userLimits[0].dailyCostUSD"},
-		{"max cost", Policy{UserLimits: []UserLimit{{Name: "a", DailyCostUSD: 1e6}}}, ""},
+		{"negative cost", Policy{UserLimits: []UserLimit{{Name: "a", DailyCostUSD: -1, Match: okMatch()}}}, "policy.userLimits[0].dailyCostUSD"},
+		{"huge cost", Policy{UserLimits: []UserLimit{{Name: "a", DailyCostUSD: 1e6 + 1, Match: okMatch()}}}, "policy.userLimits[0].dailyCostUSD"},
+		{"max cost", Policy{UserLimits: []UserLimit{{Name: "a", DailyCostUSD: 1e6, Match: okMatch()}}}, ""},
 		{"too many rules", Policy{UserLimits: tooMany}, "policy.userLimits"},
+		{"no match", Policy{UserLimits: []UserLimit{okRule("a"), {Name: "b", RateLimit: "1/second"}}}, "policy.userLimits[1].match"},
+		{"domains-only match", Policy{UserLimits: []UserLimit{{Name: "a", RateLimit: "1/second", Match: UserLimitMatch{Domains: []string{"api.openai.com"}}}}}, "policy.userLimits[0].match"},
+		{"agents-only match ok", Policy{UserLimits: []UserLimit{{Name: "a", RateLimit: "1/second", Match: UserLimitMatch{Agents: []string{"ag"}, Domains: []string{"api.openai.com"}}}}}, ""},
 		{"empty user", Policy{UserLimits: []UserLimit{{Name: "a", RateLimit: "1/second", Match: UserLimitMatch{Users: []string{" "}}}}}, "policy.userLimits[0].match.users[0]"},
 		{"empty group", Policy{UserLimits: []UserLimit{{Name: "a", RateLimit: "1/second", Match: UserLimitMatch{Groups: []string{""}}}}}, "policy.userLimits[0].match.groups[0]"},
 		{"bad agent", Policy{UserLimits: []UserLimit{{Name: "a", RateLimit: "1/second", Match: UserLimitMatch{Agents: []string{"a b"}}}}}, "policy.userLimits[0].match.agents[0]"},
@@ -46,7 +53,11 @@ func TestValidateUserLimits(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateUserLimits(&tc.p)
+			before := fmt.Sprintf("%+v", tc.p.UserLimits)
+			err := ValidateUserLimits(tc.p)
+			if after := fmt.Sprintf("%+v", tc.p.UserLimits); after != before {
+				t.Fatalf("ValidateUserLimits mutated its input:\n%s\n%s", before, after)
+			}
 			switch {
 			case tc.wantErr == "" && err != nil:
 				t.Fatalf("unexpected error: %v", err)
@@ -70,7 +81,7 @@ func TestValidateUserLimits_NormalizesAndNamesSingles(t *testing.T) {
 		DefaultUserLimit: &UserLimit{RateLimit: "1/second"},
 		AnonymousLimit:   &UserLimit{Name: "anonymous", RateLimit: "1/second"},
 	}
-	if err := ValidateUserLimits(&p); err != nil {
+	if err := NormalizeUserLimits(&p); err != nil {
 		t.Fatal(err)
 	}
 	m := p.UserLimits[0].Match
@@ -187,7 +198,7 @@ func TestDeepCopy_UserLimitsNotAliased(t *testing.T) {
 
 func TestUserLimitsGuard_NotYetEnforced(t *testing.T) {
 	for name, y := range map[string]string{
-		"userLimits":       "policy:\n  allowlist: [{domain: a.com}]\n  userLimits: [{name: a, rateLimit: 1/minute}]\n",
+		"userLimits":       "policy:\n  allowlist: [{domain: a.com}]\n  userLimits: [{name: a, match: {groups: [g]}, rateLimit: 1/minute}]\n",
 		"defaultUserLimit": "policy:\n  allowlist: [{domain: a.com}]\n  defaultUserLimit: {rateLimit: 1/minute}\n",
 		"anonymousLimit":   "policy:\n  allowlist: [{domain: a.com}]\n  anonymousLimit: {dailyCostUSD: 3}\n",
 	} {
@@ -199,7 +210,7 @@ func TestUserLimitsGuard_NotYetEnforced(t *testing.T) {
 		})
 	}
 	// An invalid rule reports its own error before the guard.
-	_, err := NewLocalYAMLProvider(writeTemp(t, "policy:\n  allowlist: [{domain: a.com}]\n  userLimits: [{name: a, rateLimit: 10/fortnight}]\n"))
+	_, err := NewLocalYAMLProvider(writeTemp(t, "policy:\n  allowlist: [{domain: a.com}]\n  userLimits: [{name: a, match: {groups: [g]}, rateLimit: 10/fortnight}]\n"))
 	if err == nil || !strings.Contains(err.Error(), "policy.userLimits[0].rateLimit") {
 		t.Fatalf("err = %v", err)
 	}
@@ -251,7 +262,7 @@ policy:
 		t.Fatalf("wire policy = %+v", got)
 	}
 	// A bad rule on the wire rejects the pull.
-	if _, _, err := parseRemotePolicy([]byte(`{"allowlist":[{"domain":"a.com"}],"userLimits":[{"name":"a","rateLimit":"10/fortnight"}]}`)); err == nil || !strings.Contains(err.Error(), "policy.userLimits[0].rateLimit") {
+	if _, _, err := parseRemotePolicy([]byte(`{"allowlist":[{"domain":"a.com"}],"userLimits":[{"name":"a","match":{"groups":["g"]},"rateLimit":"10/fortnight"}]}`)); err == nil || !strings.Contains(err.Error(), "policy.userLimits[0].rateLimit") {
 		t.Fatalf("err = %v", err)
 	}
 	// With the guard back on, the same wire is refused whole.
@@ -295,5 +306,42 @@ func TestLintUserLimits(t *testing.T) {
 	p.TLS.CACert = "ca.pem"
 	if strings.Contains(strings.Join(LintUserLimits(p), "\n"), "no CA") {
 		t.Error("CA warning with a CA configured")
+	}
+}
+
+// Normalization happens at the load sites on copies: a copied policy loads
+// normalized, and the policy it was copied from is left as it was.
+func TestNormalizeUserLimits_DeepCopyThenLoad(t *testing.T) {
+	orig := Policy{
+		UserLimits:     []UserLimit{{Name: "a", RateLimit: "1/second", Match: UserLimitMatch{Groups: []string{"b", "a", "a"}}}},
+		AnonymousLimit: &UserLimit{RateLimit: "1/second"},
+	}
+	cp := orig.DeepCopy()
+	if err := NormalizeUserLimits(&cp); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cp.UserLimits[0].Match.Groups, ","); got != "a,b" || cp.AnonymousLimit.Name != "anonymous" {
+		t.Fatalf("copy not normalized: %+v", cp.UserLimits[0])
+	}
+	if got := strings.Join(orig.UserLimits[0].Match.Groups, ","); got != "b,a,a" || orig.AnonymousLimit.Name != "" {
+		t.Fatalf("original mutated: %+v", orig.UserLimits[0])
+	}
+	// The YAML loader and the wire decoder both produce the normalized form.
+	allowUnenforcedUserLimits = true
+	t.Cleanup(func() { allowUnenforcedUserLimits = false })
+	prov, err := NewLocalYAMLProvider(writeTemp(t, "policy:\n  allowlist: [{domain: a.com}]\n  userLimits: [{name: a, rateLimit: 1/second, match: {groups: [b, a, a]}}]\n  anonymousLimit: {rateLimit: 1/second}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, _ := prov.GetPolicy()
+	if got := strings.Join(pol.UserLimits[0].Match.Groups, ","); got != "a,b" || pol.AnonymousLimit.Name != "anonymous" {
+		t.Fatalf("YAML load not normalized: %+v", pol.UserLimits[0])
+	}
+	w, _, err := parseRemotePolicy([]byte(`{"allowlist":[{"domain":"a.com"}],"userLimits":[{"name":"a","rateLimit":"1/second","match":{"groups":["b","a"]}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(w.UserLimits[0].Match.Groups, ","); got != "a,b" {
+		t.Fatalf("wire load not normalized: %v", got)
 	}
 }

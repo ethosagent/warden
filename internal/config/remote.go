@@ -584,6 +584,9 @@ func parseRemotePolicy(body []byte) (*Policy, *SettingsWire, error) {
 	p.BlockedUsers = normalizeBlockedUsers(w.BlockedUsers)
 	p.UserLimits, p.DefaultUserLimit, p.AnonymousLimit = w.UserLimits, w.DefaultUserLimit, w.AnonymousLimit
 	p.CostBlockedUsers = w.CostBlockedUsers
+	if err := NormalizeUserLimits(&p); err != nil {
+		return nil, nil, err
+	}
 	if len(w.RegisteredAgents) > 0 {
 		agents := append([]RegisteredAgent(nil), w.RegisteredAgents...)
 		SortRegisteredAgents(agents)

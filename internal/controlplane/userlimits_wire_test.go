@@ -89,3 +89,61 @@ func TestRenderPolicyBlock_KeepsUserLimits(t *testing.T) {
 		t.Errorf("wire projection = %+v", got)
 	}
 }
+
+func limitsOnlyRoot(t *testing.T) map[string]yaml.Node {
+	t.Helper()
+	head := policyWire{
+		Allowlist:        []config.AllowlistEntry{{Domain: "old.com"}},
+		UserLimits:       []config.UserLimit{{Name: "eng", RateLimit: "60/minute", Match: config.UserLimitMatch{Groups: []string{"eng"}}}},
+		DefaultUserLimit: &config.UserLimit{Name: "default", RateLimit: "1/second"},
+		AnonymousLimit:   &config.UserLimit{Name: "anonymous", DailyCostUSD: 1},
+	}
+	root := map[string]yaml.Node{}
+	if err := renderPolicyBlock(root, policyYAMLOfWire(head)); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// An edit from the dashboard carries allow/deny only. The limit keys already
+// in the file (file mode) or head doc (versioned mode; candidateWire renders the
+// head into root first) must survive it.
+func TestRenderPolicyEdit_KeepsExistingUserLimits(t *testing.T) {
+	root := limitsOnlyRoot(t)
+	edit := config.Policy{Allowlist: []config.AllowlistEntry{{Domain: "new.com"}}}
+	if err := renderPolicyEdit(root, edit); err != nil {
+		t.Fatal(err)
+	}
+	got := policyYAMLFromRoot(root)
+	if len(got.Allowlist) != 1 || got.Allowlist[0].Domain != "new.com" {
+		t.Fatalf("allowlist edit lost: %+v", got.Allowlist)
+	}
+	if len(got.UserLimits) != 1 || got.UserLimits[0].Name != "eng" || got.DefaultUserLimit == nil || got.AnonymousLimit == nil {
+		t.Fatalf("limits dropped by an allowlist edit: %+v", got)
+	}
+}
+
+// An edit that does carry limits replaces them; one that carries none on a
+// file without limits leaves the block without the keys.
+func TestRenderPolicyEdit_ReplacesWhenPresentAndStaysAbsent(t *testing.T) {
+	root := limitsOnlyRoot(t)
+	edit := config.Policy{
+		Allowlist:  []config.AllowlistEntry{{Domain: "new.com"}},
+		UserLimits: []config.UserLimit{{Name: "ops", RateLimit: "1/second", Match: config.UserLimitMatch{Groups: []string{"ops"}}}},
+	}
+	if err := renderPolicyEdit(root, edit); err != nil {
+		t.Fatal(err)
+	}
+	if got := policyYAMLFromRoot(root); len(got.UserLimits) != 1 || got.UserLimits[0].Name != "ops" || got.DefaultUserLimit != nil {
+		t.Fatalf("explicit limits not applied: %+v", got)
+	}
+	empty := map[string]yaml.Node{}
+	if err := renderPolicyEdit(empty, config.Policy{Allowlist: []config.AllowlistEntry{{Domain: "a.com"}}}); err != nil {
+		t.Fatal(err)
+	}
+	node := empty["policy"]
+	out, _ := yaml.Marshal(&node)
+	if strings.Contains(string(out), "imit") {
+		t.Fatalf("absent limits written: %s", out)
+	}
+}

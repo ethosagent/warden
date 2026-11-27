@@ -112,13 +112,33 @@ func copyUserLimits(in []UserLimit) []UserLimit {
 // the guard with the real enforcement. Tests set it to exercise the wire.
 var allowUnenforcedUserLimits = false
 
-// ValidateUserLimits normalizes and validates the per-user limit rules in p:
+// NormalizeUserLimits normalizes and validates the per-user limit rules in p:
 // userLimits, defaultUserLimit and anonymousLimit. Users, groups, agents and
-// domains are stored trimmed, deduplicated and sorted, so the served body and
-// its ETag do not depend on how the operator spelled them. Errors name the
-// field path (policy.userLimits[i].rateLimit) and never a user or group value.
-// The control plane, the YAML loader and parseRemotePolicy all call it.
-func ValidateUserLimits(p *Policy) error {
+// domains are stored trimmed, deduplicated and sorted, and the two single
+// rules get their reserved names, so the served body and its ETag do not
+// depend on how the operator spelled them. The rules are copied first and p is
+// updated only on success, so no caller's slice or pointer is mutated. The
+// YAML loader and parseRemotePolicy call it; errors name the field path
+// (policy.userLimits[i].rateLimit) and never a user or group value.
+func NormalizeUserLimits(p *Policy) error {
+	c := *p
+	c.UserLimits = copyUserLimits(p.UserLimits)
+	c.DefaultUserLimit = copyUserLimitPtr(p.DefaultUserLimit)
+	c.AnonymousLimit = copyUserLimitPtr(p.AnonymousLimit)
+	if err := normalizeUserLimitsInPlace(&c); err != nil {
+		return err
+	}
+	p.UserLimits, p.DefaultUserLimit, p.AnonymousLimit = c.UserLimits, c.DefaultUserLimit, c.AnonymousLimit
+	return nil
+}
+
+// ValidateUserLimits checks the per-user limit rules in p without changing p.
+// validate calls it, and the control plane can too.
+func ValidateUserLimits(p Policy) error {
+	return NormalizeUserLimits(&p)
+}
+
+func normalizeUserLimitsInPlace(p *Policy) error {
 	if len(p.UserLimits) > MaxUserLimits {
 		return fmt.Errorf("config: policy.userLimits: %d rules exceeds the limit of %d", len(p.UserLimits), MaxUserLimits)
 	}
@@ -143,6 +163,11 @@ func ValidateUserLimits(p *Policy) error {
 		l.Match = m
 		if err := validateUserLimitLimits(path, *l); err != nil {
 			return err
+		}
+		// Without users, groups or agents a rule would match every request
+		// ahead of defaultUserLimit; that is what defaultUserLimit is for.
+		if len(l.Match.Users) == 0 && len(l.Match.Groups) == 0 && len(l.Match.Agents) == 0 {
+			return fmt.Errorf("config: %s.match: needs users, groups or agents (domains only narrow); use defaultUserLimit for a rule that applies to everyone", path)
 		}
 	}
 	if err := validateSingleUserLimit("policy.defaultUserLimit", UserLimitNameDefault, p.DefaultUserLimit); err != nil {
@@ -346,7 +371,7 @@ func userLimitRules(p Policy) []UserLimit {
 	}
 	for i := range out {
 		if out[i].Name == "" {
-			// A rule not yet through ValidateUserLimits: name it by position.
+			// A rule not yet through NormalizeUserLimits: name it by position.
 			out[i].Name = "#" + fmt.Sprint(i)
 		}
 	}
