@@ -358,8 +358,12 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	if p.caCert != nil {
 		// Per-user limits on a terminated tunnel are charged per request; the
 		// CONNECT only peeks, so an exhausted user is refused before the 200
-		// without the tunnel costing a request of its own.
-		if g.verdict.Decision == policy.Allow {
+		// without the tunnel costing a request of its own. Only a CONNECT with a
+		// verified identity peeks: every request on it is that user's (a header
+		// cannot override it). A token-less CONNECT may carry per-request
+		// identities of many users, so it is never refused on the anonymous
+		// bucket here; each of its requests is charged to its own subject.
+		if g.verdict.Decision == policy.Allow && ci.status() == identity.StatusValid {
 			if _, denied := p.connectUserLimit(conn, ci, domain, port, false); denied {
 				return
 			}

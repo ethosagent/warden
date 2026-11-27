@@ -541,7 +541,7 @@ func lintPolicyOfWire(w policyWire) config.Policy {
 			p.Identity = *w.Settings.Identity
 		}
 		for _, a := range w.Settings.Agents {
-			p.Agents = append(p.Agents, config.AgentPolicy{ID: a.ID, Policy: a.Policy, Identity: a.Identity})
+			p.Agents = append(p.Agents, config.AgentPolicy(a))
 		}
 	}
 	return p

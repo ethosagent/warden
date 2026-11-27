@@ -331,7 +331,7 @@ func TestUserLimit_ConnectPeek(t *testing.T) {
 
 // No token, or a token that does not verify, puts the request in the
 // anonymous bucket keyed by the worker's agent, never in a user's bucket; and
-// an exhausted anonymous bucket is refused at the next anonymous CONNECT.
+// a token-less CONNECT is never refused on the anonymous bucket.
 func TestUserLimit_AnonymousBucket(t *testing.T) {
 	anon := config.UserLimit{RateLimit: "2/hour"}
 	e := newIDEnvCfg(t, IdentityModeAttribute, limitEdit(config.Policy{
@@ -348,15 +348,17 @@ func TestUserLimit_AnonymousBucket(t *testing.T) {
 		t.Fatalf("unverified-token request = %d, want 200", st)
 	}
 	assertRateLimited(t, c.getResp(""), 3600)
-	// A new anonymous CONNECT peeks the exhausted bucket and is refused.
-	_, _, status := e.connect("")
-	if !strings.Contains(status, "429") {
-		t.Errorf("anonymous CONNECT = %q, want 429", status)
+	// A token-less CONNECT is not refused on the anonymous bucket: its requests
+	// may carry other users' identities, each charged on its own.
+	c2 := e.h1("")
+	assertRateLimited(t, c2.getResp(""), 3600)
+	if st := e.h1("").get("X-Warden-Identity: Bearer tok-bob\r\n"); st != http.StatusOK {
+		t.Errorf("bob on a token-less CONNECT = %d, want 200", st)
 	}
 	if st := e.h1("Proxy-Authorization: " + basicAuth("tok-alice") + "\r\n").get(""); st != http.StatusOK {
 		t.Errorf("alice = %d, want 200 (her own rule)", st)
 	}
-	evs := waitEvents(t, e.store, 5)
+	evs := waitEvents(t, e.store, 6)
 	for _, ev := range evs {
 		if ev.Decision == "allow" && ev.UserSub == "" && ev.LimitRule != config.UserLimitNameAnonymous {
 			t.Errorf("anonymous allow = %+v", ev)
@@ -371,9 +373,9 @@ func TestUserLimit_AnonymousBucket(t *testing.T) {
 			t.Errorf("anonymous deny = %+v", d)
 		}
 	}
-	// One anonymous bucket (agent-keyed) and alice's; none for mallory.
-	if n := e.p.cfg.Policy.(*policy.Evaluator).UserLimitBuckets(); n != 2 {
-		t.Errorf("buckets = %d, want 2", n)
+	// One anonymous bucket (agent-keyed), alice's and bob's; none for mallory.
+	if n := e.p.cfg.Policy.(*policy.Evaluator).UserLimitBuckets(); n != 3 {
+		t.Errorf("buckets = %d, want 3", n)
 	}
 }
 
