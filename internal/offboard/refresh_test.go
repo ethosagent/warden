@@ -89,6 +89,8 @@ type countingSecrets struct {
 	*fakes.MemorySecretStore
 	puts    atomic.Int64
 	failPut atomic.Bool
+	// failFrom, when > 0, fails every Put whose 1-based count is >= it.
+	failFrom atomic.Int64
 }
 
 // errPutEcho is an error whose text echoes the value, as a careless backend's might.
@@ -97,8 +99,8 @@ type errPutEcho struct{ v string }
 func (e errPutEcho) Error() string { return "put failed for " + e.v }
 
 func (c *countingSecrets) Put(ctx context.Context, key, value string) error {
-	c.puts.Add(1)
-	if c.failPut.Load() {
+	n := c.puts.Add(1)
+	if from := c.failFrom.Load(); c.failPut.Load() || (from > 0 && n >= from) {
 		return errPutEcho{v: value}
 	}
 	return c.MemorySecretStore.Put(ctx, key, value)
@@ -623,7 +625,8 @@ func TestRefreshJob_Classification(t *testing.T) {
 		{"unknown 400", fakes.RefreshFailure{Status: 400, Error: "invalid_scope"}, nil, portal.LinkActive, "http_400", "transient"},
 		{"sub mismatch", fakes.RefreshFailure{}, []fakes.MintOption{fakes.WithSub("mallory")}, portal.LinkSuspect, "sub_mismatch", "suspect"},
 		{"200 without tokens", fakes.RefreshFailure{Status: 200}, nil, portal.LinkActive, "bad_response", "transient"},
-		{"expired id token (clock skew)", fakes.RefreshFailure{}, []fakes.MintOption{fakes.Expired()}, portal.LinkActive, "id_token_clock_skew", "ok"},
+		{"expired id token (clock skew)", fakes.RefreshFailure{}, []fakes.MintOption{fakes.ExpiredBy(5 * time.Minute)}, portal.LinkActive, "id_token_clock_skew", "ok"},
+		{"expired id token past the skew bound", fakes.RefreshFailure{}, []fakes.MintOption{fakes.ExpiredBy(20 * time.Minute)}, portal.LinkTokenLost, "id_token_rejected", "token_lost"},
 		{"unknown kid", fakes.RefreshFailure{}, []fakes.MintOption{fakes.WithUnpublishedKey()}, portal.LinkTokenLost, "id_token_unverified", "token_lost"},
 		{"wrong audience", fakes.RefreshFailure{}, []fakes.MintOption{fakes.WithAud("warden-console"), fakes.WithAZP("warden-console")}, portal.LinkSuspect, "id_token_invalid", "suspect"},
 	}
@@ -1036,4 +1039,74 @@ func TestRefreshJob_NoOffboarderSeam(t *testing.T) {
 			t.Errorf("Job has field %s", job.Elem().Field(i).Name)
 		}
 	}
+}
+
+// TestRefreshJob_OutageMidRun: with concurrency 4, the keys (and separately
+// consent.store writes) start failing from the second refresh on. The first
+// failure suspends the run before its retry wait, so the chains spent stay
+// bounded by what was already in flight: at most the canary plus Concurrency
+// refreshes reach the IdP, at most Concurrency users are token_lost, and the
+// run then halts with every other link unchanged.
+func TestRefreshJob_OutageMidRun(t *testing.T) {
+	const concurrency = 4
+	subs := make([]string, 12)
+	for i := range subs {
+		subs[i] = fmt.Sprintf("user%02d", i)
+	}
+	check := func(t *testing.T, r *rig, st offboard.RunStats, reason string) {
+		t.Helper()
+		calls := r.idp.RefreshRequests()
+		t.Logf("refresh calls %d, stats %+v", calls, st)
+		if calls < 2 || st.OK < 1 {
+			t.Fatalf("calls = %d, ok = %d: the outage never hit after the canary", calls, st.OK)
+		}
+		if calls > 1+concurrency {
+			t.Fatalf("refresh calls = %d, want at most %d (canary + in flight)", calls, 1+concurrency)
+		}
+		if st.TokenLost > concurrency || st.TokenLost == 0 {
+			t.Fatalf("token_lost = %d, want 1..%d (stats %+v)", st.TokenLost, concurrency, st)
+		}
+		if st.OK+st.TokenLost+st.Transient+st.StoreError != len(subs) {
+			t.Fatalf("stats = %+v", st)
+		}
+		untouched := 0
+		for _, s := range subs {
+			l := r.row(s)
+			if l.State == portal.LinkActive && l.LastErrorCode == "" && r.stored(s) == "rt-"+s+"-login-token-000130" {
+				untouched++
+			}
+		}
+		if untouched < len(subs)-calls {
+			t.Fatalf("untouched links = %d, want at least %d", untouched, len(subs)-calls)
+		}
+		if fs := r.pub.rule(offboard.RuleRefreshUnavailable); len(fs) != 1 || fs[0].Evidence != "reason="+reason {
+			t.Fatalf("findings = %+v", fs)
+		}
+	}
+	t.Run("keys", func(t *testing.T) {
+		r := newRig(t, rigOpts{noProbe: true})
+		for _, s := range subs {
+			r.login(s, "rt-"+s+"-login-token-000130")
+		}
+		var n atomic.Int64
+		r.idp.OnRefresh(func(string) {
+			if n.Add(1) == 2 {
+				// From here every ID token is signed by a key the IdP
+				// does not publish (keys rotated away).
+				for _, s := range subs {
+					r.idp.SetRefreshMint(s, fakes.WithUnpublishedKey())
+				}
+			}
+		})
+		check(t, r, r.runOnce(), "keys_unreachable")
+	})
+	t.Run("put", func(t *testing.T) {
+		r := newRig(t, rigOpts{noProbe: true})
+		for _, s := range subs {
+			r.login(s, "rt-"+s+"-login-token-000130")
+		}
+		// The canary's rotation Put lands; every later Put fails.
+		r.mem.failFrom.Store(r.mem.puts.Load() + 2)
+		check(t, r, r.runOnce(), "store_write_failed")
+	})
 }

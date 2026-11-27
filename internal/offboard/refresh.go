@@ -53,6 +53,9 @@ type TokenClient interface {
 const (
 	// DefaultFirstRunDelay is how long after Start the first run begins.
 	DefaultFirstRunDelay = time.Minute
+	// maxClockSkewAccepted bounds how long past its exp a refreshed ID token
+	// that passed every other check is still accepted (clock skew).
+	maxClockSkewAccepted = 10 * time.Minute
 	// rotateAttempts bounds the Rotate retries while the rotated token is
 	// held only in memory.
 	rotateAttempts = 3
@@ -248,12 +251,52 @@ type runState struct {
 	// chain.
 	halted   atomic.Bool
 	haltOnce sync.Once
+
+	// suspended counts refreshes that hit a first key or store failure and
+	// are waiting to retry it: while it is non-zero no new refresh token is
+	// spent. A successful retry lifts it; a failed one halts the run.
+	mu        sync.Mutex
+	open      *sync.Cond
+	suspended int
+}
+
+func newRunState() *runState {
+	rs := &runState{}
+	rs.open = sync.NewCond(&rs.mu)
+	return rs
+}
+
+func (rs *runState) suspend() {
+	rs.mu.Lock()
+	rs.suspended++
+	rs.mu.Unlock()
+}
+
+func (rs *runState) resume() {
+	rs.mu.Lock()
+	rs.suspended--
+	rs.open.Broadcast()
+	rs.mu.Unlock()
+}
+
+// waitOpen blocks while the run is suspended and reports whether refreshes
+// may go on (false: the run halted).
+func (rs *runState) waitOpen() bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	for rs.suspended > 0 && !rs.halted.Load() {
+		rs.open.Wait()
+	}
+	return !rs.halted.Load()
 }
 
 // halt stops the run's remaining refreshes and publishes one issuer-level
 // idp_refresh_unavailable Finding naming the reason.
 func (j *Job) halt(rs *runState, iss, reason string) {
+	rs.mu.Lock()
 	rs.halted.Store(true)
+	rs.open.Broadcast()
+	rs.mu.Unlock()
 	rs.haltOnce.Do(func() {
 		j.logger.Warn("offboarding_run_halted", "reason", reason)
 		j.publish(Finding{
@@ -305,7 +348,7 @@ func (j *Job) run(ctx context.Context, spread bool) (RunStats, error) {
 		mu   sync.Mutex
 		outs []outcome
 		wg   sync.WaitGroup
-		rs   runState
+		rs   = newRunState()
 	)
 	add := func(o outcome) {
 		j.cfg.Metrics.incRefresh(o.name)
@@ -317,7 +360,7 @@ func (j *Job) run(ctx context.Context, spread bool) (RunStats, error) {
 	// every refreshed ID token would be unverifiable and its chain lost.
 	if len(links) > 0 && j.cfg.KeyProbe != nil {
 		if err := j.cfg.KeyProbe(rctx); err != nil {
-			j.halt(&rs, links[0].Iss, "keys_unreachable")
+			j.halt(rs, links[0].Iss, "keys_unreachable")
 		}
 	}
 	sem := make(chan struct{}, j.cfg.Concurrency)
@@ -328,7 +371,7 @@ func (j *Job) run(ctx context.Context, spread bool) (RunStats, error) {
 dispatch:
 	for ; next < len(links); next++ {
 		l := links[next]
-		if rs.halted.Load() || j.paused.Load() {
+		if !rs.waitOpen() || j.paused.Load() {
 			break
 		}
 		if spread {
@@ -337,7 +380,7 @@ dispatch:
 			}
 		}
 		if canary {
-			o := j.refreshOne(rctx, &rs, l)
+			o := j.refreshOne(rctx, rs, l)
 			canary = !o.called
 			add(o)
 			continue
@@ -351,11 +394,11 @@ dispatch:
 		go func(l portal.IdPLink) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if rs.halted.Load() {
+			if !rs.waitOpen() {
 				add(heldBack(l))
 				return
 			}
-			add(j.refreshOne(rctx, &rs, l))
+			add(j.refreshOne(rctx, rs, l))
 		}(l)
 	}
 	wg.Wait()
@@ -523,6 +566,11 @@ func (j *Job) refreshOne(ctx context.Context, rs *runState, listed portal.IdPLin
 	if !now.Before(row.RelinkDueAt) {
 		return j.markDue(ctx, row, now)
 	}
+	// No new chain is spent while another refresh retries a key or store
+	// failure; a halted run leaves this link unchanged.
+	if !rs.waitOpen() {
+		return heldBack(row)
+	}
 	res, err := j.call(ctx, tok)
 	o.called = true
 	class, code := classifyResponse(res, err)
@@ -661,6 +709,9 @@ func (j *Job) verify(ctx context.Context, rs *runState, row portal.IdPLink, res 
 		return status == identity.StatusUnverified || (status == identity.StatusInvalid && reason == identity.ReasonUnknownKID)
 	}
 	if keysMissing() {
+		// Suspend the run before the wait, so no other chain is spent on
+		// keys that may be gone.
+		rs.suspend()
 		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), j.cfg.KeyRetryWait+rotateTimeout)
 		if j.waitUntil(wctx, j.cfg.Now().Add(j.cfg.KeyRetryWait)) {
 			claims, status, reason = j.cfg.Verifier.Verify(wctx, res.IDToken)
@@ -668,13 +719,19 @@ func (j *Job) verify(ctx context.Context, rs *runState, row portal.IdPLink, res 
 		cancel()
 		if keysMissing() {
 			j.halt(rs, row.Iss, "keys_unreachable")
+			rs.resume()
 			return identity.Claims{}, ClassTokenLost, "id_token_unverified"
 		}
+		rs.resume()
 	}
 	code := ""
 	switch status {
 	case identity.StatusValid:
 	case identity.StatusExpired:
+		// Every other check passed; accept a small clock skew only.
+		if j.cfg.Now().Sub(claims.Expiry) > maxClockSkewAccepted {
+			return identity.Claims{}, ClassTokenLost, "id_token_rejected"
+		}
 		code = "id_token_clock_skew"
 		j.logger.Warn("offboarding_id_token_expired", "sub_hash", SubHash(row.Sub))
 	default:
@@ -734,7 +791,13 @@ func (j *Job) rotate(ctx context.Context, rs *runState, o outcome, row portal.Id
 		rotated portal.IdPLink
 		err     error
 	)
+	suspended := false
 	for attempt := range rotateAttempts {
+		if attempt == 1 {
+			// The first store failure suspends the run before the backoff.
+			rs.suspend()
+			suspended = true
+		}
 		if attempt > 0 && attempt-1 < len(j.cfg.RotateBackoffs) && j.cfg.RotateBackoffs[attempt-1] > 0 &&
 			!j.waitUntil(wctx, j.cfg.Now().Add(j.cfg.RotateBackoffs[attempt-1])) {
 			break
@@ -743,6 +806,12 @@ func (j *Job) rotate(ctx context.Context, rs *runState, o outcome, row portal.Id
 		if err == nil || errors.Is(err, portal.ErrStaleGeneration) || errors.Is(err, portal.ErrLinkNotFound) {
 			break
 		}
+	}
+	if suspended {
+		if err != nil && !errors.Is(err, portal.ErrStaleGeneration) && !errors.Is(err, portal.ErrLinkNotFound) {
+			j.halt(rs, row.Iss, "store_write_failed")
+		}
+		rs.resume()
 	}
 	switch {
 	case err == nil:

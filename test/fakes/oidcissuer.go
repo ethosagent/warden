@@ -611,6 +611,15 @@ func Valid(sub, email string, groups ...string) MintOption {
 	}
 }
 
+// ExpiredBy is a token whose exp was d ago (iat 5 minutes before that).
+func ExpiredBy(d time.Duration) MintOption {
+	return func(s *mintSpec) {
+		now := s.iss.now()
+		WithIAT(now.Add(-d - 5*time.Minute))(s)
+		WithExp(now.Add(-d))(s)
+	}
+}
+
 // Expired is a token whose exp is well past any clock skew.
 func Expired() MintOption {
 	return func(s *mintSpec) {
