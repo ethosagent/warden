@@ -96,9 +96,9 @@ type userLimitSet struct {
 	// agent then group, so a group shared by many agent-narrowed rules costs
 	// one lookup instead of a walk over every one of them.
 	byAgentGroup map[string]map[string][]int32
-	byAgent map[string][]int32 // agents-only tier
-	def     *compiledUserLimit
-	anon    *compiledUserLimit
+	byAgent      map[string][]int32 // agents-only tier
+	def          *compiledUserLimit
+	anon         *compiledUserLimit
 	// hashes is every rule's defHash by name, default and anonymous included.
 	hashes map[string]uint64
 }
