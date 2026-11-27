@@ -44,6 +44,13 @@ func completeSets(t *testing.T, dir string) []string {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(dir, e.Name(), controlplane.BackupManifestName)); err != nil {
+			// Prune renames an old set to .tmp-<name> before deleting it, so a
+			// set listed by ReadDir can leave the visible namespace before this
+			// Stat. A name that no longer exists was pruned, not half-written;
+			// a directory that is still there without a manifest still fails.
+			if _, derr := os.Stat(filepath.Join(dir, e.Name())); os.IsNotExist(derr) {
+				continue
+			}
 			t.Fatalf("set %s is visible without a manifest", e.Name())
 		}
 		sets = append(sets, e.Name())
