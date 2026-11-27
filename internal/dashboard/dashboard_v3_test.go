@@ -799,7 +799,7 @@ func TestFleetNoIdentityChallengeBadge(t *testing.T) {
 	}
 }
 
-func TestReservedKey_DashboardSecretStore(t *testing.T) {
+func TestSecretStoreReservedKey(t *testing.T) {
 	// cp/ (W-P2-WCA-07) and the per-user namespaces (W-P3-CSIG-06).
 	for _, c := range []struct{ ns, key string }{
 		{"cp/", "cp/keys/ca/k1"},
