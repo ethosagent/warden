@@ -33,6 +33,8 @@
 //     scope helpers, SecretResolver port and TokenRecord.
 //   - store.go: the types, the GrantStore port, limits and errors.
 //   - notify.go: Notifier, the in-memory Subscribe map stores embed.
+//   - epoch.go: EpochBumper and WorkerCapsReader, the ports the control plane
+//     implements so a revoke bumps a user's epoch (W-P3-PORT-05).
 //   - sweeper.go: RunSweeper, the 1-minute loop over GrantStore.Sweep.
 //   - adapters/sqlite: the cpstate migrations oauthbroker/0001..0003 and the
 //     SQLite GrantStore.

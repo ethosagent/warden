@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/controlplane"
+	"github.com/ethosagent/warden/internal/oauthbroker"
 	"github.com/ethosagent/warden/test/fakes"
 )
 
@@ -150,4 +152,17 @@ func (c *CPClient) BumpUserGrant(userKey string) int64 {
 		c.h.tb.Fatalf("harness: BumpUserGrant: %v", err)
 	}
 	return epoch
+}
+
+// RevokeEpoch runs the epoch step of a revoke (W-P3-PORT-05) for userKey the
+// way oauthbroker.RevokeUserGrant will: through the control plane's adapters,
+// returning the outcome (status, error, connected workers lacking
+// usersecrets/v1). In-process only.
+func (c *CPClient) RevokeEpoch(userKey string) oauthbroker.EpochOutcome {
+	c.h.tb.Helper()
+	s := c.h.cpSrv.Load()
+	if s == nil {
+		c.h.tb.Fatal("harness: RevokeEpoch needs the in-process control plane")
+	}
+	return oauthbroker.BumpGrantEpoch(context.Background(), s.GrantEpochBumper(), s.GrantWorkerCaps(), config.CapUserSecretsV1, userKey)
 }

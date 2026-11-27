@@ -856,6 +856,7 @@ func (s *Server) Handler() http.Handler {
 		FlagNoGroupPolicy(views, s.scopedEntries())
 		FlagNoIdentityChallenge(views, s.challengeServed())
 		FlagNoIdentityRequire(views, s.servedSettings())
+		FlagNoUserSecrets(views, s.policy.servedPerUserAgents())
 		for i := range views {
 			views[i].Behind = views[i].PolicyETag != "" && views[i].PolicyETag != cur
 		}
