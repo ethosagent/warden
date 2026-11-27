@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethosagent/warden/internal/oauthbroker"
 	oauthbrokerhttp "github.com/ethosagent/warden/internal/oauthbroker/http"
 	"github.com/ethosagent/warden/internal/portal"
 	"github.com/ethosagent/warden/internal/webauth"
@@ -120,7 +121,9 @@ func (p *portalService) authenticate(r *http.Request) (sc portalSessionCtx, out 
 	}
 	if p.blocks != nil && p.blocks.IsBlocked(sess.Sub, sess.Email) {
 		p.revokeBlocked(r.Context(), sess)
-		return sc, portalBlocked, ""
+		// The session rides along only so the refusal can be audited under
+		// its identity; the caller never serves it.
+		return portalSessionCtx{sess: sess}, portalBlocked, ""
 	}
 	if webauth.TouchDue(sess, store.Now()) {
 		if _, err := store.Touch(r.Context(), rawID); err != nil {
@@ -172,6 +175,10 @@ type signedOutPolicy struct {
 	// does not redirect (the connect callback answers an HTML page); nil is the
 	// JSON error.
 	unauthenticated func(w http.ResponseWriter)
+	// onBlocked, when set, runs for a request whose session names a blocked
+	// principal, before the 403 user_blocked (the connect routes audit it as
+	// connect.denied).
+	onBlocked func(r *http.Request, sess webauth.Session)
 }
 
 // requireSessionWith is requireSession with its signed-out rule chosen by the
@@ -187,6 +194,9 @@ func (p *portalService) requireSessionWith(next http.Handler, so signedOutPolicy
 			writeAuthError(w, http.StatusServiceUnavailable, code)
 			return
 		case portalBlocked:
+			if so.onBlocked != nil {
+				so.onBlocked(r, sc.sess)
+			}
 			writeAuthError(w, http.StatusForbidden, portal.CodeUserBlocked)
 			return
 		case portalSignedOut:
@@ -289,8 +299,23 @@ func (s *Server) connectWrap(h http.Handler) http.Handler {
 			}
 			return true
 		},
-		status: http.StatusSeeOther,
+		status:    http.StatusSeeOther,
+		onBlocked: s.auditConnectBlocked,
 	})
+}
+
+// auditConnectBlocked writes the connect.denied row (reason user_blocked) of a
+// /connect request whose portal session names a blocked principal. A failed
+// append is logged only: the refusal stands either way.
+func (s *Server) auditConnectBlocked(r *http.Request, sess webauth.Session) {
+	ev := oauthbroker.AuditEvent{
+		Action: oauthbroker.AuditActionDenied, Outcome: oauthbroker.OutcomeDenied,
+		Reason: oauthbroker.ReasonUserBlocked, Status: http.StatusForbidden,
+		Sub: sess.Sub, Email: sess.Email, Provider: oauthbroker.UnknownProviderLabel,
+	}
+	if err := (brokerAudit{s: s}).Record(r.Context(), ev); err != nil {
+		s.cfg.Logger.Error("connect: audit append failed", "action", ev.Action)
+	}
 }
 
 // connectCallbackWrap puts GET /connect/callback behind the portal session
@@ -309,6 +334,7 @@ func (s *Server) connectCallbackWrap(h http.Handler) http.Handler {
 		unauthenticated: func(w http.ResponseWriter) {
 			oauthbrokerhttp.WriteErrorPage(w, http.StatusUnauthorized, portal.CodeUnauthenticated)
 		},
+		onBlocked: s.auditConnectBlocked,
 	})
 }
 

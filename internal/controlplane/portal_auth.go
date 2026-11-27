@@ -223,7 +223,7 @@ func (p *portalService) handleCallback(w http.ResponseWriter, r *http.Request) {
 	next, res := p.finishLogin(w, r, login, err)
 	p.logger.Info("portal_login",
 		"result", map[bool]string{true: "ok", false: "failed"}[res.reason == ""],
-		"reason", res.reason, "sub", res.sub, "duration_ms", time.Since(start).Milliseconds())
+		"reason", res.reason, "sub_hash", shortHash(webauth.SHA256Hex(res.sub)), "duration_ms", time.Since(start).Milliseconds())
 	if p.audit != nil && (res.reason == "" || res.consumed) {
 		p.audit(r, res)
 	}

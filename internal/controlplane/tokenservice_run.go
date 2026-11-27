@@ -328,7 +328,7 @@ func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, s
 		SessionAbsolute: tc.Session.Absolute,
 		Clients:         assertions,
 		Agents:          agents,
-		Blocks:          NewTokenBlockChecker(srv.blocks),
+		Blocks:          NewBlockChecker(srv.blocks),
 		Signers:         servedSigners{inner: km.KeySet(), records: km.KeySet().Records, now: clk.Now, served: srv.servesTokenKID, bundled: srv.servesBundleTokenKID},
 		Sessions:        sessions,
 		AgentLimiter:    agentLim,

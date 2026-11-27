@@ -7,10 +7,7 @@ import (
 	"testing"
 
 	"github.com/ethosagent/warden/internal/cpstate"
-	"github.com/ethosagent/warden/internal/tokensvc"
 )
-
-var _ tokensvc.BlockChecker = (*TokenBlockChecker)(nil)
 
 func TestTokenBlockChecker(t *testing.T) {
 	ctx := context.Background()
@@ -26,7 +23,7 @@ func TestTokenBlockChecker(t *testing.T) {
 	if _, err := store.Add(ctx, BlockEntry{Email: "Mail@Example.test"}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	c := NewTokenBlockChecker(store)
+	c := NewBlockChecker(store)
 	for _, tc := range []struct {
 		sub, email string
 		want       bool
@@ -62,14 +59,14 @@ func TestTokenBlockCheckerNotReady(t *testing.T) {
 	if store.Ready() {
 		t.Fatal("store is ready without a table")
 	}
-	got, err := NewTokenBlockChecker(store).IsBlocked(ctx, "u-1", "")
+	got, err := NewBlockChecker(store).IsBlocked(ctx, "u-1", "")
 	if !errors.Is(err, ErrBlockListNotReady) || got {
 		t.Fatalf("IsBlocked = %v, %v; an unloaded list must be an error, never allow", got, err)
 	}
-	if _, err := (*TokenBlockChecker)(nil).IsBlocked(ctx, "u", ""); !errors.Is(err, ErrBlockListNotReady) {
+	if _, err := (*BlockChecker)(nil).IsBlocked(ctx, "u", ""); !errors.Is(err, ErrBlockListNotReady) {
 		t.Fatalf("nil checker: %v", err)
 	}
-	if _, err := NewTokenBlockChecker(nil).IsBlocked(ctx, "u", ""); !errors.Is(err, ErrBlockListNotReady) {
+	if _, err := NewBlockChecker(nil).IsBlocked(ctx, "u", ""); !errors.Is(err, ErrBlockListNotReady) {
 		t.Fatalf("nil store: %v", err)
 	}
 }

@@ -93,7 +93,27 @@ func (b *Broker) Start(ctx context.Context, req StartRequest) (StartResult, erro
 	st := startState{provider: UnknownProviderLabel}
 	res, err := b.start(ctx, req, &st)
 	b.recordStart(st, err)
+	b.auditStartBlocked(ctx, req, st, err)
 	return res, err
+}
+
+// auditStartBlocked writes the connect.denied row of a start refused because
+// the user is blocked. Only that refusal is audited (the other start refusals
+// are logged and counted): a blocked user retrying is the signal an operator
+// wants. The row carries the provider and the fixed reason; a failed append is
+// logged and never turns the refusal into an allow.
+func (b *Broker) auditStartBlocked(ctx context.Context, req StartRequest, st startState, err error) {
+	var se *StartError
+	if b.audit == nil || !errors.As(err, &se) || se.Code != CodeUserBlocked {
+		return
+	}
+	ev := AuditEvent{
+		Action: AuditActionDenied, Outcome: OutcomeDenied, Reason: ReasonUserBlocked, Status: 403,
+		Sub: req.Sub, Email: req.Email, Provider: st.provider,
+	}
+	if aerr := b.audit.Record(context.WithoutCancel(ctx), ev); aerr != nil {
+		b.logger.Error("connect: audit append failed", "provider", st.provider, "action", ev.Action)
+	}
 }
 
 // startState is what the log line and counter need, filled as checks pass.

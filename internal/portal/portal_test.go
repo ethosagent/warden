@@ -119,3 +119,30 @@ func TestPortalLinkNeverPrintsToken(t *testing.T) {
 		t.Errorf("log value lost the sub: %s", buf.String())
 	}
 }
+
+// TestCallback_BlockedUser: admission refuses a blocked user first, whatever
+// else is wrong or right about the login, so the callback reaches neither the
+// IdP-link write nor the session create for them and the refusal never says
+// anything but "blocked".
+func TestCallback_BlockedUser(t *testing.T) {
+	bl := blocks{"bad-sub": true, "bad@example.com": true}
+	adm := Admission{Blocks: bl, AllowedGroups: []string{"employees"}, RequireRefreshToken: true}
+	for _, c := range []struct {
+		name string
+		c    Candidate
+	}{
+		{"sub, fully valid login", Candidate{Sub: "bad-sub", Groups: []string{"employees"}, HasRefreshToken: true}},
+		{"email only, mixed case", Candidate{Sub: "other", Email: "Bad@Example.com", Groups: []string{"employees"}, HasRefreshToken: true}},
+		{"sub, outside allowedGroups", Candidate{Sub: "bad-sub", Groups: []string{"contractors"}, HasRefreshToken: true}},
+		{"sub, no refresh token", Candidate{Sub: "bad-sub", Groups: []string{"employees"}}},
+	} {
+		if got := adm.Admit(c.c); got != CodeBlocked {
+			t.Errorf("%s: Admit = %q, want %q", c.name, got, CodeBlocked)
+		}
+	}
+	// An empty block list leaves admission unchanged.
+	ok := Candidate{Sub: "pat", Groups: []string{"employees"}, HasRefreshToken: true}
+	if got := (Admission{Blocks: blocks{}, AllowedGroups: adm.AllowedGroups, RequireRefreshToken: true}).Admit(ok); got != "" {
+		t.Errorf("empty block list: Admit = %q, want admitted", got)
+	}
+}
