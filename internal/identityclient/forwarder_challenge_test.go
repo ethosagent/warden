@@ -367,17 +367,33 @@ func TestForwarderChallengeOff(t *testing.T) {
 
 // TestForwarderRefreshFailureThenChallenge: a refresh token the issuer rejects
 // deletes the cache and the next CONNECT gets a fresh challenge.
+//
+// The challenge starts a background device poll that, if approved, writes a
+// new login to the same cache path. The user denies it here, so nothing is
+// stored and the test waits for that poll to end before it looks at the
+// cache. Otherwise the poll could store the new login before the Stat and look
+// like the dead entry had been kept.
 func TestForwarderRefreshFailureThenChallenge(t *testing.T) {
 	r := newRig(t)
 	r.login(t)
 	r.idp.mu.Lock()
 	r.idp.refresh = "revoked-elsewhere"
 	r.idp.mu.Unlock()
+	r.idp.setScript("denied")
 	r.clock.Advance(tokenTTL)
 	cr := startChallengeForwarder(t, r, func() string { return offerJSON(r.idp.URL(), identityclient.DefaultClientID, deviceCode) })
 	head, _ := cr.connect(t)
 	if statusOf(head) != 407 {
 		t.Fatalf("head %q, want the challenge after the refresh failed", head)
+	}
+	// Handle started the poll (wg.Add) before the 407 was relayed, so Wait
+	// covers it.
+	cr.chal.Wait()
+	if !strings.Contains(cr.logs.String(), "identity sign-in did not complete") {
+		t.Fatalf("the denied sign-in poll did not end as expected; log:\n%s", cr.logs.String())
+	}
+	if n := r.idp.refreshCalls.Load(); n != 1 {
+		t.Errorf("refresh requests = %d, want exactly 1 (the dead refresh token is not retried)", n)
 	}
 	if _, err := os.Stat(r.cl.Store().Path()); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the dead cache entry is still there: %v", err)
