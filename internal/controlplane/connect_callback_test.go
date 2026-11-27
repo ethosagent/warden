@@ -5,12 +5,14 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/oauthbroker"
 	oauthbrokerhttp "github.com/ethosagent/warden/internal/oauthbroker/http"
 	"github.com/ethosagent/warden/internal/secrets"
@@ -270,8 +272,46 @@ func TestBrokerAuditSystemRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	row := wantOneRow(t, rec)
-	if row.Action != "connect.revoked" || row.AuthMethod != adminaudit.AuthMethodSystem || row.Actor.Sub != "system" ||
+	if row.Action != "connect.revoked" || row.AuthMethod != adminaudit.AuthMethodSystem || !row.System || row.Actor != (adminaudit.Actor{}) ||
 		row.Target != "grant:google" || row.TargetRef != "grant_id:g1" || row.Details["reason"] != "orphan_key_deleted" {
 		t.Fatalf("row = %+v", row)
+	}
+}
+
+// TestBrokerAuditSystemRowStore: through the real admin audit store the sweep's
+// row carries the literal actor_id "system" (as genesis rows do), not a hash.
+func TestBrokerAuditSystemRowStore(t *testing.T) {
+	dir := t.TempDir()
+	state, err := cpstate.Open(context.Background(), filepath.Join(dir, "warden-cp.db"), StateMigrations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	store, err := adminaudit.Open(context.Background(), state, adminaudit.OpenOptions{KeyFile: filepath.Join(dir, "cp-audit.key")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _, _, _ := callbackRig(t)
+	r.srv.audit = newAdminAuditor(store, store.Probe, nil, r.srv.cfg.Console, r.srv.cfg.Clock, r.srv.cfg.Logger)
+	if err := (brokerAudit{s: r.srv}).Record(context.Background(), oauthbroker.AuditEvent{
+		Action: oauthbroker.AuditActionRevoked, Outcome: adminaudit.OutcomeOK, System: true, Provider: "google", GrantID: "g1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.List(context.Background(), adminaudit.Filter{Action: "connect.revoked"}, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, e := range rows {
+		if e.Action == "connect.revoked" {
+			found = true
+			if e.ActorID != "system" || e.ActorRole != "system" || e.AuthMethod != adminaudit.AuthMethodSystem {
+				t.Fatalf("entry actor = %q/%q/%q, want the literal system actor", e.ActorID, e.ActorRole, e.AuthMethod)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no connect.revoked row")
 	}
 }

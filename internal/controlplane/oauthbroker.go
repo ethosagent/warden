@@ -211,7 +211,7 @@ func (a brokerAudit) Record(ctx context.Context, ev oauthbroker.AuditEvent) erro
 		Outcome: ev.Outcome, HTTPStatus: ev.Status,
 	}
 	if ev.System {
-		in.Actor, in.ActorRole, in.AuthMethod = adminaudit.Actor{Sub: "system"}, "system", adminaudit.AuthMethodSystem
+		in.Actor, in.System, in.ActorRole, in.AuthMethod = adminaudit.Actor{}, true, "system", adminaudit.AuthMethodSystem
 	}
 	if ev.GrantID != "" {
 		in.TargetRef = "grant_id:" + ev.GrantID

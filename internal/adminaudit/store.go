@@ -51,7 +51,11 @@ type Actor struct {
 
 // Input is what a caller records; the store stamps everything else.
 type Input struct {
-	Actor      Actor
+	Actor Actor
+	// System records the entry as the system itself: actor_id is the literal
+	// "system" (as genesis, segment-start and key-rotation rows carry), and no
+	// actor side-table row is written. Actor is ignored.
+	System     bool
 	ActorRole  string
 	AuthMethod string
 	Action     string
@@ -137,7 +141,9 @@ func (s *Store) Record(ctx context.Context, in Input) (Entry, error) {
 	}
 	e.ActorID = s.actorID(in.Actor.Sub)
 	var side *Actor
-	if in.Actor.Sub != "" || in.Actor.Email != "" {
+	if in.System {
+		e.ActorID = actorIDSystem
+	} else if in.Actor.Sub != "" || in.Actor.Email != "" {
 		a := in.Actor
 		side = &a
 	}
