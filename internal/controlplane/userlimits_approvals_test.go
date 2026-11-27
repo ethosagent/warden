@@ -75,6 +75,15 @@ func TestUserLimits_SaveIsHeldAndApplies(t *testing.T) {
 	if v := headVersion(t, srv); v.Version != head.Version {
 		t.Fatalf("head moved to v%d while the change is held", v.Version)
 	}
+	// The reviewer's diff shows the limit change.
+	cd, err := changeDraftAPI{s: srv}.Diff(ctx, held.DraftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(cd.Diff)
+	if !strings.Contains(string(raw), `"userLimits":[{"path":"userLimits","kind":"added","after":[{"name":"eng"`) {
+		t.Errorf("draft diff does not show the limit change: %s", raw)
+	}
 	applied, err := srv.Approvals().Apply(sessionCtx("bob", "bob@example.com"), held.DraftID, held.Revision, "bob")
 	if err != nil {
 		t.Fatal(err)
@@ -237,5 +246,36 @@ func TestLintPolicyOfWire_IdentityModes(t *testing.T) {
 	}
 	if strings.Contains(joined, `agent "strict"`) || strings.Contains(joined, "no CA") {
 		t.Errorf("lint = %v", msgs)
+	}
+}
+
+// DiffDocs reports each limit key whole; a diff without limit changes has no
+// userLimits section, so its JSON is what it was before the keys existed.
+func TestDiffDocs_UserLimits(t *testing.T) {
+	base := policyWire{Allowlist: []config.AllowlistEntry{{Domain: "a.com"}}}
+	d, err := DiffDocs(base, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := json.Marshal(d); strings.Contains(string(raw), "userLimits") {
+		t.Errorf("no-change diff carries userLimits: %s", raw)
+	}
+	next := base
+	next.UserLimits = []config.UserLimit{engLimit("60/minute")}
+	next.AnonymousLimit = &config.UserLimit{Name: "anonymous", RateLimit: "5/minute"}
+	d, err = DiffDocs(base, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.UserLimits) != 2 || d.UserLimits[0].Path != "anonymousLimit" || d.UserLimits[0].Kind != ChangeAdded ||
+		d.UserLimits[1].Path != "userLimits" || d.UserLimits[1].Kind != ChangeAdded {
+		t.Fatalf("diff = %+v", d.UserLimits)
+	}
+	changed := next
+	changed.UserLimits = []config.UserLimit{engLimit("61/minute")}
+	changed.AnonymousLimit = nil
+	d, _ = DiffDocs(next, changed)
+	if len(d.UserLimits) != 2 || d.UserLimits[0].Kind != ChangeRemoved || d.UserLimits[1].Kind != ChangeChanged {
+		t.Fatalf("diff = %+v", d.UserLimits)
 	}
 }

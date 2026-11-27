@@ -35,6 +35,11 @@ type PolicyDiff struct {
 	Allow    []EntryChange `json:"allow"`
 	Deny     []EntryChange `json:"deny"`
 	Settings []PathChange  `json:"settings"`
+	// UserLimits holds one whole-key change per per-user limit key that
+	// differs (path userLimits, defaultUserLimit or anonymousLimit; the rule
+	// list is compared whole, since its order is precedence). Omitted when
+	// none differs, so a diff without limit changes is unchanged.
+	UserLimits []PathChange `json:"userLimits,omitempty"`
 }
 
 // EntryChange is one allow or deny entry occurrence that differs. Lists are
@@ -97,7 +102,48 @@ func DiffDocs(a, b policyWire) (PolicyDiff, error) {
 	settings := []PathChange{}
 	walkSettings("settings", sa, sb, &settings)
 	sort.Slice(settings, func(i, j int) bool { return settings[i].Path < settings[j].Path })
-	return PolicyDiff{Allow: allow, Deny: deny, Settings: settings}, nil
+	limits, err := diffUserLimits(a, b)
+	if err != nil {
+		return PolicyDiff{}, err
+	}
+	return PolicyDiff{Allow: allow, Deny: deny, Settings: settings, UserLimits: limits}, nil
+}
+
+// diffUserLimits compares the three per-user limit keys whole, by their JSON
+// encoding (an empty list is the same as an absent one), in path order.
+func diffUserLimits(a, b policyWire) ([]PathChange, error) {
+	var out []PathChange
+	add := func(path string, before, after any, hasBefore, hasAfter bool) error {
+		eb, err := json.Marshal(before)
+		if err != nil {
+			return fmt.Errorf("policy diff: encode %s: %w", path, err)
+		}
+		ea, err := json.Marshal(after)
+		if err != nil {
+			return fmt.Errorf("policy diff: encode %s: %w", path, err)
+		}
+		switch {
+		case !hasBefore && !hasAfter, hasBefore && hasAfter && bytes.Equal(eb, ea):
+			return nil
+		case !hasBefore:
+			out = append(out, PathChange{Path: path, Kind: ChangeAdded, After: after})
+		case !hasAfter:
+			out = append(out, PathChange{Path: path, Kind: ChangeRemoved, Before: before})
+		default:
+			out = append(out, PathChange{Path: path, Kind: ChangeChanged, Before: before, After: after})
+		}
+		return nil
+	}
+	if err := add("anonymousLimit", a.AnonymousLimit, b.AnonymousLimit, a.AnonymousLimit != nil, b.AnonymousLimit != nil); err != nil {
+		return nil, err
+	}
+	if err := add("defaultUserLimit", a.DefaultUserLimit, b.DefaultUserLimit, a.DefaultUserLimit != nil, b.DefaultUserLimit != nil); err != nil {
+		return nil, err
+	}
+	if err := add("userLimits", a.UserLimits, b.UserLimits, len(a.UserLimits) > 0, len(b.UserLimits) > 0); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // diffKeyed is an allow or deny entry type.

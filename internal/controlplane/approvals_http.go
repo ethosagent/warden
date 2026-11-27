@@ -365,7 +365,7 @@ func (a changeDraftAPI) Diff(ctx context.Context, id string) (dashboard.ChangeDi
 		}
 		base = RedactCredentials(v.Doc)
 	}
-	diff, err := DiffDocs(base, RedactCredentials(policyWire{Allowlist: doc.Allowlist, Denylist: doc.Denylist, Settings: doc.Settings}))
+	diff, err := DiffDocs(base, RedactCredentials(docWire(doc)))
 	if err != nil {
 		return dashboard.ChangeDiff{}, a.changeErr(ctx, err)
 	}
