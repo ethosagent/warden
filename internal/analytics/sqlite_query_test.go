@@ -175,7 +175,8 @@ func TestSQLiteStore_Query_InMemory(t *testing.T) {
 
 // TestSQLiteStore_Schema asserts the schema endpoint reflects the LOCAL events
 // table: worker-only columns (data_classes, dlp_action, latency_ms, ...) are
-// present, and fleet-only columns (proxy_id, agent_id, event_uid) are NOT.
+// present, and fleet-only columns (proxy_id, event_uid) are NOT. agent_id and limit_rule are
+// local too since W-P3-PUL-02.
 func TestSQLiteStore_Schema(t *testing.T) {
 	s := newFileStore(t, 0)
 	info := s.Schema()
@@ -190,12 +191,12 @@ func TestSQLiteStore_Schema(t *testing.T) {
 		cols[c.Name] = true
 	}
 	for _, want := range []string{"id", "ts", "domain", "decision", "compliance",
-		"data_classes", "dlp_action", "dlp_rule", "latency_ms", "swapped_refs", "evidence"} {
+		"data_classes", "dlp_action", "dlp_rule", "latency_ms", "swapped_refs", "evidence", "agent_id", "limit_rule"} {
 		if !cols[want] {
 			t.Errorf("schema missing local column %q", want)
 		}
 	}
-	for _, fleetOnly := range []string{"proxy_id", "agent_id", "event_uid"} {
+	for _, fleetOnly := range []string{"proxy_id", "event_uid"} {
 		if cols[fleetOnly] {
 			t.Errorf("local schema unexpectedly reports fleet column %q", fleetOnly)
 		}

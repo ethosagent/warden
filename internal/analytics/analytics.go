@@ -163,6 +163,17 @@ type Event struct {
 	// or "idp"). Stamped only for a valid identity; bounded enum, never token
 	// content.
 	IdentityTokenType string `json:"identity_token_type,omitempty"`
+	// AgentID is the agent that made the request (the verified subject's agent,
+	// else the worker's resolved agent id). Stamped by the proxy
+	// (W-P3-PUL-02); the fleet store fills its own agent_id column from it at
+	// ingest (W-P3-PUL-07). "" when unknown.
+	AgentID string `json:"agent_id,omitempty"`
+	// LimitRule is the name of the per-user limit rule that applied to the
+	// request, "" when none did. A plain string so the evaluator and proxy
+	// (W-P3-PUL-03/-09) fill it without this package knowing their types.
+	// Together with UserSub and AgentID it keys the per-user daily usage
+	// rollup (W-P3-PUL-07) and ledger seeding (W-P3-PUL-04).
+	LimitRule string `json:"limit_rule,omitempty"`
 }
 
 // EncodeGroups serialises a group list as a JSON array for a single column or
@@ -480,6 +491,8 @@ CREATE TABLE IF NOT EXISTS events (
 		{"identity_reason", `ALTER TABLE events ADD COLUMN identity_reason TEXT NOT NULL DEFAULT ''`},
 		{"user_act", `ALTER TABLE events ADD COLUMN user_act TEXT NOT NULL DEFAULT ''`},
 		{"identity_token_type", `ALTER TABLE events ADD COLUMN identity_token_type TEXT NOT NULL DEFAULT ''`},
+		{"agent_id", `ALTER TABLE events ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''`},
+		{"limit_rule", `ALTER TABLE events ADD COLUMN limit_rule TEXT NOT NULL DEFAULT ''`},
 	} {
 		if err := s.addColumnIfAbsent(c.name, c.ddl); err != nil {
 			return err
@@ -488,6 +501,11 @@ CREATE TABLE IF NOT EXISTS events (
 	// The index needs user_sub to exist, so it comes after the column loop.
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_sub_ts ON events (user_sub, ts)`); err != nil {
 		return fmt.Errorf("analytics: migrate user index: %w", err)
+	}
+	// Seeds the worker's daily cost ledger: sum of cost_usd by user_sub and
+	// limit_rule over today's events (W-P3-PUL-04).
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_rule_ts ON events (user_sub, limit_rule, ts)`); err != nil {
+		return fmt.Errorf("analytics: migrate user rule index: %w", err)
 	}
 	// lower(user_email) lets SQLite plan the User filter's OR as two index
 	// lookups (user_sub, lower(user_email)) instead of a scan.
@@ -647,7 +665,7 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 		e.LatencyMs, encodeSwappedRefs(e.SwappedRefs), encodeEvidence(e.Evidence),
 		e.AddrClass,
 		e.UserSub, e.UserEmail, EncodeGroups(e.UserGroups), boolToInt(e.UserGroupsTruncated),
-		e.UserSID, e.IdentityStatus, e.IdentityReason, e.UserAct, e.IdentityTokenType)
+		e.UserSID, e.IdentityStatus, e.IdentityReason, e.UserAct, e.IdentityTokenType, e.AgentID, e.LimitRule)
 	if err != nil {
 		return fmt.Errorf("analytics: insert event: %w", err)
 	}
@@ -657,8 +675,8 @@ func (s *SQLiteStore) StoreEvent(e Event) error {
 // insertColumns is the shared column list + placeholder tuple for an events
 // INSERT, used by both StoreEvent and StoreEventsBatch so the two paths can
 // never drift.
-const insertColumns = `(ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class, user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const insertColumns = `(ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class, user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type, agent_id, limit_rule)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // StoreEventsBatch inserts every event in a single transaction — one fsync for
 // the whole batch instead of one per event — setting any zero timestamp to now,
@@ -697,7 +715,7 @@ func (s *SQLiteStore) StoreEventsBatch(evs []Event) error {
 			e.LatencyMs, encodeSwappedRefs(e.SwappedRefs), encodeEvidence(e.Evidence),
 			e.AddrClass,
 			e.UserSub, e.UserEmail, EncodeGroups(e.UserGroups), boolToInt(e.UserGroupsTruncated),
-			e.UserSID, e.IdentityStatus, e.IdentityReason, e.UserAct, e.IdentityTokenType); err != nil {
+			e.UserSID, e.IdentityStatus, e.IdentityReason, e.UserAct, e.IdentityTokenType, e.AgentID, e.LimitRule); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("analytics: insert batch event: %w", err)
 		}
@@ -725,7 +743,7 @@ func (s *SQLiteStore) Prune() error {
 
 // GetEvents returns events matching filter, newest first.
 func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
-	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class, user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type
+	q := `SELECT ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class, user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type, agent_id, limit_rule
           FROM events WHERE 1=1`
 	var args []any
 	if filter.Domain != "" {
@@ -787,7 +805,7 @@ func (s *SQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 			&e.CostUSD, &e.Provider, &compliance,
 			&dataClasses, &e.DLPAction, &e.DLPRule, &dlpPartial, &dlpEncoded,
 			&e.LatencyMs, &swappedRefs, &evidence, &e.AddrClass,
-			&e.UserSub, &e.UserEmail, &userGroups, &groupsTrunc, &e.UserSID, &e.IdentityStatus, &e.IdentityReason, &e.UserAct, &e.IdentityTokenType); err != nil {
+			&e.UserSub, &e.UserEmail, &userGroups, &groupsTrunc, &e.UserSID, &e.IdentityStatus, &e.IdentityReason, &e.UserAct, &e.IdentityTokenType, &e.AgentID, &e.LimitRule); err != nil {
 			return nil, fmt.Errorf("analytics: scan: %w", err)
 		}
 		e.Compliance = decodeCompliance(compliance)
@@ -818,7 +836,7 @@ func (s *SQLiteStore) count() (int, error) {
 
 // GetOldestEventIDs returns the IDs and events of the oldest N events.
 func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
-	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class, user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type
+	const q = `SELECT id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance, data_classes, dlp_action, dlp_rule, dlp_partial, dlp_encoded, latency_ms, swapped_refs, evidence, addr_class, user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type, agent_id, limit_rule
 	            FROM events ORDER BY id ASC LIMIT ?`
 	rows, err := s.db.Query(q, limit)
 	if err != nil {
@@ -847,7 +865,7 @@ func (s *SQLiteStore) GetOldestEventIDs(limit int) ([]int64, []Event, error) {
 			&e.CostUSD, &e.Provider, &compliance,
 			&dataClasses, &e.DLPAction, &e.DLPRule, &dlpPartial, &dlpEncoded,
 			&e.LatencyMs, &swappedRefs, &evidence, &e.AddrClass,
-			&e.UserSub, &e.UserEmail, &userGroups, &groupsTrunc, &e.UserSID, &e.IdentityStatus, &e.IdentityReason, &e.UserAct, &e.IdentityTokenType); err != nil {
+			&e.UserSub, &e.UserEmail, &userGroups, &groupsTrunc, &e.UserSID, &e.IdentityStatus, &e.IdentityReason, &e.UserAct, &e.IdentityTokenType, &e.AgentID, &e.LimitRule); err != nil {
 			return nil, nil, fmt.Errorf("analytics: scan oldest IDs: %w", err)
 		}
 		e.Compliance = decodeCompliance(compliance)
