@@ -17,8 +17,9 @@ const (
 	// PendingTTL is how long a started login may take to come back.
 	PendingTTL = 10 * time.Minute
 	// PendingCap bounds the table so an unauthenticated login flood cannot
-	// grow it without limit; above it Put fails with ErrPendingFull. Every
-	// purpose shares the one cap.
+	// grow it without limit; above it Put fails with ErrPendingFull. Each
+	// purpose has its own cap, so a flood on one front door's login (the
+	// portal's, say) never locks the others (the console's admins) out.
 	PendingCap = 10_000
 	// PendingSweepInterval is how often RunSweeper deletes expired rows.
 	PendingSweepInterval = time.Minute
@@ -31,7 +32,7 @@ const (
 	PurposePortal  = "portal"
 )
 
-// ErrPendingFull is returned by Put when the table is at PendingCap.
+// ErrPendingFull is returned by Put when the purpose is at PendingCap.
 var ErrPendingFull = errors.New("oidc pending: table is full")
 
 // PendingMigrations are the cpstate migrations of the pending-login table.
@@ -49,8 +50,9 @@ func PendingMigrations() []cpstate.Migration {
 );
 CREATE INDEX oidc_pending_expires_at ON oidc_pending (expires_at);`,
 	}, {
-		ID:  "oidc_pending/0002",
-		SQL: `ALTER TABLE oidc_pending ADD COLUMN purpose TEXT NOT NULL DEFAULT 'console';`,
+		ID: "oidc_pending/0002",
+		SQL: `ALTER TABLE oidc_pending ADD COLUMN purpose TEXT NOT NULL DEFAULT 'console';
+CREATE INDEX oidc_pending_purpose ON oidc_pending (purpose);`,
 	}}
 }
 
@@ -95,18 +97,19 @@ func SHA256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Put stores p with the standard TTL. It inserts only while the table holds
+// Put stores p with the standard TTL. It inserts only while p's purpose holds
 // fewer than PendingCap rows, in the same statement, so concurrent logins
-// cannot overshoot the cap. A row needs a purpose.
+// cannot overshoot the cap; other purposes' rows do not count. A row needs a
+// purpose.
 func (s *PendingStore) Put(ctx context.Context, p Pending) error {
 	if p.Purpose == "" {
 		return errors.New("oidc pending: insert: empty purpose")
 	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO oidc_pending (state_hash, purpose, nonce, verifier, next, browser_hash, expires_at)
-		 SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM oidc_pending) < ?`,
+		 SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM oidc_pending WHERE purpose = ?) < ?`,
 		p.StateHash, p.Purpose, p.Nonce, p.Verifier, p.Next, p.BrowserHash,
-		s.now().Add(PendingTTL).Unix(), PendingCap)
+		s.now().Add(PendingTTL).Unix(), p.Purpose, PendingCap)
 	if err != nil {
 		return fmt.Errorf("oidc pending: insert: %w", err)
 	}

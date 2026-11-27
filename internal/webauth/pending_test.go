@@ -105,23 +105,45 @@ func openDBAt(t *testing.T, path string, migs []cpstate.Migration) *cpstate.DB {
 	return db
 }
 
-func TestPendingCapIsShared(t *testing.T) {
+// Each purpose has its own cap: a flood of portal logins never makes console
+// login answer login_busy, and the reverse.
+func TestPendingCapIsPerPurpose(t *testing.T) {
 	ctx := context.Background()
-	db := openDB(t, webauth.PendingMigrations())
 	now := time.Unix(1_800_000_000, 0)
-	ps := webauth.NewPendingStore(db.SQL(), func() time.Time { return now })
-	if _, err := db.SQL().Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?)
-		INSERT INTO oidc_pending (state_hash, purpose, nonce, verifier, next, browser_hash, expires_at)
-		SELECT 'h' || i, 'console', 'n', 'v', '/dashboard/', 'b', ? FROM n`,
-		webauth.PendingCap, now.Add(time.Hour).Unix()); err != nil {
-		t.Fatal(err)
+	fill := func(t *testing.T, db *cpstate.DB, purpose string) {
+		t.Helper()
+		if _, err := db.SQL().Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?)
+			INSERT INTO oidc_pending (state_hash, purpose, nonce, verifier, next, browser_hash, expires_at)
+			SELECT ? || i, ?, 'n', 'v', '/', 'b', ? FROM n`,
+			webauth.PendingCap, purpose+"-", purpose, now.Add(time.Hour).Unix()); err != nil {
+			t.Fatal(err)
+		}
 	}
-	err := ps.Put(ctx, webauth.Pending{StateHash: "p", Purpose: webauth.PurposePortal, Nonce: "n", Verifier: "v", Next: "/portal", BrowserHash: "b"})
-	if !errors.Is(err, webauth.ErrPendingFull) {
-		t.Fatalf("portal Put at the cap = %v, want ErrPendingFull", err)
+	row := func(state, purpose string) webauth.Pending {
+		return webauth.Pending{StateHash: state, Purpose: purpose, Nonce: "n", Verifier: "v", Next: "/", BrowserHash: "b"}
 	}
-	now = now.Add(2 * time.Hour)
-	if n, err := ps.Sweep(ctx); err != nil || n != webauth.PendingCap {
-		t.Fatalf("sweep = %d %v", n, err)
+	for _, tc := range []struct{ full, other string }{
+		{webauth.PurposePortal, webauth.PurposeConsole},
+		{webauth.PurposeConsole, webauth.PurposePortal},
+	} {
+		t.Run(tc.full+" full", func(t *testing.T) {
+			db := openDB(t, webauth.PendingMigrations())
+			ps := webauth.NewPendingStore(db.SQL(), func() time.Time { return now })
+			fill(t, db, tc.full)
+			if err := ps.Put(ctx, row("x", tc.full)); !errors.Is(err, webauth.ErrPendingFull) {
+				t.Fatalf("%s Put at its cap = %v, want ErrPendingFull", tc.full, err)
+			}
+			if err := ps.Put(ctx, row("y", tc.other)); err != nil {
+				t.Fatalf("%s Put with %s full = %v, want ok", tc.other, tc.full, err)
+			}
+			if _, ok, err := ps.Take(ctx, "y", tc.other); err != nil || !ok {
+				t.Fatalf("%s take = %v %v", tc.other, ok, err)
+			}
+			now := now.Add(2 * time.Hour)
+			ps = webauth.NewPendingStore(db.SQL(), func() time.Time { return now })
+			if n, err := ps.Sweep(ctx); err != nil || n != webauth.PendingCap {
+				t.Fatalf("sweep = %d %v", n, err)
+			}
+		})
 	}
 }
