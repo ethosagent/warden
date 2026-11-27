@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
@@ -90,10 +91,22 @@ func TestEvents_WSQuerySwapNeverRendersTheValue(t *testing.T) {
 			for _, ev := range store.snapshot() {
 				assertEventURLClean(t, ev)
 			}
+			// The event is stored before the decision log line is written (emitDenyEventDetail:
+			// recordEvent, then logDecision), so the event being visible does not mean the log
+			// line is: poll the log for the real condition instead of reading it once.
+			waitForLog(logs, "a="+echoPlaceholder)
 			if !strings.Contains(string(logs.bytes()), "a="+echoPlaceholder) {
 				t.Fatalf("expected the original query in the log: %s", logs.bytes())
 			}
 			requireNoValue(t, "log output", logs.bytes())
 		})
+	}
+}
+
+// waitForLog polls the log buffer until it contains want or a 5s deadline passes.
+func waitForLog(logs *echoLogBuf, want string) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(string(logs.bytes()), want) {
+		time.Sleep(10 * time.Millisecond)
 	}
 }
