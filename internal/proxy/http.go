@@ -1467,10 +1467,6 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 	return false
 }
 
-// recordAllowEvent writes the single allow audit event for a forwarded request:
-// the by-reference secret list, optional cost estimate, MCP tool/reason, and any
-// judge reason — exactly one StoreEvent per allowed request. It also emits the
-// per-secret swap metric and the structured decision log.
 // stampUserToken copies the per-user token fields onto an event. Every
 // scope-based event (allow, deny, MCP, WebSocket) uses it so the rule is one.
 func (s *requestScope) stampUserToken(ev *analytics.Event) {
@@ -1499,6 +1495,10 @@ func (p *Proxy) recordMCPAllowEvent(s *requestScope, fullURL string) {
 	p.recordEvent(s.resolved(), ev)
 }
 
+// recordAllowEvent writes the single allow audit event for a forwarded request:
+// the by-reference secret list, optional cost estimate, MCP tool/reason, and any
+// judge reason — exactly one StoreEvent per allowed request. It also emits the
+// per-secret swap metric and the structured decision log.
 func (p *Proxy) recordAllowEvent(s *requestScope) {
 	// Test-only (worker.Overrides.BeforeTerminal; production nil): widen
 	// exactly the post-response window whose bookkeeping race the quiescence
