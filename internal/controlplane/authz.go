@@ -322,6 +322,10 @@ func cpRouteTable() map[routeKey]authzRow {
 		// CSRF, mounted only when consent.providers is set. GET only redirects.
 		{get, connectStartPath, handler("connect.start")},
 		{post, connectStartPath, handler("connect.start")},
+		// The provider's redirect target (W-P3-BRKR-04): the portal session
+		// middleware (no session is 401, never a redirect); no CSRF token, it is a
+		// GET, and the single-use state plus the connect cookie bind it instead.
+		{get, connectCallbackPath, handler("connect.callback")},
 	}
 	t := make(map[routeKey]authzRow, len(rows))
 	for _, r := range rows {

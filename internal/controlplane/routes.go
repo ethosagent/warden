@@ -142,20 +142,29 @@ func (s *Server) registerPortalRoutes(mux *http.ServeMux) {
 //
 //	GET  /connect/start  portal session; changes nothing, 303 to the landing page
 //	POST /connect/start  portal session + CSRF/Origin; starts a PKCE flow, 303
+//	GET  /connect/callback  portal session; the provider's redirect target
+//	                     (W-P3-BRKR-04): exchanges the code and stores the grant
 //
-// Both go through connectWrap: no portal session is 303 to /portal/login, and
-// no console credential (cookie, bearer, worker token, wak_ key) reaches it.
+// Start goes through connectWrap: no portal session is 303 to /portal/login,
+// and no console credential (cookie, bearer, worker token, wak_ key) reaches
+// it. The callback goes through connectCallbackWrap: no session is a 401 page
+// and the code is never stored or replayed to a login redirect.
 func (s *Server) registerConnectRoutes(mux *http.ServeMux) {
 	if s.broker == nil || s.brokerHTTP == nil {
 		return
 	}
 	mux.Handle(connectStartPath, s.connectWrap(s.brokerHTTP.Start()))
+	mux.Handle(connectCallbackPath, s.connectCallbackWrap(s.brokerHTTP.Callback()))
 }
 
 // connectStartPath is the connect route's mux pattern, a literal so the
 // route-coverage walk can read it; TestConnectRoutePaths pins it to the
 // transport package's constant.
 const connectStartPath = "/connect/start"
+
+// connectCallbackPath is the provider's redirect target, pinned to
+// oauthbrokerhttp.CallbackPath by TestConnectCallbackRoutePath.
+const connectCallbackPath = "/connect/callback"
 
 // The portal's mux patterns, as literals so the route-coverage walk can read
 // them; TestPortalRoutePaths pins them to the portal package's constants.

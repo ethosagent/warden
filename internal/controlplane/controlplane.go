@@ -240,6 +240,11 @@ type Config struct {
 	// Consent and the portal it mounts /connect/start (W-P3-BRKR-03); nil keeps
 	// every /connect path 404.
 	OAuthRegistry *oauthbroker.Registry
+	// OAuthExchanger performs the authorization code exchange for
+	// GET /connect/callback (W-P3-BRKR-04): Run builds the SSRF-safe one
+	// (adapters/exchange); a test may inject another. With UserStore it
+	// completes the broker; without either, /connect/callback stays 404.
+	OAuthExchanger oauthbroker.TokenExchanger
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -385,6 +390,10 @@ type Server struct {
 	// OAuth broker's gate (initBroker), else /connect/* is 404.
 	broker     *oauthbroker.Broker
 	brokerHTTP *oauthbrokerhttp.Handler
+	// grantLocks is the per-(userKey, provider) mutex every writer of a grant
+	// takes (the callback, the reconciler, and the refresh, revoke and
+	// offboarding code that follows); one set per control plane.
+	grantLocks *oauthbroker.GrantLocks
 	// audit is the admin audit middleware's state; nil when cfg.AdminAudit is
 	// (admin audit disabled), in which case no route is wrapped.
 	audit *adminAuditor

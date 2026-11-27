@@ -284,6 +284,22 @@ func (s *Server) connectWrap(h http.Handler) http.Handler {
 	})
 }
 
+// connectCallbackWrap puts GET /connect/callback behind the portal session
+// middleware. A signed-out request is a 401 page, never a redirect: the query
+// holds the provider's code and state, which must not be carried into a login
+// round trip (the login's own next check would drop them anyway). Console
+// credentials are stripped like everywhere on /connect. Without a portal the
+// route is 404.
+func (s *Server) connectCallbackWrap(h http.Handler) http.Handler {
+	if s.portal == nil {
+		return http.NotFoundHandler()
+	}
+	return s.portal.requireSessionWith(h, signedOutPolicy{
+		redirects: func(*http.Request) bool { return false },
+		status:    http.StatusSeeOther,
+	})
+}
+
 // portalWrap puts h behind the portal session middleware; without a portal
 // (consent off or no state DB) the route answers 404.
 func (s *Server) portalWrap(h http.Handler) http.Handler {
