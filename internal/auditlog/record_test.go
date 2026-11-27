@@ -209,7 +209,7 @@ func TestMarshalLine_SmallRecordUntouched(t *testing.T) {
 	r := FromEvent(analytics.Event{Timestamp: time.Date(2026, 1, 2, 3, 4, 5, 6, time.UTC), Decision: "allow", Domain: "d.test"}, testMeta, QueryDrop)
 	r.Seq = 7
 	line := string(marshal(t, r))
-	const prefix = `{"schema":"warden.decision.v1","schema_rev":4,"ts":"2026-01-02T03:04:05.000000006Z","proxy_id":"px-1","proxy_id_source":"config","agent_id":"agent-a","boot_id":"boot-1","seq":7,"decision":"allow",`
+	const prefix = `{"schema":"warden.decision.v1","schema_rev":5,"ts":"2026-01-02T03:04:05.000000006Z","proxy_id":"px-1","proxy_id_source":"config","agent_id":"agent-a","boot_id":"boot-1","seq":7,"decision":"allow",`
 	if !strings.HasPrefix(line, prefix) {
 		t.Fatalf("key order/shape changed: %s", line)
 	}
@@ -280,5 +280,19 @@ func TestMarshalLine_DropOrder(t *testing.T) {
 	}
 	if back.Compliance == nil || back.JudgeReason == "" {
 		t.Fatal("compliance and judge_reason must survive when dropping earlier fields is enough")
+	}
+}
+
+func TestFromEvent_AgentIDLimitRule(t *testing.T) {
+	r := FromEvent(analytics.Event{Decision: "allow", AgentID: "claude-code", LimitRule: "eng-llm"}, testMeta, QueryDrop)
+	if r.AgentID != "claude-code" || r.LimitRule != "eng-llm" {
+		t.Fatalf("agent %q rule %q", r.AgentID, r.LimitRule)
+	}
+	r = FromEvent(analytics.Event{Decision: "allow"}, testMeta, QueryDrop)
+	if r.AgentID != "agent-a" || r.LimitRule != "" {
+		t.Fatalf("fallback: agent %q rule %q", r.AgentID, r.LimitRule)
+	}
+	if strings.Contains(string(marshal(t, r)), "limit_rule") {
+		t.Error("empty limit_rule must be omitted")
 	}
 }

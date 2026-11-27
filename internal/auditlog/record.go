@@ -27,8 +27,9 @@ const (
 	SchemaDecisionV1 = "warden.decision.v1"
 	// SchemaRev 2 adds the user_blocked reason (W-P1-BLOCK-02); 3 adds
 	// agent_disabled (W-P2-AREG-05); 4 adds user.act and user.token_type
-	// (W-P2-WBND-02).
-	SchemaRev = 4
+	// (W-P2-WBND-02); 5 adds limit_rule and lets agent_id come from the event
+	// (W-P3-PUL-02).
+	SchemaRev = 5
 )
 
 // QueryMode says what FromEvent may record of the request query.
@@ -117,6 +118,7 @@ type Record struct {
 	SwappedRefs   []string `json:"swapped_refs,omitempty"`
 	Compliance    []string `json:"compliance,omitempty"`
 	JudgeReason   string   `json:"judge_reason,omitempty"`
+	LimitRule     string   `json:"limit_rule,omitempty"`
 	User          *User    `json:"user,omitempty"`
 	Truncated     bool     `json:"truncated,omitempty"`
 }
@@ -177,6 +179,11 @@ func FromEvent(ev analytics.Event, m Meta, q QueryMode) Record {
 		SwappedRefs:   boundedList(ev.SwappedRefs),
 		Compliance:    boundedList(ev.Compliance),
 		JudgeReason:   cut(stripControl(ev.JudgeReason), maxJudgeBytes),
+		LimitRule:     cut(ev.LimitRule, maxFieldBytes),
+	}
+	// The event's agent (the request's verified agent) wins over the worker's.
+	if ev.AgentID != "" {
+		r.AgentID = cut(ev.AgentID, maxFieldBytes)
 	}
 	if ev.IdentityStatus != "" {
 		u := &User{Status: cut(ev.IdentityStatus, maxFieldBytes)}

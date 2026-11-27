@@ -157,7 +157,10 @@ func TestUserFilterUsesIndexes(t *testing.T) {
 			plan.WriteString(detail + "\n")
 		}
 		_ = rows.Close()
-		if !strings.Contains(plan.String(), "idx_events_user_sub_ts") || !strings.Contains(plan.String(), "idx_events_user_email_lower") {
+		// The local store also has (user_sub, limit_rule, ts) (W-P3-PUL-02); its
+		// user_sub prefix serves the equality lookup just as well.
+		usesSub := strings.Contains(plan.String(), "idx_events_user_sub_ts") || strings.Contains(plan.String(), "idx_events_user_rule_ts")
+		if !usesSub || !strings.Contains(plan.String(), "idx_events_user_email_lower") {
 			t.Errorf("%s: plan does not use both user indexes:\n%s", name, plan.String())
 		}
 	}
