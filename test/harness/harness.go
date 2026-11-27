@@ -183,6 +183,9 @@ type H struct {
 	// listen address (its https origin is the registered redirect URL).
 	wantConsole bool
 	consoleAddr string
+	// wantConsent (WithConsent) adds the CP-local consent block (the portal
+	// sign-in) on top of the console.
+	wantConsent bool
 	// versionedPolicy (WithVersionedPolicyStore) boots the control plane with
 	// --policy-store=versioned and a state dir.
 	versionedPolicy bool
@@ -885,6 +888,7 @@ func (h *H) writeCPConfig() string {
 	}
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
+	b.WriteString(h.consentYAML())
 	b.WriteString(h.keysYAML())
 	b.WriteString(h.tokenServiceYAML())
 	b.WriteString(h.workerCAYAML())

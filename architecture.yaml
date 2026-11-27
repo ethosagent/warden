@@ -136,6 +136,7 @@ classes:
       - internal/bundle   # signed policy bundle payload, envelope, Sign and Verify (pure; #95)
       - internal/workerca         # worker CA issue/verify, SPIFFE worker ids: pure, x509 creation injected (#88)
       - internal/apikeys   # scoped CP API keys: wak_ format, scope registry, Store port, Index (APIK-01)
+      - internal/portal   # consent portal domain: Principal, Blocklist/LinkWriter ports, admission and next rules (CSIG-02)
 
   # DEVTOOL — developer tooling; no Warden package may import it. Exempt from
   # layering but not from the global X rules.
@@ -203,6 +204,7 @@ zones:
     - internal/workerca/adapters/signer/**  # x509.CreateCertificate lives here: only the control plane issues worker certs (#88)
     - internal/apikeys/**   # CP-only API keys: domain and its SQLite adapter (APIK-01)
     - internal/webauth/**   # CP-only browser sign-in and its test fake (#276)
+    - internal/portal   # CP-only consent portal domain (CSIG-02)
   shared:
     - internal/config
     - internal/denyreason

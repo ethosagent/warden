@@ -43,6 +43,7 @@ linters:
             - ${base-path}/internal/bundle/**
             - ${base-path}/internal/workerca/**
             - ${base-path}/internal/apikeys/**
+            - ${base-path}/internal/portal/**
             - ${base-path}/internal/policy/**
             - ${base-path}/internal/scan/**
             - ${base-path}/internal/dlp/**
@@ -121,6 +122,7 @@ linters:
             - ${base-path}/internal/bundle/**
             - ${base-path}/internal/workerca/**
             - ${base-path}/internal/apikeys/**
+            - ${base-path}/internal/portal/**
             - '!${base-path}/cmd/**'
             - '!${base-path}/internal/worker/**'
             - '!${base-path}/internal/controlplane/**'
@@ -231,6 +233,7 @@ linters:
             - '!${base-path}/internal/bundle/**'
             - '!${base-path}/internal/workerca/**'
             - '!${base-path}/internal/apikeys/**'
+            - '!${base-path}/internal/portal/**'
             - '!${base-path}/tools/**'
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'

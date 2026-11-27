@@ -174,6 +174,10 @@ type Config struct {
 	// ClientSecret is the console OIDC client secret, read by Run from the
 	// environment variable console.oidc.clientSecretEnv names. It is never logged.
 	ClientSecret string
+	// ConsentClientSecret is the portal OIDC client secret, read by Run from
+	// the environment variable consent.oidc.clientSecretEnv names. It is never
+	// logged.
+	ConsentClientSecret string
 	// Now is the clock for sessions, pending logins and ID-token checks (nil =
 	// time.Now). The L1 harness injects its fake clock through Params.Clock.
 	Now func() time.Time
@@ -355,6 +359,9 @@ type Server struct {
 	// auth is the console OIDC login (/auth/login, /auth/callback); set only when
 	// sessions are.
 	auth *authService
+	// portal is the consent portal's sign-in (/portal/login, /portal/callback,
+	// /portal); set only with Consent and State (W-P3-CSIG-02).
+	portal *portalService
 	// audit is the admin audit middleware's state; nil when cfg.AdminAudit is
 	// (admin audit disabled), in which case no route is wrapped.
 	audit *adminAuditor
@@ -475,6 +482,7 @@ func New(cfg Config) *Server {
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
+	s.initPortal()
 	s.initAPIKeys()
 	s.initBreakGlass()
 	s.warnAdminToken()
@@ -548,6 +556,9 @@ func (s *Server) Start(ctx context.Context) {
 	if s.auth != nil {
 		go s.auth.discover(ctx)
 		go s.auth.sweep(ctx)
+	}
+	if s.portal != nil {
+		s.portal.start(ctx)
 	}
 	// Alert pipeline: start the embeddable assembly (manager start + the
 	// detection tick loop, both ctx-scoped). The pipeline captures ctx as its
@@ -892,6 +903,7 @@ func (s *Server) Handler() http.Handler {
 	// Write guard and mount (bearer in none mode; sessions and roles in oidc): routes.go.
 	s.mountDashboard(mux, dash)
 	s.registerAuthRoutes(mux)
+	s.registerPortalRoutes(mux)
 
 	return mux
 }

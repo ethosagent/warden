@@ -128,6 +128,9 @@ func (s *Server) enableAdminAudit(rec adminaudit.Recorder, probe func(context.Co
 	if s.auth != nil {
 		s.auth.audit = s.recordLogin
 	}
+	if s.portal != nil {
+		s.portal.audit = s.recordPortalLogin
+	}
 }
 
 // auditWrap puts next behind the request-id and admin audit middleware,
