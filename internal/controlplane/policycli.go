@@ -196,6 +196,9 @@ func (o *OfflinePolicyStore) Import(ctx context.Context, doc PolicyDoc, msg stri
 			if err := consentIssuerBinding(&c, id); err != nil {
 				return PolicyImportResult{}, fmt.Errorf("policy file %s: %w", doc.path, err)
 			}
+			if err := checkUserStoreOverlap(c.Store, settingsSecretStore(doc.wire.Settings)); err != nil {
+				return PolicyImportResult{}, fmt.Errorf("policy file %s: %w", doc.path, err)
+			}
 		}
 	}
 	if expectedHead < 0 {

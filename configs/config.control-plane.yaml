@@ -139,6 +139,15 @@ logging:
 #  idpLink:
 #    enabled: true                          # request offline_access, keep the refresh token
 #    refreshLifetime: 720h                  # Dex expiry.refreshTokens.absoluteLifetime
+#  # CP-only user credential store (docs/control-plane.md "CP-only user credential
+#  # store"). No worker ever gets a credential for it; its namePrefix must not overlap
+#  # secretStore.aws.namePrefix. Credentials come from the CP environment or role only.
+#  # Required (and must be persistent, not echo) while idpLink.enabled is true.
+#  store:
+#    backend: aws                           # aws | vault (not yet) | echo (--dev only)
+#    namePrefix: warden-cp/
+#    aws:
+#      region: us-east-1
 
 # Worker CA (CONTROL PLANE ONLY, never served to workers; docs/control-plane.md "Worker CA").
 # The compose recipe's cp-bootstrap service creates the chain and key below with

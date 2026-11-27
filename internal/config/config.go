@@ -725,11 +725,13 @@ func validate(p Policy) error {
 		if s.Placeholder == "" {
 			return fmt.Errorf("config: secrets[%d]: placeholder is required", i)
 		}
-		// cp/ is reserved for control-plane material (W-P2-WCA-07): a placeholder
-		// naming it would have a worker inject that value upstream. The message
-		// names the entry only; it does not echo the placeholder.
-		if IsReservedSecretKey(s.Placeholder) {
-			return fmt.Errorf("config: secrets[%d]: placeholder names the reserved %q secret namespace", i, ReservedSecretNamespace+"/")
+		// cp/ is reserved for control-plane material (W-P2-WCA-07) and users/,
+		// idp/, revoking/ and oauth-clients/ for per-user credentials
+		// (W-P3-CSIG-06): a placeholder naming one would have a worker inject
+		// that value upstream. The message names the entry and the namespace
+		// only; it does not echo the placeholder.
+		if ns, ok := ReservedSecretNamespaceOf(s.Placeholder); ok {
+			return fmt.Errorf("config: secrets[%d]: invalid_secret_key: reserved namespace %q (placeholder names a control-plane-only secret key)", i, ns+"/")
 		}
 		if envBackend && s.EnvVar == "" {
 			return fmt.Errorf("config: secrets[%d]: envVar is required for the env secret backend", i)

@@ -656,3 +656,57 @@ func TestCentralSecretsReserved(t *testing.T) {
 		t.Fatalf("POST normal = %d, want 204", code)
 	}
 }
+
+// TestSecretsReservedKeys: the P3 per-user namespaces (W-P3-CSIG-06) are closed
+// on /central/secrets like cp/: POST and DELETE answer 403 reserved_key without
+// touching the store, and GET leaves them out.
+func TestSecretsReservedKeys(t *testing.T) {
+	const token = "tok"
+	store := secrets.NewEchoStore()
+	ctx := context.Background()
+	reserved := []string{"idp/a", "users/a/b", "revoking/a/google", "oauth-clients/google"}
+	for _, k := range append([]string{"plain"}, reserved...) {
+		if err := store.Put(ctx, k, "v"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := New(Config{
+		PolicyPath:  writePolicyFile(t, "api.openai.com"),
+		Token:       token,
+		Logger:      slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)),
+		SecretStore: store,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	code, body := do(t, http.MethodGet, ts.URL+"/central/secrets", token, "")
+	if code != http.StatusOK || !strings.Contains(body, "plain") {
+		t.Fatalf("GET = %d %s", code, body)
+	}
+	for _, ns := range []string{"idp/", "users/", "revoking/", "oauth-clients/"} {
+		if strings.Contains(body, ns) {
+			t.Errorf("GET lists a %s key: %s", ns, body)
+		}
+	}
+	for _, k := range append(reserved, " idp/a ", "/users/a/b") {
+		code, body := do(t, http.MethodPost, ts.URL+"/central/secrets", token, `{"key":"`+k+`","value":"evil"}`)
+		if code != http.StatusForbidden || !strings.Contains(body, `"reserved_key"`) {
+			t.Errorf("POST %q = %d %s, want 403 reserved_key", k, code, body)
+		}
+	}
+	for _, path := range []string{"idp/a", "users/a/b", "revoking/a/google", "oauth-clients/google"} {
+		code, body := do(t, http.MethodDelete, ts.URL+"/central/secrets/"+path, token, "")
+		if code != http.StatusForbidden || !strings.Contains(body, `"reserved_key"`) {
+			t.Errorf("DELETE %s = %d %s, want 403 reserved_key", path, code, body)
+		}
+	}
+	list, err := store.List(ctx)
+	if err != nil || len(list) != 1+len(reserved) {
+		t.Fatalf("store mutated by refused requests: %+v %v", list, err)
+	}
+	for _, m := range list {
+		if m.Version != "1" {
+			t.Errorf("key %s rewritten (version %s)", m.Key, m.Version)
+		}
+	}
+}
