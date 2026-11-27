@@ -101,7 +101,7 @@ One object per line. `ts` is the worker's wall clock at event time. "Required" m
 | `latency_ms` | integer | yes | Request latency in milliseconds. |
 | `tool` | string | yes | MCP tool name, empty for non-MCP events. |
 | `provider` | string | yes | LLM provider the call was attributed to, empty when none. |
-| `cost_usd` | number | yes | Estimated cost in US dollars; never billing-grade. |
+| `cost_usd` | number | yes | Estimated cost in US dollars; never billing-grade. Streamed messages (chunked, SSE, gRPC) are priced from the bytes actually relayed, not Content-Length, so they are no longer 0. |
 | `dlp_action` | string | yes | `allow`, `block`, `redact` or `monitor`; empty when DLP is off. |
 | `dlp_rule` | string | yes | DLP rule that fired, empty when none. |
 | `dlp_partial` | boolean | yes | True when only part of the body was scanned. |
