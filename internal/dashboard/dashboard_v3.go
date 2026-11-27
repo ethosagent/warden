@@ -142,7 +142,7 @@ func (s *Server) getSecretStore(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, m := range metas {
 		if secrets.IsReservedKey(m.Key) {
-			continue // cp/ is control-plane only: never listed
+			continue // reserved namespaces (secrets.IsReservedKey) are never listed
 		}
 		e := secretStoreEntry{Key: m.Key, Version: m.Version}
 		if !m.UpdatedAt.IsZero() {
@@ -189,8 +189,8 @@ func (s *Server) putSecret(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// refuseReservedKey answers 403 reserved_key for a key in the control-plane
-// only cp/ namespace and reports whether it did. It runs before the audit
+// refuseReservedKey answers 403 reserved_key for a key in a reserved namespace
+// (secrets.IsReservedKey) and reports whether it did. It runs before the audit
 // annotation and the store; the refusal is logged by route and key prefix only,
 // at most once a minute per route.
 func (s *Server) refuseReservedKey(w http.ResponseWriter, r *http.Request, key string) bool {

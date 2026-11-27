@@ -523,6 +523,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if err != nil {
 			return fail(err)
 		}
+		// BRKR-03: build the OAuth registry with NewClientSecretResolver(userStore).
 		if err := checkUserStorePersistent(consentCfg, userStore); err != nil {
 			return fail(err)
 		}
