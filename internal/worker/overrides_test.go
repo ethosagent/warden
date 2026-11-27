@@ -424,6 +424,9 @@ func TestRun_OverridesDialerMapsFakeUpstreamH2(t *testing.T) {
 // async writer, and Flush through that handle persists an already-made request's
 // event IMMEDIATELY — no outwaiting the async writer's 250ms flush tick. This is
 // what lets the L1 harness read events back deterministically (h.Events()).
+// With the JSON decision stream on, the same Flush also drains the sink the
+// writer tees into: the request's decision line is in the file when Flush
+// returns (the integration stack's DecisionLines reads it straight after).
 func TestRun_OverridesOnAnalyticsWriterFlushesAnalytics(t *testing.T) {
 	pong := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("pong"))
@@ -447,6 +450,7 @@ func TestRun_OverridesOnAnalyticsWriterFlushesAnalytics(t *testing.T) {
 		toAddr: strings.TrimPrefix(pong.URL, "https://"),
 	}
 	dbPath := filepath.Join(t.TempDir(), "warden.db")
+	decisionPath := filepath.Join(t.TempDir(), "decisions.jsonl")
 
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -465,6 +469,9 @@ func TestRun_OverridesOnAnalyticsWriterFlushesAnalytics(t *testing.T) {
 			Allowlist: []config.AllowlistEntry{{Domain: "fake.upstream.test"}},
 			LogLevel:  "error",
 			LogFormat: "text",
+			Audit: config.AuditConfig{JSONLog: config.JSONLogConfig{
+				Enabled: true, Output: config.JSONLogOutputFile, Path: decisionPath,
+			}},
 		}},
 		DBPath:        dbPath,
 		CACert:        caCertPath,
@@ -568,6 +575,15 @@ func TestRun_OverridesOnAnalyticsWriterFlushesAnalytics(t *testing.T) {
 	}
 	if evs[0].Domain != "fake.upstream.test" || evs[0].Decision != "allow" {
 		t.Errorf("flushed event = %s/%s, want fake.upstream.test/allow", evs[0].Domain, evs[0].Decision)
+	}
+	// Read once, no poll: Flush has already drained the decision stream.
+	raw, err := os.ReadFile(decisionPath)
+	if err != nil {
+		cancel()
+		t.Fatalf("read the decision log after Flush: %v", err)
+	}
+	if n := strings.Count(string(raw), `"warden.decision.v1"`); n != 1 {
+		t.Errorf("after Flush the decision log holds %d lines, want exactly 1 (the request above)", n)
 	}
 
 	cancel()

@@ -34,6 +34,7 @@ import (
 func TestIdentityRequire(t *testing.T) {
 	t.Run("reject", testRejects)
 	t.Run("accepted", testAccepted)
+	t.Run("fleet", testFleet)
 	t.Run("revocation", testRevocation)
 	t.Run("expiry", testExpiry)
 	t.Run("degraded", testDegraded)
@@ -169,15 +170,15 @@ func testRejects(t *testing.T) {
 	})
 }
 
-// testAccepted: the token minted through the token endpoint is accepted on all
-// three transports, and the worker's stored event, its decision line and the
-// control plane's fleet event all carry the same verified identity: sub, act,
-// sid, groups and token_type=warden. No token appears in any captured log.
-func testAccepted(t *testing.T) {
-	s, a, b := requireStack(t, security.StackOptions{DecisionLog: true, CentralIngest: true})
-	tokA := s.MintWardenToken(t, a, "user-1", "eng")
-	tokB := s.MintWardenToken(t, b, "user-2", "eng")
-	want := decode(t, tokA)
+// acceptedTraffic mints agent-a's and agent-b's tokens through the token
+// endpoint and sends agent-a's over every transport and agent-b's once, all of
+// which the require-mode workers must accept. It returns both tokens and the
+// claims agent-a's carries.
+func acceptedTraffic(t *testing.T, s *security.Stack, a, b *security.Agent) (tokA, tokB string, want claims) {
+	t.Helper()
+	tokA = s.MintWardenToken(t, a, "user-1", "eng")
+	tokB = s.MintWardenToken(t, b, "user-2", "eng")
+	want = decode(t, tokA)
 	if want.Sub != "user-1" || want.Act.Sub != "agent-a" || want.SID == "" || !slices.Equal(want.Groups, []string{"eng"}) {
 		t.Fatalf("the minted token carries sub %q act %q sid %q groups %v, want user-1, agent-a, a sid and [eng]",
 			want.Sub, want.Act.Sub, want.SID, want.Groups)
@@ -196,9 +197,45 @@ func testAccepted(t *testing.T) {
 	if got := verifyCount(t, s, wa, map[string]string{"result": "valid", "token_type": "warden"}) - validBefore; got < float64(len(security.Transports)) {
 		t.Errorf(`warden_identity_verify_total{result="valid",token_type="warden"} rose by %v, want at least %d`, got, len(security.Transports))
 	}
+	return tokA, tokB, want
+}
 
-	// carries is the identity every record of the request must hold.
-	type seen struct{ sub, act, sid, status, tokenType string }
+// seen is the identity every record of an accepted request must hold.
+type seen struct{ sub, act, sid, status, tokenType string }
+
+// noTokenInLogs: neither minted token, nor any payload or signature segment of
+// one, appears in the captured logs, and nothing leaks anywhere the stack
+// records.
+func noTokenInLogs(t *testing.T, s *security.Stack, tokA, tokB string) {
+	t.Helper()
+	logs := s.Logs(t)
+	for name, tok := range map[string]string{"agent-a's": tokA, "agent-b's": tokB} {
+		if strings.Contains(logs, tok) {
+			t.Errorf("%s token appears in the captured logs", name)
+		}
+		// A raw signature or payload segment is as good as the token.
+		for _, seg := range strings.Split(tok, ".")[1:] {
+			if strings.Contains(logs, seg) {
+				t.Errorf("a payload or signature segment of %s token appears in the captured logs", name)
+			}
+		}
+	}
+	s.AssertNoLeak(t, security.LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
+}
+
+// testAccepted: the token minted through the token endpoint is accepted on all
+// three transports, and the worker's stored event and its decision line both
+// carry the same verified identity: sub, act, sid, groups and
+// token_type=warden. No token appears in any captured log.
+//
+// The stack keeps its events on the worker: with CentralIngest the worker's
+// store is a forwarding buffer the sync loop empties on its own real-time tick
+// (analytics.SyncWorker deletes what the control plane acknowledged), so a
+// read of it races the forward. testFleet checks the forwarded copy.
+func testAccepted(t *testing.T) {
+	s, a, b := requireStack(t, security.StackOptions{DecisionLog: true})
+	tokA, tokB, want := acceptedTraffic(t, s, a, b)
+	wa := s.Worker("agent-a")
 	wantSeen := seen{"user-1", "agent-a", want.SID, "valid", "warden"}
 
 	t.Run("worker event", func(t *testing.T) {
@@ -231,9 +268,20 @@ func testAccepted(t *testing.T) {
 		}
 	})
 
+	t.Run("no token in any log", func(t *testing.T) { noTokenInLogs(t, s, tokA, tokB) })
+}
+
+// testFleet: the same accepted traffic, forwarded by the workers to the
+// control plane's /central/ingest, carries the same verified identity in the
+// fleet store, ?act= answers for exactly one agent, and no token appears in the
+// fleet events or any captured log.
+func testFleet(t *testing.T) {
+	s, a, b := requireStack(t, security.StackOptions{CentralIngest: true})
+	tokA, tokB, want := acceptedTraffic(t, s, a, b)
+	wantSeen := seen{"user-1", "agent-a", want.SID, "valid", "warden"}
+
 	t.Run("fleet event", func(t *testing.T) {
-		// The worker pushes its events to /central/ingest on its own schedule,
-		// which the shared clock drives.
+		// The worker pushes its events to /central/ingest on its own schedule.
 		var fleet []analytics.Event
 		s.EventuallyAdvance("the control plane's fleet store to hold agent-a's events", 5*time.Second, func() bool {
 			fleet = s.FleetEvents(t, "act=agent-a&user=user-1")
@@ -265,21 +313,7 @@ func testAccepted(t *testing.T) {
 		}
 	})
 
-	t.Run("no token in any log", func(t *testing.T) {
-		logs := s.Logs(t)
-		for name, tok := range map[string]string{"agent-a's": tokA, "agent-b's": tokB} {
-			if strings.Contains(logs, tok) {
-				t.Errorf("%s token appears in the captured logs", name)
-			}
-			// A raw signature or payload segment is as good as the token.
-			for _, seg := range strings.Split(tok, ".")[1:] {
-				if strings.Contains(logs, seg) {
-					t.Errorf("a payload or signature segment of %s token appears in the captured logs", name)
-				}
-			}
-		}
-		s.AssertNoLeak(t, security.LeakCheck{AllowSwapUpTo: s.Upstream.Hits()})
-	})
+	t.Run("no token in any log", func(t *testing.T) { noTokenInLogs(t, s, tokA, tokB) })
 }
 
 // cutBound is how long a cut may take to reach a worker from the moment the

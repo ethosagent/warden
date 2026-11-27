@@ -147,7 +147,10 @@ type StackOptions struct {
 	// CentralIngest makes every worker forward its events to the control
 	// plane's /central/ingest (central.mode worker, same origin as the control
 	// plane, so the worker certificate is the only credential), every second.
-	// The fleet store then holds what the workers record.
+	// The fleet store then holds what the workers record. The forward runs on
+	// a real-time ticker and deletes each acknowledged batch from the worker's
+	// own store, so with this on AllEvents / DenyEvents can come back short:
+	// read the fleet copy (FleetEvents) instead.
 	CentralIngest bool
 }
 
@@ -896,7 +899,8 @@ func (s *Stack) stop() {
 }
 
 // flushAnalytics persists everything the worker queued, so DenyEvents reads
-// the traffic a case has already finished making.
+// the traffic a case has already finished making, and (with DecisionLog) has
+// the sink write every decision line those events teed into it.
 func (w *Worker) flushAnalytics() error {
 	w.flushMu.Lock()
 	f := w.flush

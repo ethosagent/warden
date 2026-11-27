@@ -1,8 +1,10 @@
 package worker
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"time"
@@ -54,4 +56,26 @@ func randomBootID() string {
 		return "unknown"
 	}
 	return hex.EncodeToString(b)
+}
+
+// streamFlusher is the drain handle Overrides.OnAnalyticsWriter receives: it
+// persists the async analytics writer's queue (which tees every flushed batch
+// into the decision stream) and then waits for the decision-stream sink to
+// write those lines, so the harness reads both outputs without outwaiting a
+// tick. sink is nil when audit.jsonLog is off; Sink.Flush is nil-safe.
+type streamFlusher struct {
+	analytics AnalyticsFlusher
+	sink      *auditlog.Sink
+}
+
+func (f streamFlusher) Flush() error {
+	if err := f.analytics.Flush(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), jsonLogCloseTimeout)
+	defer cancel()
+	if err := f.sink.Flush(ctx); err != nil {
+		return fmt.Errorf("drain the decision stream: %w", err)
+	}
+	return nil
 }

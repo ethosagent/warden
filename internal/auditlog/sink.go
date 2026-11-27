@@ -100,6 +100,10 @@ type Sink struct {
 	abort     chan struct{} // closed when Close's context ends before the drain
 	abortOnce sync.Once
 	done      chan struct{} // closed when the writer goroutine has exited
+	// flushReq carries one ack per Flush to the writer goroutine. It is never
+	// closed, so Flush sends on it without holding mu (a Flush waiting on a
+	// stalled writer never holds up Close, or Observe behind Close).
+	flushReq chan chan struct{}
 
 	out    io.Writer // the unbuffered destination (also what bw wraps)
 	closer io.Closer // lumberjack, nil for stdout/stderr
@@ -120,12 +124,13 @@ func New(cfg config.JSONLogConfig, meta Meta, m Metrics, logger *slog.Logger, op
 		m = noopMetrics{}
 	}
 	s := &Sink{
-		meta:    meta,
-		metrics: m,
-		logger:  logger,
-		ch:      make(chan batch, queueBatches),
-		abort:   make(chan struct{}),
-		done:    make(chan struct{}),
+		meta:     meta,
+		metrics:  m,
+		logger:   logger,
+		ch:       make(chan batch, queueBatches),
+		abort:    make(chan struct{}),
+		done:     make(chan struct{}),
+		flushReq: make(chan chan struct{}),
 	}
 	if cfg.Query == config.JSONLogQueryKeys {
 		s.query = QueryKeys
@@ -254,6 +259,35 @@ func (s *Sink) WriteAdmin(rec AdminRecord) {
 	}
 }
 
+// Flush blocks until every line queued before the call has been handed to the
+// output (the buffer flushed), so a reader of the file sees them. It is the
+// drain the test harness reads the stream through (via the worker's
+// assembly-only Overrides.OnAnalyticsWriter handle); production never calls
+// it. It never takes mu, so it cannot hold up Close, Observe or WriteAdmin;
+// a stalled writer makes it wait, bounded by ctx. A closed sink returns nil
+// once the writer has exited (Close drains). A line that failed to marshal or
+// write is not retried: Flush reports the queue drained, and the write-error
+// metric reports the loss.
+func (s *Sink) Flush(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	ack := make(chan struct{})
+	select {
+	case s.flushReq <- ack:
+	case <-s.done:
+		return nil // the writer exited (Close): its final flush ran
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-ack:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // Close stops accepting batches, drains the queue until ctx ends, flushes and
 // closes the file. If ctx ends first the remaining queued batches are abandoned
 // (they are best effort; the SQLite store is the record) and ctx.Err() is
@@ -289,25 +323,61 @@ func (s *Sink) run() {
 			}
 		}
 	}()
-	for b := range s.ch {
+	for {
 		select {
-		case <-s.abort:
-			s.metrics.RecordAuditLogDropped(b.size())
-			continue
-		default:
-		}
-		if b.admin != nil {
-			if s.writeLine(b.admin) {
-				s.pendingAdmin++
+		case b, ok := <-s.ch:
+			if !ok {
+				return
+			}
+			s.write(b)
+		case ack := <-s.flushReq:
+			// Everything a Flush caller queued before asking is already in
+			// ch (Observe and WriteAdmin return after their send): write what
+			// is there, then acknowledge. Each write flushes the buffer.
+			closed := s.drain()
+			close(ack)
+			if closed {
+				return
 			}
 		}
-		for i := range b.recs {
-			if s.writeLine(b.recs[i]) {
-				s.pendingDecision++
-			}
-		}
-		s.flush()
 	}
+}
+
+// drain writes every batch already in ch without waiting for more. It reports
+// whether ch was closed (Close), which ends run.
+func (s *Sink) drain() (closed bool) {
+	for {
+		select {
+		case b, ok := <-s.ch:
+			if !ok {
+				return true
+			}
+			s.write(b)
+		default:
+			return false
+		}
+	}
+}
+
+// write writes one batch and flushes, or drops it once Close gave up.
+func (s *Sink) write(b batch) {
+	select {
+	case <-s.abort:
+		s.metrics.RecordAuditLogDropped(b.size())
+		return
+	default:
+	}
+	if b.admin != nil {
+		if s.writeLine(b.admin) {
+			s.pendingAdmin++
+		}
+	}
+	for i := range b.recs {
+		if s.writeLine(b.recs[i]) {
+			s.pendingDecision++
+		}
+	}
+	s.flush()
 }
 
 // lineMarshaler is a record the sink can write: Record or *AdminRecord.

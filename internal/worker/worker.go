@@ -134,7 +134,10 @@ type Overrides struct {
 	// assembled async analytics writer's drain handle, so the L1 harness can
 	// persist everything queued the moment a scenario stops making traffic and
 	// read events back deterministically (h.Events()) instead of outwaiting the
-	// 250ms flush tick. Assembly-only like the rest of Overrides: no YAML key or
+	// 250ms flush tick. With audit.jsonLog on, the same Flush then drains the
+	// decision-stream sink the writer tees into (bounded at 5s,
+	// jsonLogCloseTimeout), so the decision log is as readable as the store.
+	// Assembly-only like the rest of Overrides: no YAML key or
 	// CLI flag can set it (enforced by TestOverridesAreNotConfigurable), and
 	// production never sets it — nil leaves boot byte-identical.
 	OnAnalyticsWriter func(AnalyticsFlusher)
@@ -172,7 +175,9 @@ func (o *Overrides) activeEgressHooks() []string {
 
 // AnalyticsFlusher is the drain capability of the async analytics writer: Flush
 // persists everything already queued and returns (analytics flush semantics —
-// no deadline, never a drop). A FAILED batch write is returned, not acked as
+// no deadline, never a drop). With audit.jsonLog on it then waits, at most 5s
+// (jsonLogCloseTimeout), for the decision-stream sink to write the lines those
+// events teed into it, and returns that wait's error if it times out. A FAILED batch write is returned, not acked as
 // persisted — the batch stays buffered for the next flush, and the caller
 // learns the read-your-writes view it asked for does not exist. It is the ONLY
 // surface handed out on the writer: no reach into the queue, the batch, or the
@@ -724,12 +729,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// it. Built (and its close deferred) BEFORE the async writer so the deferred
 	// LIFO order closes the sink AFTER asyncStore.Close() has drained its final
 	// batch into the tee. A path that cannot be opened fails startup here.
+	var sink *auditlog.Sink
 	if pol.Audit.JSONLog.Enabled {
 		sinkOpts := []auditlog.Option{}
 		if jsonLogOnStdout {
 			sinkOpts = append(sinkOpts, auditlog.WithWriter(out))
 		}
-		sink, sErr := auditlog.New(pol.Audit.JSONLog, newAuditMeta(pol, agentID), metrics, logger, sinkOpts...)
+		var sErr error
+		sink, sErr = auditlog.New(pol.Audit.JSONLog, newAuditMeta(pol, agentID), metrics, logger, sinkOpts...)
 		if sErr != nil {
 			return sErr
 		}
@@ -755,9 +762,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}
 	// Assembly-only harness seam (#363): hand the drain handle to whoever asked
 	// for it at assembly time. Production never sets OnAnalyticsWriter, so this
-	// is one nil check away from byte-identical behavior.
+	// is one nil check away from byte-identical behavior. With the decision
+	// stream on, the handle also drains the sink the writer tees into, so a
+	// reader of the decision log after Flush is as exact as a reader of the
+	// store.
 	if p.Overrides != nil && p.Overrides.OnAnalyticsWriter != nil {
-		p.Overrides.OnAnalyticsWriter(asyncStore)
+		p.Overrides.OnAnalyticsWriter(streamFlusher{analytics: asyncStore, sink: sink})
 	}
 
 	// Audit decorators wrap the analytics WRITE chain. Order matters and is load-
