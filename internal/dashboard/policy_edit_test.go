@@ -631,3 +631,23 @@ func TestPolicyHistoryPanelNoInnerHTML(t *testing.T) {
 		t.Error("no author or message rendering found in the policy history block")
 	}
 }
+
+// TestPolicyWritePassesForce: ?force=true on the policy write reaches the
+// writer (the cost-cap rollout guard reads it), and its absence does not.
+func TestPolicyWritePassesForce(t *testing.T) {
+	var forced []bool
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	srv.SetWriteGuard(AllowUngatedWritesForTests)
+	srv.SetPolicyWriter(func(ctx context.Context, _ config.Policy, _ WriteMeta) error {
+		forced = append(forced, ForceFrom(ctx))
+		return nil
+	})
+	for _, path := range []string{"/dashboard/api/policy", "/dashboard/api/policy?force=true"} {
+		if rec := postJSON(t, srv.Handler(), path, `{"allowlist":[],"denylist":[]}`); rec.Code != http.StatusOK {
+			t.Fatalf("%s = %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	if len(forced) != 2 || forced[0] || !forced[1] {
+		t.Fatalf("writer saw force %v, want [false true]", forced)
+	}
+}

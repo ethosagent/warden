@@ -1430,6 +1430,7 @@ fails when the two differ.
 | `/dashboard/api/token-sessions/revoke` | POST | admin | `token_sessions.revoke_all` | `none` |
 | `/dashboard/api/token-sessions/{sid}/revoke` | POST | admin | `token_sessions.revoke` | `none` |
 | `/dashboard/api/traffic` | GET | viewer | `traffic.read` | `traffic:read` |
+| `/dashboard/api/usage/users` | GET | viewer | `usage.users.read` | `traffic:read` |
 | `/dashboard/api/worker-enrollments` | GET | admin | `worker_enroll_token.read` | `workers:admin` |
 | `/dashboard/api/worker-enrollments` | POST | admin | `worker_enroll_token.create` | `none` |
 | `/dashboard/api/worker-enrollments/{id}` | DELETE | admin | `worker_enroll_token.revoke` | `workers:admin` |
@@ -3606,6 +3607,76 @@ poll. A worker backing off after control-plane errors applies it after at most t
   unblock.
 - **No `--state-dir`:** the control plane has no block-list store, so the
   block-list API answers 503 `state_dir_required` and `/policy` is unchanged.
+
+## Fleet cost blocks
+
+A rule's `dailyCostUSD` (W-P3-PUL-01) is a cap on **estimated** spend per user per
+UTC day. Each worker keeps its own ledger, so on its own a user could spend the
+cap once on every worker. The control plane closes that gap: it totals today's
+spend per (user, rule) over the whole fleet from the per-user daily rollup and
+serves the users at or over their rule's cap to every worker as
+`costBlockedUsers: [{"sub", "rule", "day"}]` on `/policy` (and inside the signed
+bundle).
+
+- **When it runs.** At startup (before the first `/policy` is answered), at most
+  once every 30 s after an ingest batch that carries a user and a rule, at each
+  00:00 UTC, and soon after a change of the served rules. It runs only while the
+  served policy has a rule with `dailyCostUSD` and the fleet analytics store is
+  `sqlite`; with `--analytics-provider memory` it stays off and logs one WARN,
+  and each worker's own ledger is the only cap.
+- **What is served.** Only attributed users under a configured rule
+  (`userLimits` by name, `defaultUserLimit` as `default`): anonymous spend and
+  spend under an unknown or removed rule name are never published. Entries are
+  sorted by sub and rule, carry today's UTC date, and are dropped from the wire
+  as soon as their day ends or their rule loses its cap, even before the next
+  run. The list is capped at 5000 entries, keeping the largest spenders, and cut
+  further so the whole `/policy` body stays under the worker's 1 MiB read limit.
+- **Never versioned.** The list is computed state merged in when `/policy` is
+  built, like the block list: no policy version holds it, so a rollback can
+  neither restore nor clear it.
+- **Publish log and bundles.** A change of the list appends one publish-log row
+  with reason `user_cost` and moves the ETag, so a signed bundle gets a new seq
+  and held long-polls wake. More spend by a user already on the list changes
+  nothing and writes nothing.
+- **Failures.** A rollup query error keeps the previous list and ETag, logs
+  `user_cost_recompute_failed` at ERROR and counts the error; the list is never
+  emptied because of a failure. Logs carry counts only, never a sub or email.
+- **Restart.** Every change of the list is also written to the state DB
+  (`warden-cp.db`, table `user_cost_blocks`; never the fleet analytics DB and
+  never a policy version). At startup the control plane serves that last good
+  list when it is for today (a row from an earlier day starts empty), then a live
+  recompute replaces it. So a restart with a failing rollup still serves the list
+  with 200, and every other policy change (deny entries, the block list,
+  settings) keeps reaching workers. A failed write logs `user_cost_persist_failed`
+  at ERROR, is counted and is retried on every later run until it succeeds; the
+  in-memory list is still served. A row that cannot be read logs
+  `user_cost_load_failed` and counts as unknown, not empty: the startup rebuild
+  decides, and only if it also fails is the policy held as without a state dir
+  (below). A backup restore keeps the row.
+- **No `--state-dir`.** Without a state DB there is no persisted list. The
+  control plane retries the rebuild a few times before its first load; while a
+  `dailyCostUSD` rule is served and no rebuild has succeeded since start, the
+  policy is held (no new `/policy` is served; it retries every 5 s), so workers
+  keep their cached list rather than receiving a policy that unblocks everyone.
+- **Truncation.** Over-cap users left out by the 5000 cap or the size cut are
+  counted in an in-memory gauge and logged once per list.
+- **Off by default.** With no `dailyCostUSD` rule nothing is queried and
+  `/policy` and its ETag are byte-identical to a build without this feature.
+
+### Rollout guard for cost caps
+
+A worker without the `usercost/v1` capability does not enforce cost caps (it
+fails open). A policy save that adds a rule with `dailyCostUSD`, or sets
+`dailyCostUSD` on a rule that had none, answers
+`409 {"error":"workers_lack_capability","capability":"usercost/v1","workers":[ids]}`
+while any connected worker (a heartbeat or poll in the last 45 s) lacks it. This
+covers the dashboard policy write, a rollback, and an approvals draft when it is
+applied. An admin can retry with `?force=true`; the admin audit row records
+`force`, `capability` and the worker ids (`workersLacking`). A rateLimit-only rule
+and a changed cap value need no check. `warden policy import` runs offline and
+cannot see connected workers: it refuses a file that adds a cap against the
+head unless `--force` is passed, and the `policy.import` audit row then records
+`force` and `capability`.
 
 ## What's deliberately not here (yet)
 

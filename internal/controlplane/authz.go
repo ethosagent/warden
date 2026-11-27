@@ -137,6 +137,7 @@ func authzTable() map[routeKey]authzRow {
 		{get, "/dashboard/api/secrets", readRow(viewer, "secrets.read", none)},
 		{get, "/dashboard/api/endpoints", readRow(viewer, "endpoints.read", scopeTrafficRead)},
 		{get, "/dashboard/api/analytics", readRow(viewer, "analytics.read", scopeTrafficRead)},
+		{get, "/dashboard/api/usage/users", readRow(viewer, "usage.users.read", scopeTrafficRead)},
 		{get, "/dashboard/api/mcp", readRow(viewer, "mcp.read", scopeTrafficRead)},
 		{get, "/dashboard/api/workers", readRow(viewer, "workers.read", scopeTrafficRead)},
 		{get, "/dashboard/api/query/schema", readRow(viewer, "query.schema", scopeTrafficRead)},

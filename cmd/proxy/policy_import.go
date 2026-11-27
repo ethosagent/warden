@@ -30,6 +30,7 @@ func newPolicyImportCmd() *cobra.Command {
 			message, _ := cmd.Flags().GetString("message")
 			keyFile, _ := cmd.Flags().GetString("admin-audit-key-file")
 			expected, _ := cmd.Flags().GetInt64("expected-head")
+			force, _ := cmd.Flags().GetBool("force")
 			ctx := cmd.Context()
 
 			doc, err := controlplane.ValidatePolicyDocFile(file)
@@ -50,6 +51,7 @@ func newPolicyImportCmd() *cobra.Command {
 				return err
 			}
 			defer func() { _ = st.Close() }()
+			st.ForceCostCaps = force
 			if rec == nil {
 				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "admin audit is not enabled in "+stateDir+"; no audit row appended")
 			}
@@ -74,6 +76,7 @@ func newPolicyImportCmd() *cobra.Command {
 	cmd.Flags().String("message", "", "version message (default \"import from <file>\")")
 	cmd.Flags().String("admin-audit-key-file", "", "admin audit signing key (default <state-dir>/cp-audit.key)")
 	cmd.Flags().Int64("expected-head", -1, "import only if the head is still this version (default: the current head)")
+	cmd.Flags().Bool("force", false, "import a file that adds a dailyCostUSD cap although this offline command cannot check that every worker advertises usercost/v1 (recorded in the audit row)")
 	_ = cmd.MarkFlagRequired("state-dir")
 	_ = cmd.MarkFlagRequired("file")
 	return cmd

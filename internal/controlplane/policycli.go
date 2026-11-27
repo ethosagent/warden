@@ -62,7 +62,20 @@ type OfflinePolicyStore struct {
 	st         *sqlitePolicyStore
 	stateDir   string
 	servedPath string
+	// ForceCostCaps is `warden policy import --force`: import a doc that adds
+	// a dailyCostUSD cap although the offline CLI cannot see whether the
+	// connected workers advertise usercost/v1 (W-P3-PUL-08). The policy.import
+	// audit row records it.
+	ForceCostCaps bool
 }
+
+// ErrCostCapNeedsForce refuses an offline import that adds a dailyCostUSD cap
+// (a rule with one, or one set on a rule that had none, against the head)
+// without ForceCostCaps: a worker without usercost/v1 fails open on cost caps,
+// and the CLI cannot see the fleet's capabilities.
+var ErrCostCapNeedsForce = errors.New("policy import: the file adds a dailyCostUSD cap; workers without " +
+	config.CapUserCostV1 + " do not enforce it and the offline import cannot see which workers are connected; " +
+	"check that every worker advertises it (the console fleet view) and re-run with --force")
 
 // OpenPolicyStore opens the versioned policy store in <stateDir>/warden-cp.db
 // for writing, with the control plane's full migration list. The store must
@@ -183,6 +196,10 @@ func (o *OfflinePolicyStore) Import(ctx context.Context, doc PolicyDoc, msg stri
 		}
 		expectedHead = head
 	}
+	forced, err := o.costCapCheck(ctx, doc)
+	if err != nil {
+		return PolicyImportResult{}, err
+	}
 	if msg == "" {
 		msg = "import from " + doc.path
 	}
@@ -214,7 +231,7 @@ func (o *OfflinePolicyStore) Import(ctx context.Context, doc PolicyDoc, msg stri
 	if rec == nil {
 		return res, nil
 	}
-	if err := o.recordImport(ctx, rec, expectedHead, version); err != nil {
+	if err := o.recordImport(ctx, rec, expectedHead, version, forced); err != nil {
 		return res, fmt.Errorf("version %d was created but its admin audit row was not appended: %w", version, err)
 	}
 	return res, nil
@@ -262,7 +279,7 @@ func fingerprintOrNone(fp string) string {
 // recordImport appends the policy.import admin audit row: before
 // v<parent>:<doc_sha256> (empty for an empty store), after
 // v<version>:<doc_sha256>.
-func (o *OfflinePolicyStore) recordImport(ctx context.Context, rec adminaudit.Recorder, parent, version int64) error {
+func (o *OfflinePolicyStore) recordImport(ctx context.Context, rec adminaudit.Recorder, parent, version int64, forced bool) error {
 	before := ""
 	if parent > 0 {
 		pv, err := o.st.Get(ctx, parent)
@@ -275,14 +292,44 @@ func (o *OfflinePolicyStore) recordImport(ctx context.Context, rec adminaudit.Re
 	if err != nil {
 		return err
 	}
-	_, err = rec.Record(ctx, adminaudit.Input{
+	in := adminaudit.Input{
 		Action:     actionPolicyImport,
 		Target:     auditTargetPolicy,
 		Outcome:    adminaudit.OutcomeOK,
 		BeforeHash: before,
 		AfterHash:  fmt.Sprintf("v%d:%s", nv.Version, nv.DocSHA256),
-	})
+	}
+	if forced {
+		in.Details = map[string]string{adminaudit.DetailForce: "true", adminaudit.DetailCapability: config.CapUserCostV1}
+	}
+	_, err = rec.Record(ctx, in)
 	return err
+}
+
+// costCapCheck applies the cost-cap rollout guard offline: a doc that adds a
+// dailyCostUSD cap against the head (an empty store has none) is refused with
+// ErrCostCapNeedsForce unless ForceCostCaps is set, and then reported as
+// forced for the audit row.
+func (o *OfflinePolicyStore) costCapCheck(ctx context.Context, doc PolicyDoc) (forced bool, err error) {
+	head, err := o.st.Head(ctx)
+	if err != nil {
+		return false, err
+	}
+	var prev map[string]float64
+	if head > 0 {
+		v, err := o.st.Get(ctx, head)
+		if err != nil {
+			return false, err
+		}
+		prev = wireCostCaps(v.Doc)
+	}
+	if !addsCostCap(prev, wireCostCaps(doc.wire)) {
+		return false, nil
+	}
+	if !o.ForceCostCaps {
+		return false, ErrCostCapNeedsForce
+	}
+	return true, nil
 }
 
 // PolicyExport is an exported version: the config YAML and what was left out.

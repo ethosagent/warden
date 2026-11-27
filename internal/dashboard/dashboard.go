@@ -115,6 +115,13 @@ type Server struct {
 	// auditCache memoizes the audit payload (compliance event scan + receipts
 	// tail read) so the dashboard's 5s auto-refresh collapses to one pass per TTL.
 	auditCache *respCache
+	// userUsageCache memoizes the per-user usage payload for 30s, keyed by
+	// window, sort and limit (W-P3-PUL-05).
+	userUsageCache *respCache
+	// usagePolicy and costBlockStatus feed the usage view: the served user
+	// limit rules and cost block list, and the cost block computation state.
+	usagePolicy     func() config.Policy
+	costBlockStatus func() CostBlockStatus
 	// secretStore lists managed secret KEY metadata (never values) for the
 	// secretstore endpoint; nil = no store (endpoint reports backend "none").
 	// secretBackend names the active backend (echo/aws/env) for display.
@@ -303,6 +310,10 @@ type WorkerView struct {
 	// and the worker does not advertise grouppolicy/v1: it denies those
 	// destinations (fail closed). Set by the control plane per snapshot.
 	NoGroupPolicy bool `json:"noGroupPolicy"`
+	// NoUserLimits is true when the served policy has per-user limits and the
+	// worker does not advertise userlimits/v1: it does not enforce them. Set by
+	// the control plane per snapshot (W-P3-PUL-05).
+	NoUserLimits bool `json:"noUserLimits"`
 	// NoIdentityChallenge is true when the served settings turn identity
 	// challenge mode on and the worker does not advertise identity/challenge-v1:
 	// it cannot apply the mode and keeps allowing callers it should challenge.
@@ -360,6 +371,7 @@ func NewServer(data DataSource, policy config.Policy, sec secrets.SecretProvider
 		analyticsCache: newRespCache(),
 		mcpCache:       newRespCache(),
 		auditCache:     newRespCache(),
+		userUsageCache: newRespCache(),
 	}
 }
 
@@ -713,6 +725,7 @@ func Routes() []Route {
 		{get, "/dashboard/api/secrets", "secrets.read"},
 		{get, "/dashboard/api/endpoints", "endpoints.read"},
 		{get, "/dashboard/api/analytics", "analytics.read"},
+		{get, "/dashboard/api/usage/users", "usage.users.read"},
 		{get, "/dashboard/api/mcp", "mcp.read"},
 		{get, "/dashboard/api/workers", "workers.read"},
 		{get, "/dashboard/api/query/schema", "query.schema"},
@@ -1054,7 +1067,9 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pol := config.Policy{Allowlist: req.Allowlist, Denylist: req.Denylist}
-	if err := s.policyWriter(r.Context(), pol, meta); err != nil {
+	// ?force=true reaches the writer, as for settings: the cost-cap rollout
+	// guard (W-P3-PUL-08) honours it for an admin once limits are editable here.
+	if err := s.policyWriter(withForce(r.Context(), r), pol, meta); err != nil {
 		writeWriterError(w, err)
 		return
 	}

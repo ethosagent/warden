@@ -500,6 +500,9 @@
     <div class="nav-item" data-page="activity">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
       Activity</div>
+    <div class="nav-item" data-page="usage">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.5 3-6 6.5-6s6.5 2.5 6.5 6"/><path d="M17 5v6M20 8h-6"/></svg>
+      Users usage</div>
 
     <div class="nav-group-label">Prevent &amp; Detect</div>
     <div class="nav-item" data-page="secrets">
@@ -831,6 +834,26 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
         </table>
       </div>
       </div><!-- /demo-only -->
+    </section>
+
+    <!-- ============ USERS USAGE (W-P3-PUL-05) ============ -->
+    <section class="page" id="page-usage">
+      <div class="page-head">
+        <div><h1>Users usage</h1><div class="desc">Requests, denies and estimated cost per verified user</div></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select class="btn sm" id="usageWindow" aria-label="Window" onchange="loadUsage()"><option value="24h">Last 24h</option><option value="7d" selected>Last 7 days</option><option value="30d">Last 30 days</option></select>
+          <select class="btn sm" id="usageSort" aria-label="Sort" onchange="loadUsage()"><option value="cost" selected>Sort by cost</option><option value="requests">Sort by requests</option></select>
+        </div>
+      </div>
+      <div id="usage-note" class="note" style="display:none; margin-bottom:12px; color:var(--amber)"></div>
+      <div class="card">
+        <table id="usageTable">
+          <thead><tr><th>User</th><th class="num">Requests</th><th>Denies</th><th class="num">Est. cost</th><th class="num">Today</th><th>Rule</th><th>Top agents</th><th></th></tr></thead>
+          <tbody id="usageBody"></tbody>
+        </table>
+      </div>
+      <div class="note" id="usageUnattr" style="margin-top:12px"></div>
+      <div class="note" style="margin-top:6px">Cost is an estimate from relayed bytes and built-in provider prices, not a bill. Days are UTC.</div>
     </section>
 
     <!-- ============ ACTIVITY ============ -->
@@ -1257,6 +1280,7 @@ NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt</code><button class="copy" onclick="copy
       </div>
 
       <div id="fleet-block-banner" class="note" style="display:none; margin-bottom:12px; color:var(--amber)"></div>
+      <div id="fleet-userlimits-banner" class="note" style="display:none; margin-bottom:12px; color:var(--amber)"></div>
       <div id="fleet-bundle-banner" class="note" style="display:none; margin-bottom:12px; color:var(--amber)"></div>
       <div class="card">
         <table id="fleetTable"><thead><tr>
@@ -1758,6 +1782,7 @@ function loadTab(page){
   switch(page){
     case 'overview':    loadOverview(); break;
     case 'activity':    loadActivity(); break;
+    case 'usage':       loadUsage(); break;
     case 'fleet':       loadFleet(); break;
     case 'explore':     loadExplore(); break;
     case 'settings':    loadSettings(); break;
@@ -2308,6 +2333,7 @@ function renderFleet(ws){
   });
   body.querySelectorAll('.fleet-revoke').forEach(b=>b.addEventListener('click',()=>revokeWorkerCerts(b.dataset.id)));
   showFleetBlockBanner(ws.filter(w=>w.online&&!hasBlockCap(w)).length);
+  showFleetUserLimitsBanner(ws.filter(w=>w.online&&w.noUserLimits).length);
 }
 /* Revoke a worker's certificates (W-P2-WCA-05): POST /dashboard/api/workers/{id}/revoke. The worker is refused
    at once and its held policy poll ends; it keeps its last-known-good policy and must re-enroll. */
@@ -2322,6 +2348,86 @@ async function revokeWorkerCerts(id){
   }
   loadFleet();
 }
+
+/* ---------- Users usage (W-P3-PUL-05): GET /dashboard/api/usage/users ----------
+   Sub, email, agent ids and rule names come from an IdP or an operator, so every cell is built with
+   textContent: no value is ever parsed as markup. */
+function usd(n){ return '$'+(Number(n)||0).toFixed(2); }
+function usageCell(tr, text, cls){
+  const td=document.createElement('td'); if(cls) td.className=cls; td.textContent=text; tr.appendChild(td); return td;
+}
+function usageDeniesText(d){
+  return Object.keys(d||{}).sort().map(k=>k+' '+fmtNum(d[k])).join(', ') || '—';
+}
+function usageAgentsText(a){
+  return (a||[]).map(x=>x.agentID+' ('+fmtNum(x.requests)+')').join(', ') || '—';
+}
+function usageNotes(d){
+  const notes=[], cb=d&&d.costBlocks;
+  if(cb){
+    if(!cb.enabled) notes.push('Fleet cost blocks are off (the memory analytics provider): a daily cost cap is enforced on the worker that saw the spend only.');
+    if(cb.truncated>0) notes.push(fmtNum(cb.truncated)+' over-cap users are not in the fleet block list.');
+    if(cb.recomputeErrors>0) notes.push('Fleet cost block recompute has failed '+fmtNum(cb.recomputeErrors)+' times since start; the last good list is served.');
+  }
+  return notes.join(' ');
+}
+function drillToUser(sub){
+  const inp=document.getElementById('actUser'); if(inp) inp.value=sub;
+  state.user=Array.from(String(sub||'').trim()).slice(0, USER_FILTER_MAX).join('');
+  go('activity');
+}
+function renderUsage(d){
+  const body=document.getElementById('usageBody'); if(!body) return;
+  while(body.firstChild) body.removeChild(body.firstChild);
+  const users=(d&&d.users)||[];
+  if(!users.length){
+    const tr=document.createElement('tr'), td=document.createElement('td');
+    td.colSpan=8; td.className='muted'; td.style.cssText='text-align:center;padding:18px';
+    td.textContent='No verified users in this window.';
+    tr.appendChild(td); body.appendChild(tr);
+  }
+  users.forEach(u=>{
+    const tr=document.createElement('tr');
+    const who=usageCell(tr, userCell(u.email, u.sub), 'mono'); if(u.email&&u.sub) who.title=u.sub;
+    usageCell(tr, fmtNum(u.requests), 'num');
+    usageCell(tr, usageDeniesText(u.denies));
+    usageCell(tr, usd(u.costUSD), 'num');
+    const today=usageCell(tr, u.capUSD>0 ? usd(u.todayCostUSD)+' / '+usd(u.capUSD) : usd(u.todayCostUSD), 'num');
+    if(u.atLimit||u.costBlocked){
+      const b=document.createElement('span'); b.className='pill p-high'; b.style.marginLeft='6px';
+      b.textContent=u.costBlocked?'blocked':'at limit';
+      b.title=u.costBlocked?'The fleet cost block list holds this user today.':'Today\'s estimated cost is at or over the rule cap.';
+      today.appendChild(b);
+    }
+    usageCell(tr, u.limitRule||'—', 'mono');
+    usageCell(tr, usageAgentsText(u.topAgents));
+    const act=document.createElement('td'); act.className='num';
+    const a=document.createElement('button'); a.className='btn sm'; a.textContent='Traffic';
+    a.title='Open the traffic view filtered to this user';
+    a.addEventListener('click',()=>drillToUser(u.sub));
+    act.appendChild(a); tr.appendChild(act);
+    body.appendChild(tr);
+  });
+  const un=document.getElementById('usageUnattr');
+  if(un){ const x=(d&&d.unattributed)||{}; un.textContent='Anonymous (no verified token): '+fmtNum(x.requests||0)+' requests, '+usd(x.costUSD)+' estimated.'; }
+  const note=document.getElementById('usage-note');
+  if(note){ const t=usageNotes(d); note.textContent=t; note.style.display=t?'':'none'; }
+}
+async function loadUsage(){
+  const w=document.getElementById('usageWindow'), so=document.getElementById('usageSort');
+  const q='window='+encodeURIComponent(w?w.value:'7d')+'&sort='+encodeURIComponent(so?so.value:'cost');
+  const note=document.getElementById('usage-note');
+  let r=null, d=null;
+  try{ r=await api('GET','/dashboard/api/usage/users?'+q); if(r.ok) d=await r.json(); }catch(e){ r=null; }
+  if(!d){
+    let code=r?('status '+r.status):'no response';
+    if(r){ try{ const j=await r.json(); if(j&&j.error) code=j.error; }catch(e){} }
+    renderUsage({users:[]});
+    if(note){ note.textContent='Usage is unavailable: '+code; note.style.display=''; }
+    return;
+  }
+  renderUsage(d);
+}
 /* A worker enforces the block list only when its heartbeat advertised blocklist/v1. */
 function hasBlockCap(w){ return Array.isArray(w.caps)&&w.caps.indexOf('blocklist/v1')>=0; }
 function blockBannerText(n){ return n+' connected worker'+(n===1?'':'s')+' do not enforce the block list'; }
@@ -2329,6 +2435,13 @@ function bundleBannerText(n){ return n+' connected worker'+(n===1?'':'s')+' do n
 function showFleetBundleBanner(n){
   const el=document.getElementById('fleet-bundle-banner'); if(!el) return;
   el.textContent=n>0?bundleBannerText(n):'';
+  el.style.display=n>0?'':'none';
+}
+/* noUserLimits is set by the control plane only while the served policy has user limits. */
+function userLimitsBannerText(n){ return n+' connected worker'+(n===1?'':'s')+' do not enforce user limits'; }
+function showFleetUserLimitsBanner(n){
+  const el=document.getElementById('fleet-userlimits-banner'); if(!el) return;
+  el.textContent=n>0?userLimitsBannerText(n):'';
   el.style.display=n>0?'':'none';
 }
 function showFleetBlockBanner(n){

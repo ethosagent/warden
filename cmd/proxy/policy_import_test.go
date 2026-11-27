@@ -680,3 +680,39 @@ func TestPolicyImportApprovals(t *testing.T) {
 		t.Errorf("audit rows = %+v", rows)
 	}
 }
+
+// TestPolicyImportCostCapNeedsForce: a file that adds a dailyCostUSD cap is
+// refused without --force (the offline CLI cannot see worker capabilities)
+// and imported with it.
+func TestPolicyImportCostCapNeedsForce(t *testing.T) {
+	config.LiftUserLimitsGuardForTesting(t)
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	startVersionedCP(t, stateDir, importBaseConfig)
+	file := writeTempConfig(t, `
+policy:
+  allowlist:
+    - domain: api.openai.com
+  userLimits:
+    - name: eng-llm
+      match: {groups: [eng]}
+      dailyCostUSD: 5
+logging:
+  level: error
+  format: json
+`)
+	if _, _, err := runPolicy(t, "import", "--state-dir", stateDir, "--file", file); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("unforced import = %v, want a refusal naming --force", err)
+	}
+	if _, head := readStore(t, stateDir); head != 1 {
+		t.Fatalf("head v%d after the refusal, want v1", head)
+	}
+	if stdout, stderr, err := runPolicy(t, "import", "--state-dir", stateDir, "--file", file, "--force"); err != nil {
+		t.Fatalf("forced import: %v\n%s\n%s", err, stdout, stderr)
+	}
+	if _, head := readStore(t, stateDir); head != 2 {
+		t.Fatalf("head v%d after the forced import, want v2", head)
+	}
+}

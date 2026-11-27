@@ -83,6 +83,10 @@ type policyServer struct {
 	lastWire  policyWire
 	lastETag  string
 	lastHead  int64
+	// onLoaded, when set (at wiring time, before the first Refresh), runs
+	// after every successful load with the wire just served. It must not
+	// call Refresh.
+	onLoaded func(policyWire)
 }
 
 // Publish-log values of an ETag change without a new version.
@@ -282,6 +286,9 @@ func (ps *policyServer) refresh(resign bool) {
 	ps.watch.set(wire, etag, fps)
 	ps.loaded, ps.lastWire, ps.lastETag, ps.lastHead = true, wire, etag, head
 	ps.publishBundle(ctx, wire, etag, head, resign)
+	if ps.onLoaded != nil {
+		ps.onLoaded(wire)
+	}
 }
 
 // recordPublish appends a publish-log row when the served ETag of head (0 =

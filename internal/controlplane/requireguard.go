@@ -102,23 +102,67 @@ func (s *Server) forceOrRefuse(ctx context.Context, capability string, lacking [
 	if !dashboard.ForceFrom(ctx) {
 		return &dashboard.WorkersLackCapabilityError{Workers: lacking, Capability: capability}
 	}
-	// Only an admin may force. console.auth none has no roles: its write guard
-	// is the bearer token, which is admin by definition.
-	if s.cfg.Console.Auth == config.ConsoleAuthOIDC {
-		var role config.Role
-		if p, ok := PrincipalFrom(ctx); ok {
-			role = principalRole(s.cfg.Console, p)
-		}
-		if role < config.RoleAdmin {
-			return &dashboard.RoleRequiredError{Need: config.RoleAdmin.String(), Fields: []string{"force"}}
-		}
+	if err := s.forceByAdmin(ctx); err != nil {
+		return err
 	}
+	annotateForced(ctx, capability, lacking, total)
+	s.cfg.Logger.Warn(logMsg, "workers", lacking)
+	return nil
+}
+
+// forceByAdmin refuses a force=true request whose principal is below admin
+// (403 role_required naming force). console.auth none has no roles: its write
+// guard is the bearer token, which is admin by definition.
+func (s *Server) forceByAdmin(ctx context.Context) error {
+	if s.cfg.Console.Auth != config.ConsoleAuthOIDC {
+		return nil
+	}
+	var role config.Role
+	if p, ok := PrincipalFrom(ctx); ok {
+		role = principalRole(s.cfg.Console, p)
+	}
+	if role < config.RoleAdmin {
+		return &dashboard.RoleRequiredError{Need: config.RoleAdmin.String(), Fields: []string{"force"}}
+	}
+	return nil
+}
+
+// annotateForced records a forced capability guard on the request's admin
+// audit row: force, the capability when named, and the lacking worker ids
+// with their uncapped count. A forced write can trip several guards, so a
+// second call accumulates instead of overwriting: capability becomes a comma
+// list, and workersLacking, its _count and its _sha256 become ";"-separated
+// groups in the same order, one per capability. A single guard writes exactly
+// the plain values it always did.
+func annotateForced(ctx context.Context, capability string, lacking []string, total int) {
+	prev := adminaudit.Details(ctx)
 	d := map[string]string{adminaudit.DetailForce: "true"}
 	putList(d, adminaudit.DetailWorkersLacking, lacking)
 	d[adminaudit.DetailWorkersLacking+adminaudit.DetailCountSuffix] = strconv.Itoa(total)
+	if prev[adminaudit.DetailForce] == "true" {
+		// The require guard names no capability; label it when it has company.
+		label := func(c string) string {
+			if c == "" {
+				return config.CapIdentityRequireV1
+			}
+			return c
+		}
+		d[adminaudit.DetailCapability] = label(prev[adminaudit.DetailCapability]) + "," + label(capability)
+		for _, k := range []string{
+			adminaudit.DetailWorkersLacking,
+			adminaudit.DetailWorkersLacking + adminaudit.DetailCountSuffix,
+			adminaudit.DetailWorkersLacking + adminaudit.DetailSha256Suffix,
+		} {
+			d[k] = prev[k] + ";" + d[k]
+		}
+		if len(d[adminaudit.DetailWorkersLacking]) > adminaudit.MaxDetailValueLen {
+			d[adminaudit.DetailWorkersLacking] = prev[adminaudit.DetailWorkersLacking]
+			d[adminaudit.DetailTruncated] = "true"
+		}
+	} else if capability != "" {
+		d[adminaudit.DetailCapability] = capability
+	}
 	adminaudit.Annotate(ctx, "", d)
-	s.cfg.Logger.Warn(logMsg, "workers", lacking)
-	return nil
 }
 
 // requireModeFor reports whether the identity mode in force for a worker

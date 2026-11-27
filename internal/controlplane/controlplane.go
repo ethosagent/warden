@@ -85,6 +85,10 @@ type Config struct {
 	Bundles BundlesConfig
 	// bundleKeys replaces Keys' KeySet as the publisher's key source (tests).
 	bundleKeys bundleKeys
+	// userCostStartupBackoff replaces the waits between the fleet cost
+	// aggregator's startup attempts without a state DB (tests); nil uses
+	// defaultUserCostStartupBackoff.
+	userCostStartupBackoff []time.Duration
 	// WorkerCA is the worker intermediate CA (workerCA.enabled). Nil with
 	// WorkerCAEnabled false is the disabled default; nil with WorkerCAEnabled
 	// true is the degraded state (the key backend was unreachable at start): the
@@ -300,6 +304,11 @@ type Server struct {
 	// blocks is the user block list store; nil without State (and then no
 	// blocked_users overlay is registered).
 	blocks *BlockStore
+	// userCost publishes fleet cost blocks (W-P3-PUL-08); nil with the memory
+	// analytics provider.
+	userCost *userCostAggregator
+	// userCostOffWarn makes the memory-provider warning one line per process.
+	userCostOffWarn sync.Once
 	// agents is the agent registry; nil without State or Config.AgentStore, in
 	// which case the agent routes answer 503 state_dir_required.
 	agents       agentreg.Store
@@ -473,6 +482,7 @@ func New(cfg Config) *Server {
 	s.initBlockStore()
 	s.initAgentStore()
 	s.registerAgentOverlay()
+	s.initUserCost() // last overlay: it sizes the list against the rest of the body
 	s.initApprovals()
 	s.gate = approvals.NewGate(s.cfg.Console.Approvals.Enabled, s.approvals)
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
@@ -539,6 +549,9 @@ func New(cfg Config) *Server {
 // policy file (editor edits refresh synchronously). It also starts the retention
 // prune loop when the store supports it. It returns when ctx is done.
 func (s *Server) Start(ctx context.Context) {
+	// Fleet cost blocks are rebuilt from the rollup before Start returns, so
+	// the first long-poll after a restart carries them (Run serves after).
+	s.startUserCost(ctx)
 	if s.approvals != nil {
 		go s.sweepApprovals(ctx)
 	}
@@ -707,9 +720,20 @@ func (s *Server) Handler() http.Handler {
 	// publishes), and (2) the event→Finding bridge publishes immediate block/reason
 	// Findings onto the CURRENT manager's bus (a reload may have swapped it). Both
 	// nil-safe; fail-open.
+	// The fleet cost aggregator (W-P3-PUL-08) schedules a debounced recompute
+	// from the same hook.
+	var onEvents []func(string, []analytics.Event)
 	if s.integrationsStore != nil {
+		onEvents = append(onEvents, s.pipeline.Observe)
+	}
+	if s.userCost != nil {
+		onEvents = append(onEvents, s.userCost.onEvents)
+	}
+	if len(onEvents) > 0 {
 		ingest.SetOnEvents(func(proxyID string, events []analytics.Event) {
-			s.pipeline.Observe(proxyID, events)
+			for _, fn := range onEvents {
+				fn(proxyID, events)
+			}
 		})
 	}
 	mux.Handle("/central/ingest", ingestAuthErrors(ingest))
@@ -819,11 +843,26 @@ func (s *Server) Handler() http.Handler {
 	// worker whose policy version differs from what the CP currently serves,
 	// and (versioned mode) the version its heartbeat ETag maps to.
 	var tracker WorkerTracker = s.registry
+	// The usage view reads the served limit rules and cost block list, and the
+	// cost block computation state (W-P3-PUL-05).
+	dash.SetUsagePolicy(func() config.Policy {
+		w, _, _, _ := s.policy.snapshot()
+		p := policyOfWire(w)
+		p.CostBlockedUsers = w.CostBlockedUsers
+		return p
+	})
+	dash.SetCostBlockStatus(func() dashboard.CostBlockStatus {
+		if s.userCost == nil {
+			return dashboard.CostBlockStatus{}
+		}
+		return dashboard.CostBlockStatus{Enabled: true, Truncated: s.userCost.Truncated(), RecomputeErrors: s.userCost.RecomputeErrors()}
+	})
 	dash.SetBundlesServed(func() bool { return s.policy.bundleHeadSeq() > 0 })
 	dash.SetWorkers(func() []dashboard.WorkerView {
 		cur := s.policy.currentETag()
 		views := tracker.Views()
 		FlagNoGroupPolicy(views, s.scopedEntries())
+		FlagNoUserLimits(views, s.userLimitsServed())
 		FlagNoIdentityChallenge(views, s.challengeServed())
 		FlagNoIdentityRequire(views, s.servedSettings())
 		for i := range views {
@@ -1107,17 +1146,16 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 		_ = yaml.Unmarshal(cur, &root)
 	}
 
-	// The per-user rate-limit rollout guard: an edit that carries limit keys
-	// replaces the file's (one without them keeps the file's, so it changes
-	// nothing).
-	if py := policyYAMLOfPolicy(p); py.hasUserLimits() {
-		cur := policyYAMLFromRoot(root)
-		live := policyWire{UserLimits: cur.UserLimits, DefaultUserLimit: cur.DefaultUserLimit, AnonymousLimit: cur.AnonymousLimit}
-		if err := s.userLimitsGuard(ctx, live, policyWireOfPolicy(p)); err != nil {
-			return err
-		}
-	}
+	prev := policyYAMLFromRoot(root)
 	if err := renderPolicyEdit(root, p); err != nil {
+		return err
+	}
+	next := policyYAMLFromRoot(root)
+	// An edit without limit keys keeps the file's, so renderPolicyEdit makes
+	// prev and next equal and no guard fires.
+	if err := s.rolloutGuards(ctx,
+		policyWire{UserLimits: prev.UserLimits, DefaultUserLimit: prev.DefaultUserLimit, AnonymousLimit: prev.AnonymousLimit},
+		policyWire{UserLimits: next.UserLimits, DefaultUserLimit: next.DefaultUserLimit, AnonymousLimit: next.AnonymousLimit}); err != nil {
 		return err
 	}
 
@@ -2041,6 +2079,13 @@ func policyOfWire(w policyWire) config.Policy {
 		Allowlist: w.Allowlist, Denylist: w.Denylist,
 		UserLimits: w.UserLimits, DefaultUserLimit: w.DefaultUserLimit, AnonymousLimit: w.AnonymousLimit,
 	}
+}
+
+// userLimitsServed reports whether the served policy carries any per-user
+// limit rule.
+func (s *Server) userLimitsServed() bool {
+	w, _, ok, _ := s.policy.snapshot()
+	return ok && (len(w.UserLimits) > 0 || w.DefaultUserLimit != nil || w.AnonymousLimit != nil)
 }
 
 // hasUserLimits reports whether py carries any of the three per-user limit keys.

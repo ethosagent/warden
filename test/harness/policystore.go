@@ -87,7 +87,7 @@ func (c *CPClient) SendBearer(bearer, method, path string, hdr http.Header, body
 		return CPResponse{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return CPResponse{}, err
 	}

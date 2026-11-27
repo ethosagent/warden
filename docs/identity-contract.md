@@ -628,7 +628,38 @@ Filter by user with `/dashboard/api/traffic?user=<sub or email>` (an exact
 without a Warden token never match). The control plane's fleet store keeps
 `user_act` and `identity_token_type` in the same-named columns; an older fleet
 database gains them, empty, the first time it is opened, and events from older
-workers store empty values.
+workers store empty values. It also keeps `agent_id` and `limit_rule`: the fleet
+traffic API returns them under the same `agent_id` and `limit_rule` keys as the
+worker, and an older fleet database gains `limit_rule`, empty, on first open.
+
+The control plane also keeps a per-user daily usage rollup in the fleet
+database (table `user_usage_daily`, sqlite provider). Each row is keyed by
+UTC day, `user_sub`, `agent_id` and `limit_rule`, and holds the email, request
+count, deny count per reason and summed estimated cost. Only events with a
+`user_sub`, or under the `anonymous` limit rule, are counted. The day is the
+worker's event time in UTC; a future-dated event counts toward the control
+plane's current UTC day. Rows are added in the same transaction as the event,
+and only when the event was newly stored, so a worker retrying a batch never
+counts twice. Duplicates are recognised by the event's sync id, which each
+worker derives from a random id kept in its local database. The control plane
+scopes it to the proxy id the worker authenticated as. A recreated local
+database, or two replicas sharing a proxy id, therefore never has its events
+dropped as duplicates. With per-worker credentials (an mTLS worker
+certificate or worker tokens), one worker also cannot suppress another's
+events. With the shared ingest bearer token, the proxy id is self-reported, so
+this holds only as far as workers are trusted not to claim another's id. A
+batch whose acknowledgement was lost while the control plane or a worker was
+upgraded to this version can be counted twice, once (an over-count, never an
+under-count).
+Identifier values are bounded: `sub` is cut to 255 bytes, email to 320 and
+`agent_id` to 128. Rule names use the agent-id charset: 1 to 64 bytes, a
+letter or digit first, then letters, digits, `.`, `_`, `:` or `-`. A
+`limit_rule` outside it is stored as `!invalid`, which never matches a
+configured rule. The rollup keeps 35 UTC days,
+whatever the events retention or `maxEvents`, so pruning events never changes
+usage totals. It holds no URL, header, body or secret reference. It starts
+empty when an older fleet database is upgraded: events stored before the
+upgrade are not counted.
 
 The worker counts every verification in the metric
 `warden.identity.verify.total{result,reason,token_type}`, exported to Prometheus
