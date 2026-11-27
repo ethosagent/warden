@@ -312,6 +312,12 @@ func cpRouteTable() map[routeKey]authzRow {
 		{get, portalLoginPath, handler("portal.login")},
 		{get, portalCallbackPath, handler("portal.callback")},
 		{get, portalHomePath, handler("portal.home")},
+		// Behind the portal session middleware (W-P3-CSIG-04): the portal
+		// cookie only, CSRF on writes. The subtree answers 404 to a signed-in
+		// request and sends a signed-out browser to /portal/login.
+		{get, portalMePath, handler("portal.me")},
+		{post, portalLogoutPath, handler("portal.logout")},
+		{get, portalSubtree, handler("portal.subtree")},
 	}
 	t := make(map[routeKey]authzRow, len(rows))
 	for _, r := range rows {
