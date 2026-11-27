@@ -131,6 +131,61 @@ func TestSinkNilAndEmptyAreNoOps(t *testing.T) {
 	live.Observe(events(1))
 }
 
+// TestSinkFlushWaitsForQueuedLines: Flush returns only once every line queued
+// before it reached the output, so a reader right after it never reads short
+// (the harness's decision-log oracle relies on this).
+func TestSinkFlushWaitsForQueuedLines(t *testing.T) {
+	bw := &blockWriter{release: make(chan struct{})}
+	s, err := New(config.JSONLogConfig{Output: config.JSONLogOutputStdout}, sinkMeta, nil, discardLogger(), WithWriter(bw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Observe(events(2))
+	s.Observe(events(1))
+	flushed := make(chan error, 1)
+	go func() { flushed <- s.Flush(context.Background()) }()
+	select {
+	case err := <-flushed:
+		t.Fatalf("Flush returned (%v) while the writer was still stalled", err)
+	default:
+	}
+	close(bw.release)
+	if err := <-flushed; err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got := len(decode(t, bw.buf.String())); got != 3 {
+		t.Fatalf("lines after Flush = %d, want 3", got)
+	}
+	closeSink(t, s)
+	if err := s.Flush(context.Background()); err != nil {
+		t.Errorf("Flush on a closed sink = %v, want nil", err)
+	}
+	var nilSink *Sink
+	if err := nilSink.Flush(context.Background()); err != nil {
+		t.Errorf("Flush on a nil sink = %v, want nil", err)
+	}
+}
+
+// TestSinkFlushIsBoundedByContext: a stuck writer with a full queue makes Flush
+// give up at its deadline instead of hanging the caller.
+func TestSinkFlushIsBoundedByContext(t *testing.T) {
+	bw := &blockWriter{release: make(chan struct{})}
+	s, err := New(config.JSONLogConfig{Output: config.JSONLogOutputStdout}, sinkMeta, nil, discardLogger(), WithWriter(bw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < queueBatches+2; i++ { // the writer holds one, the queue the rest
+		s.Observe(events(1))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := s.Flush(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Flush with a full queue and a stuck writer = %v, want deadline exceeded", err)
+	}
+	close(bw.release)
+	closeSink(t, s)
+}
+
 // errWriter always fails.
 type errWriter struct{}
 

@@ -398,12 +398,20 @@ func (s *Stack) decisionText(tb testing.TB, w *Worker) string {
 }
 
 // DecisionLines returns the warden.decision.v1 records every worker has written
-// to its decision log (StackOptions.DecisionLog), grouped by worker.
+// to its decision log (StackOptions.DecisionLog), grouped by worker. The line
+// is written two hops after the response: the async analytics writer tees the
+// event to the sink, whose own goroutine writes it. So it waits for the request
+// scopes (WaitIdle), then drains both hops through the worker's flush handle
+// (Overrides.OnAnalyticsWriter drains the sink too) before reading the file:
+// without the drain a read under load came back with no lines at all.
 func (s *Stack) DecisionLines(tb testing.TB) []auditlog.Record {
 	tb.Helper()
 	s.WaitIdle(tb)
 	var out []auditlog.Record
 	for _, w := range s.Workers {
+		if err := w.flushAnalytics(); err != nil {
+			tb.Fatalf("security: drain %s analytics and decision stream: %v", w.Name, err)
+		}
 		for _, line := range strings.Split(s.decisionText(tb, w), "\n") {
 			if !strings.Contains(line, `"warden.decision.v1"`) {
 				continue

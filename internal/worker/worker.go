@@ -724,12 +724,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// it. Built (and its close deferred) BEFORE the async writer so the deferred
 	// LIFO order closes the sink AFTER asyncStore.Close() has drained its final
 	// batch into the tee. A path that cannot be opened fails startup here.
+	var sink *auditlog.Sink
 	if pol.Audit.JSONLog.Enabled {
 		sinkOpts := []auditlog.Option{}
 		if jsonLogOnStdout {
 			sinkOpts = append(sinkOpts, auditlog.WithWriter(out))
 		}
-		sink, sErr := auditlog.New(pol.Audit.JSONLog, newAuditMeta(pol, agentID), metrics, logger, sinkOpts...)
+		var sErr error
+		sink, sErr = auditlog.New(pol.Audit.JSONLog, newAuditMeta(pol, agentID), metrics, logger, sinkOpts...)
 		if sErr != nil {
 			return sErr
 		}
@@ -755,9 +757,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	}
 	// Assembly-only harness seam (#363): hand the drain handle to whoever asked
 	// for it at assembly time. Production never sets OnAnalyticsWriter, so this
-	// is one nil check away from byte-identical behavior.
+	// is one nil check away from byte-identical behavior. With the decision
+	// stream on, the handle also drains the sink the writer tees into, so a
+	// reader of the decision log after Flush is as exact as a reader of the
+	// store.
 	if p.Overrides != nil && p.Overrides.OnAnalyticsWriter != nil {
-		p.Overrides.OnAnalyticsWriter(asyncStore)
+		p.Overrides.OnAnalyticsWriter(streamFlusher{analytics: asyncStore, sink: sink})
 	}
 
 	// Audit decorators wrap the analytics WRITE chain. Order matters and is load-

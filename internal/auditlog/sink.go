@@ -63,14 +63,20 @@ type Option func(*Sink)
 // It has no effect on the file output.
 func WithWriter(w io.Writer) Option { return func(s *Sink) { s.override = w } }
 
-// batch is one queue entry: a tee'd batch of decision records, or one admin
-// record (never both).
+// batch is one queue entry: a tee'd batch of decision records, one admin
+// record, or a Flush marker (exactly one of the three).
 type batch struct {
 	recs  []Record
 	admin *AdminRecord
+	// flushed is a Flush marker: the writer closes it once every entry queued
+	// before it has been handed to the output.
+	flushed chan struct{}
 }
 
 func (b batch) size() int {
+	if b.flushed != nil {
+		return 0
+	}
 	if b.admin != nil {
 		return 1
 	}
@@ -254,6 +260,50 @@ func (s *Sink) WriteAdmin(rec AdminRecord) {
 	}
 }
 
+// Flush blocks until every line queued before the call has been handed to the
+// output (the buffer flushed), so a reader of the file sees them. It is the
+// drain the test harness reads the stream through (via the worker's
+// assembly-only Overrides.OnAnalyticsWriter handle); production never calls
+// it. Unlike Observe it waits for room in a full queue rather than dropping,
+// bounded by ctx. A closed sink returns nil at once (Close drains). A line that
+// failed to marshal or write is not retried: Flush reports the queue drained,
+// and the write-error metric reports the loss.
+func (s *Sink) Flush(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	flushed := make(chan struct{})
+	if err := s.enqueueFlush(ctx, flushed); err != nil {
+		return err
+	}
+	select {
+	case <-flushed:
+		return nil
+	case <-s.done:
+		return nil // the writer exited (Close): its final flush ran
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// enqueueFlush hands the marker to the writer under the same lock Observe
+// holds, so Close cannot close the channel under the send. A closed sink sends
+// nothing, closes the marker (so Flush returns at once) and returns nil.
+func (s *Sink) enqueueFlush(ctx context.Context, flushed chan struct{}) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		close(flushed)
+		return nil
+	}
+	select {
+	case s.ch <- batch{flushed: flushed}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // Close stops accepting batches, drains the queue until ctx ends, flushes and
 // closes the file. If ctx ends first the remaining queued batches are abandoned
 // (they are best effort; the SQLite store is the record) and ctx.Err() is
@@ -290,6 +340,13 @@ func (s *Sink) run() {
 		}
 	}()
 	for b := range s.ch {
+		if b.flushed != nil {
+			// Every earlier entry was flushed at the end of its own
+			// iteration; this flush has nothing to push unless that failed.
+			s.flush()
+			close(b.flushed)
+			continue
+		}
 		select {
 		case <-s.abort:
 			s.metrics.RecordAuditLogDropped(b.size())
