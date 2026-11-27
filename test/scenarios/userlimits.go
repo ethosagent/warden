@@ -374,3 +374,16 @@ func assertWithinMidnightBudget(t *testing.T, h *harness.H, start time.Time) {
 		t.Fatalf("scenario advanced the fake clock %s (>= midnight guard %s): raise the guard or trim the steps", used, midnightGuard)
 	}
 }
+
+// nearMidnightStart starts the fake clock at the next 23:45 UTC at or after
+// the real time, which is inside midnightGuard of the next UTC midnight.
+func nearMidnightStart() harness.Option {
+	return harness.WithFakeClockStart(func(now time.Time) time.Time {
+		n := now.UTC()
+		at := time.Date(n.Year(), n.Month(), n.Day(), 23, 45, 0, 0, time.UTC)
+		if at.Before(n) {
+			return n // already past 23:45: inside the guard as it is
+		}
+		return at
+	})
+}

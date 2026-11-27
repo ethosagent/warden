@@ -224,6 +224,9 @@ type H struct {
 	// wantFleetCostBlocks (WithFleetCostBlocks) boots the CP with the sqlite fleet
 	// store and the fake clock so the fleet cost aggregator runs.
 	wantFleetCostBlocks bool
+	// clockStart (WithFakeClockStart) maps the real boot time to the fake
+	// clock's start; nil starts it at the real time.
+	clockStart func(time.Time) time.Time
 	// workerAgentID (WithWorkerAgent) is the --agent-id every worker boots with.
 	workerAgentID string
 	// wantBackup (WithBackup) boots the control plane with --backup-dir.
@@ -737,7 +740,11 @@ func (h *H) boot() {
 	h.proxyCACertDst, h.proxyCAKeyDst = h.proxyCA.write(h.tb, h.root, "proxy-ca")
 	h.upstreamCA = newCA(h.tb, "warden-harness-upstream-ca")
 
-	h.fake = clocktest.NewFake(time.Now())
+	start := time.Now()
+	if h.clockStart != nil {
+		start = h.clockStart(start)
+	}
+	h.fake = clocktest.NewFake(start)
 	if h.wantIssuer {
 		h.issuer = fakes.NewOIDCIssuer(h.tb, fakes.WithIssuerClock(h.fake.Now))
 		if h.wantIssuerDown {

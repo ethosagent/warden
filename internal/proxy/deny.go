@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"log/slog"
-	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/denyreason"
@@ -44,7 +43,7 @@ type denyExtra struct {
 // gatewayDenyReason. The caller writes the client response.
 func (p *Proxy) emitDeny(s *requestScope, reason denyreason.Reason, extra ...denyExtra) {
 	ev := analytics.Event{
-		Timestamp: time.Now(),
+		Timestamp: p.eventNow(),
 		Domain:    s.domain,
 		Port:      s.port,
 		Protocol:  s.proto,

@@ -1420,7 +1420,7 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 		costUSD, provider := p.estimateCost(s)
 		p.chargeUserCost(s, costUSD)
 		p.recordEvent(s.resolved(), analytics.Event{
-			Timestamp:      time.Now(),
+			Timestamp:      p.eventNow(),
 			Domain:         s.domain,
 			Port:           s.port,
 			Protocol:       "mcp",
@@ -1623,7 +1623,7 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 	costUSD, provider := p.estimateCost(s)
 	p.chargeUserCost(s, costUSD)
 	p.recordEvent(s.resolved(), analytics.Event{
-		Timestamp:      time.Now(),
+		Timestamp:      p.eventNow(),
 		Domain:         s.domain,
 		Port:           s.port,
 		Protocol:       proto,

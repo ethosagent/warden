@@ -277,3 +277,26 @@ func TestUserUsageDaily_RuleNameCharset(t *testing.T) {
 		})
 	}
 }
+
+// FleetConfig.Now drives the rollup's day clamp: with the store clock on a
+// later day than the real one, an event stamped on that day books to it
+// instead of being clamped back to the real today.
+func TestNewFleetStore_NowDrivesDayClamp(t *testing.T) {
+	fake := time.Now().UTC().AddDate(0, 0, 1) // tomorrow: after the real today
+	for _, provider := range []string{"memory", "sqlite"} {
+		t.Run(provider, func(t *testing.T) {
+			fs, err := NewFleetStore(FleetConfig{Provider: provider, SQLitePath: t.TempDir() + "/f.db", Now: func() time.Time { return fake }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = fs.Close() }()
+			if err := fs.StoreAggregatedEvent(AggregatedEvent{Event: usageEvent("n", "alice", "a", "r", fake, 1)}); err != nil {
+				t.Fatal(err)
+			}
+			got, err := fs.(UserUsageQuerier).TodayCostByRule(context.Background(), UsageDay(fake))
+			if err != nil || len(got) != 1 || got[0].CostUSD != 1 {
+				t.Fatalf("fake-day rows: %+v %v", got, err)
+			}
+		})
+	}
+}

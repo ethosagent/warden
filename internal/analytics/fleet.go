@@ -61,6 +61,9 @@ type FleetConfig struct {
 	RetentionDays int
 	// MaxEvents is a hard row cap (0 = a sane default, reuses defaultMaxEvents).
 	MaxEvents int
+	// Now is the store's clock (the usage rollup's day clamp and prune); nil
+	// means time.Now. The control plane passes its injected clock.
+	Now func() time.Time
 }
 
 // NewFleetStore builds the store selected by cfg.Provider. "memory" returns an
@@ -69,9 +72,20 @@ type FleetConfig struct {
 func NewFleetStore(cfg FleetConfig) (FleetStore, error) {
 	switch cfg.Provider {
 	case "memory":
-		return NewCentralStore(cfg.MaxEvents), nil
+		c := NewCentralStore(cfg.MaxEvents)
+		if cfg.Now != nil {
+			c.now = cfg.Now
+		}
+		return c, nil
 	case "", "sqlite":
-		return NewFleetSQLiteStore(cfg.SQLitePath, cfg.RetentionDays, cfg.MaxEvents)
+		st, err := NewFleetSQLiteStore(cfg.SQLitePath, cfg.RetentionDays, cfg.MaxEvents)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.Now != nil {
+			st.now = cfg.Now
+		}
+		return st, nil
 	case "postgres":
 		return nil, fmt.Errorf("analytics: provider %q not yet implemented", cfg.Provider)
 	default:

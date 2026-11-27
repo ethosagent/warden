@@ -206,6 +206,10 @@ var All = slices.Concat(
 		// CP-published costBlockedUsers on the second worker, the usage totals
 		// and no judge calls for limit denials.
 		{Name: "user_limits_e2e", Opts: userLimitsOpts(), Run: userLimitsE2E},
+		// The same two scenarios with the fake clock starting at 23:45 UTC, so
+		// the midnight guard's jump and the one-clock UTC day run every CI pass.
+		{Name: "user_cost_cap_near_midnight", Opts: append(userCostCapOpts(), nearMidnightStart()), Run: userCostCap},
+		{Name: "user_limits_e2e_near_midnight", Opts: append(userLimitsOpts(), nearMidnightStart()), Run: userLimitsE2E},
 		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
 		// gateway through RequestMeta without changing any verdict.
 		{Name: "mcp_subject_seam_unchanged", Opts: mcpSubjectOpts(), Run: mcpSubjectSeamUnchanged},

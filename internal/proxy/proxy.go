@@ -181,6 +181,11 @@ type Config struct {
 	// roots, byte-identical to before.
 	UpstreamRootCAs *x509.CertPool
 
+	// Now, when set, is the time source for event timestamps (allow, deny and
+	// cut events) so they agree with the injected ledger clock on the UTC day.
+	// nil means time.Now. Assembly-only, like IdentityClock.
+	Now func() time.Time
+
 	// IdentityClock, when set, is the time source for identity validity decisions:
 	// the token exp+skew recheck on each request, and the raw-tunnel lifetime
 	// decided at CONNECT (exp minus now). The cut of an open scoped attribute-mode
@@ -390,6 +395,8 @@ type Proxy struct {
 	now func() time.Time
 	// idNow is the validity clock (Config.IdentityClock); nil falls back to clock().
 	idNow func() time.Time
+	// evNow stamps analytics events (Config.Now); nil falls back to time.Now.
+	evNow func() time.Time
 	// idTimer is the expiry loop's timer source (Config.IdentityTimer).
 	idTimer func(d time.Duration) IdentityTimer
 	leafTTL time.Duration
@@ -735,6 +742,7 @@ func New(cfg Config) (*Proxy, error) {
 	}
 
 	p.idNow = cfg.IdentityClock
+	p.evNow = cfg.Now
 	p.idTimer = cfg.IdentityTimer
 
 	// Upstream dialing. An injected Dialer (assembly-only harness seam) replaces

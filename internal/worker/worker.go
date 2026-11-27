@@ -949,6 +949,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		cfg.Inflight = p.Overrides.Inflight
 		if p.Overrides.Clock != nil {
 			cfg.IdentityClock = p.Overrides.Clock.Now
+			cfg.Now = p.Overrides.Clock.Now
 			idClk := p.Overrides.Clock
 			cfg.IdentityTimer = func(d time.Duration) proxy.IdentityTimer { return idClk.NewTimer(d) }
 		}

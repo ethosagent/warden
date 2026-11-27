@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -84,4 +85,12 @@ func (h *H) AgentAt(i int) *http.Client {
 	h.tokenClients = append(h.tokenClients, cl)
 	h.mu.Unlock()
 	return cl
+}
+
+// WithFakeClockStart starts the fake clock at f(real now) instead of the real
+// now, so a scenario can run from a chosen wall-clock time (for example just
+// before a UTC midnight) on every CI pass. Prefer a start at or after the real
+// time: the workers' certificates and tokens are checked against the fake clock.
+func WithFakeClockStart(f func(time.Time) time.Time) Option {
+	return func(h *H) { h.clockStart = f }
 }
