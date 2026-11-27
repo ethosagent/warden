@@ -13,6 +13,12 @@ import (
 // events table, so the worker dashboard's Users usage view needs no rollup.
 // Events carry no retention horizon other than the events cap, so the answer
 // covers whatever the store still holds in the window.
+//
+// The usage query is a bounded full scan of the window's events: the
+// (user_sub, ts) index cannot serve the "user_sub != '' OR anonymous rule"
+// predicate, and a standalone worker's events table is capped by maxEvents.
+// The handler caches the answer for 30s, so the scan runs at most once per
+// window per half minute.
 
 var _ UserUsageQuerier = (*SQLiteStore)(nil)
 
@@ -21,8 +27,8 @@ const (
 	// the anonymous rule) by UTC day, user, agent, rule and deny reason. A
 	// deny with identity_groups_truncated names the rule that was SKIPPED,
 	// not one that was charged, so its rule is blanked; negative costs add
-	// nothing, like the rollup. Parameters: from ts, to ts (exclusive),
-	// identity_groups_truncated twice, anonymous rule.
+	// nothing, like the rollup. Parameters: identity_groups_truncated, from
+	// ts, to ts (exclusive), anonymous rule.
 	localUsageSQL = `SELECT strftime('%Y-%m-%d', ts / 1000000000, 'unixepoch') AS day,
         user_sub, agent_id,
         CASE WHEN decision = 'deny' AND reason = ? THEN '' ELSE limit_rule END AS rule,

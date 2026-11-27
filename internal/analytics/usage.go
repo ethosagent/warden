@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ethosagent/warden/internal/agentid"
+	"github.com/ethosagent/warden/internal/denyreason"
 )
 
 // The per-user daily usage rollup (W-P3-PUL-07). Each row is keyed by
@@ -160,12 +161,18 @@ func usageDeltaFor(e Event, now time.Time) (usageDelta, bool) {
 	if day < usageCutoffDay(now) {
 		return usageDelta{}, false
 	}
+	rule := usageRule(e.LimitRule)
+	// A deny with identity_groups_truncated names the rule that was SKIPPED,
+	// not one that was charged, so it is rolled up under no rule.
+	if e.Decision == "deny" && e.Reason == string(denyreason.IdentityGroupsTruncated) {
+		rule = ""
+	}
 	d := usageDelta{
 		key: usageKey{
 			day:   day,
 			sub:   truncateUTF8(e.UserSub, maxUsageSubLen),
 			agent: truncateUTF8(e.AgentID, maxUsageAgentLen),
-			rule:  usageRule(e.LimitRule),
+			rule:  rule,
 		},
 		email: truncateUTF8(e.UserEmail, maxUsageEmailLen),
 		cost:  e.CostUSD,
