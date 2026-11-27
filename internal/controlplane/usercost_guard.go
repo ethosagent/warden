@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/ethosagent/warden/internal/config"
-	"github.com/ethosagent/warden/internal/dashboard"
 )
 
 // The rollout guard of per-user cost caps (W-P3-PUL-08, the W-P2-WBND-07
@@ -62,13 +61,22 @@ func (s *Server) costCapGuard(ctx context.Context, prev, next map[string]float64
 	if len(lacking) == 0 {
 		return nil
 	}
-	if !dashboard.ForceFrom(ctx) {
-		return &dashboard.WorkersLackCapabilityError{Workers: lacking, Capability: config.CapUserCostV1}
+	return s.forceOrRefuse(ctx, config.CapUserCostV1, lacking, total, "cost_cap_forced")
+}
+
+// rolloutGuards runs every capability rollout guard of a policy write in one
+// fixed order (identity require mode, userlimits/v1, usercost/v1), so every
+// writer names the same first 409. live and next are the docs before and after;
+// a nil next.Settings skips the require guard (a writer that does not carry
+// settings).
+func (s *Server) rolloutGuards(ctx context.Context, live, next policyWire) error {
+	if next.Settings != nil {
+		if err := s.requireGuard(ctx, live.Settings, *next.Settings); err != nil {
+			return err
+		}
 	}
-	if err := s.forceByAdmin(ctx); err != nil {
+	if err := s.userLimitsGuard(ctx, live, next); err != nil {
 		return err
 	}
-	annotateForced(ctx, config.CapUserCostV1, lacking, total)
-	s.cfg.Logger.Warn("cost_cap_forced", "workers", lacking)
-	return nil
+	return s.costCapGuard(ctx, wireCostCaps(live), wireCostCaps(next))
 }

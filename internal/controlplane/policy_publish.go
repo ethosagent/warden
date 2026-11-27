@@ -162,19 +162,45 @@ func (s *Server) publish(ctx context.Context, clr approvals.Clearance, author Po
 		return 0, false, fmt.Errorf("controlplane: read policy head: %w", err)
 	}
 	headKey := credentialOf(doc)
-	headCaps := wireCostCaps(doc)
+	live := policyWire{
+		UserLimits:       cloneUserLimits(doc.UserLimits),
+		DefaultUserLimit: cloneUserLimit(doc.DefaultUserLimit),
+		AnonymousLimit:   cloneUserLimit(doc.AnonymousLimit),
+		Settings:         doc.Settings.DeepCopy(),
+	}
 	if err := mutate(&doc); err != nil {
 		return 0, false, err
 	}
 	if err := s.validateDoc(doc); err != nil {
 		return 0, false, &dashboard.InvalidPolicyError{Err: err}
 	}
-	// Workers may have changed since a draft was held: the cost-cap rollout
-	// guard runs again on the doc being published.
-	if err := s.costCapGuard(ctx, headCaps, wireCostCaps(doc)); err != nil {
+	// Workers may have changed since a draft was held: the rollout guards run
+	// again on the doc being published.
+	if err := s.rolloutGuards(ctx, live, doc); err != nil {
 		return 0, false, err
 	}
 	return s.publishLocked(ctx, clr, author, head, headKey, doc, meta, source)
+}
+
+// cloneUserLimits and cloneUserLimit deep-copy the rules a guard compares
+// against, so a mutate that edits them in place cannot change the baseline.
+func cloneUserLimits(in []config.UserLimit) []config.UserLimit {
+	if in == nil {
+		return nil
+	}
+	out := make([]config.UserLimit, len(in))
+	for i, l := range in {
+		out[i] = l.DeepCopy()
+	}
+	return out
+}
+
+func cloneUserLimit(l *config.UserLimit) *config.UserLimit {
+	if l == nil {
+		return nil
+	}
+	c := l.DeepCopy()
+	return &c
 }
 
 // publishLocked stores doc, already mutated and validated against head, as a
@@ -256,30 +282,17 @@ func (s *Server) writeVersioned(ctx context.Context, w versionedWrite) (int64, b
 	headKey := credentialOf(doc)
 	baseDoc := draftDoc(RedactCredentials(doc))
 	headSettings := doc.Settings.DeepCopy()
-	headCaps := wireCostCaps(doc)
 	if err := w.mutate(&doc); err != nil {
 		return 0, false, err
 	}
 	if err := s.validateDoc(doc); err != nil {
 		return 0, false, &dashboard.InvalidPolicyError{Err: err}
 	}
-	// The require-mode rollout guard covers every versioned writer (settings,
-	// rollback): the new doc's effective modes against head's.
-	var newSettings config.SettingsWire
-	if doc.Settings != nil {
-		newSettings = *doc.Settings
-	}
-	if err := s.requireGuard(ctx, headSettings, newSettings); err != nil {
-		return 0, false, err
-	}
-	// The cost-cap rollout guard: a new dailyCostUSD needs usercost/v1 on
-	// every connected worker.
-	if err := s.costCapGuard(ctx, headCaps, wireCostCaps(doc)); err != nil {
-		return 0, false, err
-	}
-	// The per-user rate-limit rollout guard covers the same writers (policy
-	// save, settings, rollback): the new doc's rules against head's.
-	if err := s.userLimitsGuard(ctx, docWire(baseDoc), doc); err != nil {
+	// The rollout guards cover every versioned writer (policy save, settings,
+	// rollback): the new doc against head's, in one fixed order.
+	live := docWire(baseDoc)
+	live.Settings = headSettings
+	if err := s.rolloutGuards(ctx, live, doc); err != nil {
 		return 0, false, err
 	}
 	if doc.Settings != nil {

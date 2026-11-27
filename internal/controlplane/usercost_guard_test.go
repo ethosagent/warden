@@ -260,3 +260,46 @@ func TestCostCapCapabilityGate_OfflineImport(t *testing.T) {
 		t.Fatalf("import keeping the existing cap = %v, rows %+v; want success without force", err, rec.rows)
 	}
 }
+
+// A forced write that trips both the userlimits/v1 and the usercost/v1 guard
+// names the first in a fixed order (userlimits/v1) on the 409, and its audit row
+// records both capabilities and both lacking lists instead of the last one.
+func TestRolloutGuards_BothForced(t *testing.T) {
+	config.LiftUserLimitsGuardForTesting(t)
+	e := newHistoryEnv(t, historyEnvOpts{oidc: true, audit: true})
+	admin := sessionAs(t, e, "ad1", groupAdmin)
+	createRules(t, e.srv, engLLM(5))                     // v2: a rate limit and a cost cap
+	createRules(t, e.srv)                                // v3: no rules
+	beat(e.srv, "w1", "agent-a", config.CapUserCostV1)   // lacks userlimits/v1
+	beat(e.srv, "w2", "agent-b", config.CapUserLimitsV1) // lacks usercost/v1
+
+	rec := e.send(admin, http.MethodPost, rollbackPath(2), "", ifMatch(3))
+	var body struct {
+		Capability string   `json:"capability"`
+		Workers    []string `json:"workers"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if rec.Code != http.StatusConflict || body.Capability != config.CapUserLimitsV1 || !slices.Equal(body.Workers, []string{"w1"}) {
+		t.Fatalf("unforced = %d %s, want 409 naming userlimits/v1 [w1] first", rec.Code, rec.Body.String())
+	}
+	before := len(e.rec.inputs())
+	if rec := e.send(admin, http.MethodPost, rollbackPath(2)+"?force=true", "", ifMatch(3)); rec.Code != http.StatusOK {
+		t.Fatalf("forced = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	var forced *adminaudit.Input
+	for _, in := range e.rec.inputs()[before:] {
+		if in.Details[adminaudit.DetailForce] == "true" {
+			in := in
+			forced = &in
+		}
+	}
+	if forced == nil {
+		t.Fatal("no forced audit row")
+	}
+	d := forced.Details
+	if d[adminaudit.DetailCapability] != config.CapUserLimitsV1+","+config.CapUserCostV1 ||
+		d[adminaudit.DetailWorkersLacking] != "w1;w2" ||
+		d[adminaudit.DetailWorkersLacking+adminaudit.DetailCountSuffix] != "1;1" {
+		t.Fatalf("forced audit details = %v, want both capabilities and both lacking lists", d)
+	}
+}

@@ -1147,23 +1147,15 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 	}
 
 	prev := policyYAMLFromRoot(root)
-	// The per-user rate-limit rollout guard: an edit that carries limit keys
-	// replaces the file's (one without them keeps the file's, so it changes
-	// nothing).
-	if py := policyYAMLOfPolicy(p); py.hasUserLimits() {
-		cur := policyYAMLFromRoot(root)
-		live := policyWire{UserLimits: cur.UserLimits, DefaultUserLimit: cur.DefaultUserLimit, AnonymousLimit: cur.AnonymousLimit}
-		if err := s.userLimitsGuard(ctx, live, policyWireOfPolicy(p)); err != nil {
-			return err
-		}
-	}
 	if err := renderPolicyEdit(root, p); err != nil {
 		return err
 	}
 	next := policyYAMLFromRoot(root)
-	if err := s.costCapGuard(ctx,
-		userLimitCaps(prev.UserLimits, prev.DefaultUserLimit, prev.AnonymousLimit),
-		userLimitCaps(next.UserLimits, next.DefaultUserLimit, next.AnonymousLimit)); err != nil {
+	// An edit without limit keys keeps the file's, so renderPolicyEdit makes
+	// prev and next equal and no guard fires.
+	if err := s.rolloutGuards(ctx,
+		policyWire{UserLimits: prev.UserLimits, DefaultUserLimit: prev.DefaultUserLimit, AnonymousLimit: prev.AnonymousLimit},
+		policyWire{UserLimits: next.UserLimits, DefaultUserLimit: next.DefaultUserLimit, AnonymousLimit: next.AnonymousLimit}); err != nil {
 		return err
 	}
 

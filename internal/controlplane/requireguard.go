@@ -129,14 +129,39 @@ func (s *Server) forceByAdmin(ctx context.Context) error {
 
 // annotateForced records a forced capability guard on the request's admin
 // audit row: force, the capability when named, and the lacking worker ids
-// with their uncapped count.
+// with their uncapped count. A forced write can trip several guards, so a
+// second call accumulates instead of overwriting: capability becomes a comma
+// list, and workersLacking, its _count and its _sha256 become ";"-separated
+// groups in the same order, one per capability. A single guard writes exactly
+// the plain values it always did.
 func annotateForced(ctx context.Context, capability string, lacking []string, total int) {
+	prev := adminaudit.Details(ctx)
 	d := map[string]string{adminaudit.DetailForce: "true"}
-	if capability != "" {
-		d[adminaudit.DetailCapability] = capability
-	}
 	putList(d, adminaudit.DetailWorkersLacking, lacking)
 	d[adminaudit.DetailWorkersLacking+adminaudit.DetailCountSuffix] = strconv.Itoa(total)
+	if prev[adminaudit.DetailForce] == "true" {
+		// The require guard names no capability; label it when it has company.
+		label := func(c string) string {
+			if c == "" {
+				return config.CapIdentityRequireV1
+			}
+			return c
+		}
+		d[adminaudit.DetailCapability] = label(prev[adminaudit.DetailCapability]) + "," + label(capability)
+		for _, k := range []string{
+			adminaudit.DetailWorkersLacking,
+			adminaudit.DetailWorkersLacking + adminaudit.DetailCountSuffix,
+			adminaudit.DetailWorkersLacking + adminaudit.DetailSha256Suffix,
+		} {
+			d[k] = prev[k] + ";" + d[k]
+		}
+		if len(d[adminaudit.DetailWorkersLacking]) > adminaudit.MaxDetailValueLen {
+			d[adminaudit.DetailWorkersLacking] = prev[adminaudit.DetailWorkersLacking]
+			d[adminaudit.DetailTruncated] = "true"
+		}
+	} else if capability != "" {
+		d[adminaudit.DetailCapability] = capability
+	}
 	adminaudit.Annotate(ctx, "", d)
 }
 

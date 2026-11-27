@@ -163,6 +163,19 @@ func (a *Annotation) Snapshot() (string, map[string]string) {
 	return a.targetRef, copyDetails(a.details)
 }
 
+// Details returns a copy of the details attached to the request's annotation so
+// far, nil when the request is not audited. A handler that adds to a detail an
+// earlier step already set (two guards recording one forced write) reads it
+// here and merges.
+func Details(ctx context.Context) map[string]string {
+	a, ok := ctx.Value(annotationKey{}).(*Annotation)
+	if !ok || a == nil {
+		return nil
+	}
+	_, d := a.Snapshot()
+	return d
+}
+
 // NoChange tells the middleware the request changed nothing worth recording, so it
 // writes no row for it (a repeated, idempotent revoke). It is a no-op when the
 // request is not audited. A refusal or a failure must not call it: only a
