@@ -57,7 +57,10 @@ type Options struct {
 	// Resolver reads clientSecretKey secrets; nil means none can be read yet and
 	// they report ErrProviderUnavailable until a resolver exists.
 	Resolver SecretResolver
-	Logger   *slog.Logger
+	// Now is the clock for the secret-read failure cache (injected: domain code
+	// does not read the wall clock). Nil disables the cache.
+	Now    func() time.Time
+	Logger *slog.Logger
 }
 
 // Provider is one configured OAuth provider with its endpoint defaults applied.
@@ -93,6 +96,7 @@ type Provider struct {
 	failErr error // last read failure, served for secretFailCache
 	failAt  time.Time
 	failTTL time.Duration
+	now     func() time.Time
 }
 
 // RevokeEndpoint returns RevokeURL with {client_id} replaced by the
@@ -124,7 +128,7 @@ func (p *Provider) ClientSecret(ctx context.Context) (Secret, error) {
 		p.mu.Unlock()
 		return Secret{}, fmt.Errorf("%w: provider %s", ErrProviderUnavailable, p.ID)
 	}
-	if p.failErr != nil && time.Since(p.failAt) < p.failTTL {
+	if p.failErr != nil && p.now != nil && p.now().Sub(p.failAt) < p.failTTL {
 		err := p.failErr
 		p.mu.Unlock()
 		return Secret{}, err
@@ -144,7 +148,9 @@ func (p *Provider) ClientSecret(ctx context.Context) (Secret, error) {
 	defer p.mu.Unlock()
 	if err != nil {
 		p.failErr = fmt.Errorf("%w: provider %s: %w", ErrProviderUnavailable, p.ID, err)
-		p.failAt = time.Now()
+		if p.now != nil {
+			p.failAt = p.now()
+		}
 		return Secret{}, p.failErr
 	}
 	p.secret = NewSecret(v.(string))
@@ -227,6 +233,7 @@ func buildProvider(c config.OAuthProviderConfig, opts Options, logger *slog.Logg
 		RequireEmailMatch:     c.RequireEmailMatch,
 		resolver:              opts.Resolver,
 		failTTL:               secretFailCache,
+		now:                   opts.Now,
 	}
 	switch c.Type {
 	case config.OAuthProviderGoogle:

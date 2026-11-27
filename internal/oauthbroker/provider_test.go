@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/config"
 )
@@ -324,7 +325,7 @@ func TestClientSecretSingleflightAndFailureCache(t *testing.T) {
 	cfg := []config.OAuthProviderConfig{{ID: "g", Type: "google", ClientID: "c", ClientSecretKey: "oauth-clients/g"}}
 	// Failure cache: an outage costs one store call within the window.
 	res := &countingResolver{err: errors.New("down")}
-	r, _ := newReg(t, cfg, Options{Resolver: res})
+	r, _ := newReg(t, cfg, Options{Resolver: res, Now: time.Now})
 	p, _ := r.Get("g")
 	base := res.calls // startup read
 	for i := 0; i < 5; i++ {
