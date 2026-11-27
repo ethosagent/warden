@@ -61,13 +61,36 @@ func resolveConsent(logger *slog.Logger, configPath, servedPath, stateDir string
 
 // checkConsentIssuer refuses identity settings whose issuer differs from
 // consent.oidc.issuer while consent is enabled. resolveConsent checks the file
-// at startup; this covers identity.issuer changing at runtime (settings writes,
-// versioned publishes, rollbacks). A nil identity block leaves the issuer
-// untouched and passes. It is a no-op while consent is off. The error text
-// leads with the 400 code identity_issuer_mismatch.
+// at startup; this covers identity.issuer changing at runtime (settings
+// writes, versioned publishes, rollbacks, applied drafts). A nil identity block
+// counts as issuer "": removing the block removes the binding, and the CP would
+// refuse its next restart, so it is refused like a change. It is a no-op while
+// consent is off. The error is a *dashboard.IssuerMismatchError (400
+// identity_issuer_mismatch).
 func (s *Server) checkConsentIssuer(id *config.IdentitySettings) error {
-	if id == nil || s.cfg.Consent == nil || sameIssuer(s.cfg.Consent.OIDC.Issuer, id.Issuer) {
+	if s.cfg.Consent == nil {
 		return nil
 	}
-	return &dashboard.InvalidPolicyError{Err: fmt.Errorf("identity_issuer_mismatch: identity.issuer %q must equal consent.oidc.issuer %q while consent is enabled", id.Issuer, s.cfg.Consent.OIDC.Issuer)}
+	got := ""
+	if id != nil {
+		got = id.Issuer
+	}
+	if got != "" && sameIssuer(s.cfg.Consent.OIDC.Issuer, got) {
+		return nil
+	}
+	return &dashboard.IssuerMismatchError{Err: fmt.Errorf("identity.issuer %q must equal consent.oidc.issuer %q while consent is enabled", got, s.cfg.Consent.OIDC.Issuer)}
+}
+
+// checkIssuerBindings runs the two identity.issuer guards (the token-service
+// collision and the consent binding) against one settings block. nil settings
+// carry no identity block.
+func (s *Server) checkIssuerBindings(settings *config.SettingsWire) error {
+	var id *config.IdentitySettings
+	if settings != nil {
+		id = settings.Identity
+	}
+	if err := s.checkIssuerCollision(id); err != nil {
+		return err
+	}
+	return s.checkConsentIssuer(id)
 }

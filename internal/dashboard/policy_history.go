@@ -47,6 +47,29 @@ func (e *InvalidPolicyError) Error() string { return e.Err.Error() }
 
 func (e *InvalidPolicyError) Unwrap() error { return e.Err }
 
+// IssuerMismatchError is returned by a settings writer, a rollback or a draft
+// apply when the document would leave identity.issuer different from (or
+// absent next to) consent.oidc.issuer while consent is enabled. Every writer
+// and the rollback answer it with 400 {"error":"identity_issuer_mismatch",
+// "detail":...}, never the 422 invalid_policy of a document that fails the
+// loader. It unwraps to *InvalidPolicyError so a caller that only knows the
+// validation class (the approvals handlers) still treats it as one.
+type IssuerMismatchError struct{ Err error }
+
+func (e *IssuerMismatchError) Error() string { return e.Err.Error() }
+
+func (e *IssuerMismatchError) Unwrap() error { return &InvalidPolicyError{Err: e.Err} }
+
+// writeIssuerMismatch answers an *IssuerMismatchError and reports whether err was one.
+func writeIssuerMismatch(w http.ResponseWriter, err error) bool {
+	var im *IssuerMismatchError
+	if !errors.As(err, &im) {
+		return false
+	}
+	writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "identity_issuer_mismatch", "detail": im.Error()})
+	return true
+}
+
 // PolicyVersionMeta is one version's metadata, without its document.
 type PolicyVersionMeta struct {
 	Version     int64     `json:"version"`
@@ -246,6 +269,9 @@ func (s *Server) rollbackPolicyVersion(w http.ResponseWriter, r *http.Request, v
 // longer validates, 403/409 as writeWriterError, else 500 (the store's error
 // stays server-side; the control plane logs it).
 func writeHistoryError(w http.ResponseWriter, err error) {
+	if writeIssuerMismatch(w, err) {
+		return
+	}
 	var ie *InvalidPolicyError
 	var ce *ConflictError
 	var re *RoleRequiredError

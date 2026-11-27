@@ -2,7 +2,6 @@ package controlplane
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +11,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ethosagent/warden/internal/config"
-	"github.com/ethosagent/warden/internal/dashboard"
 )
 
 const consentBlockYAML = `consent:
@@ -146,10 +144,7 @@ func TestConsentIssuerBinding(t *testing.T) {
 	err := srv.writeSettings(config.SettingsWire{Identity: &config.IdentitySettings{
 		DefaultMode: "attribute", Issuer: "https://other.example.com", Audience: "warden",
 	}})
-	var ip *dashboard.InvalidPolicyError
-	if !errors.As(err, &ip) || !strings.Contains(err.Error(), "identity_issuer_mismatch") {
-		t.Fatalf("mismatched issuer: err = %v, want identity_issuer_mismatch", err)
-	}
+	wantMismatch(t, "mismatched issuer", err)
 	// A trailing slash or case change names the same issuer.
 	if err := srv.writeSettings(config.SettingsWire{Identity: &config.IdentitySettings{
 		DefaultMode: "attribute", Issuer: "https://IDP.example.com/", Audience: "warden",
@@ -253,4 +248,44 @@ func TestResolveConsentServedCopyWarns(t *testing.T) {
 	if !strings.Contains(logs.String(), "different consent block") {
 		t.Errorf("expected a warning about the differing served copy, logs: %s", logs)
 	}
+}
+
+// TestWritersPreserveConsentBlockVersioned: in --policy-store=versioned the
+// served YAML is the only home of the CP-local blocks. A versioned settings
+// save (publishSettings -> writeMirror) and a save that changes the credential
+// (writeCredential) leave the consent node byte-identical, over a served file
+// and head that already hold it.
+func TestWritersPreserveConsentBlockVersioned(t *testing.T) {
+	t.Run("publishSettings mirror", func(t *testing.T) {
+		path := consentPolicyFile(t, "")
+		srv := newConsentVersioned(t, path)
+		before := consentNode(t, path)
+		if err := srv.writeSettings(config.SettingsWire{
+			Identity: matchingIdentity(), Logging: &config.LoggingSettings{Level: "debug", Format: "json"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if h := mustHead(t, srv.versions); h != 2 {
+			t.Fatalf("head = %d, want 2 (the save must publish)", h)
+		}
+		if after := consentNode(t, path); after != before {
+			t.Errorf("publishSettings changed the consent block:\n%s\nvs\n%s", before, after)
+		}
+	})
+	t.Run("writeCredential", func(t *testing.T) {
+		path := consentPolicyFile(t, writeCredentialPolicyFile(t))
+		srv := newConsentVersioned(t, path)
+		before := consentNode(t, path)
+		in := awsSettings("a-brand-new-secret-access-key")
+		in.Identity = matchingIdentity()
+		if err := srv.writeSettings(in); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(readFile(t, path), "a-brand-new-secret-access-key") {
+			t.Fatal("the new credential was not written to the served file")
+		}
+		if after := consentNode(t, path); after != before {
+			t.Errorf("writeCredential changed the consent block:\n%s\nvs\n%s", before, after)
+		}
+	})
 }
