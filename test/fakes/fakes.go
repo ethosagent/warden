@@ -109,7 +109,8 @@ func (f *FakeAnalyticsStore) GetEvents(filter analytics.EventFilter) ([]analytic
 	return out, nil
 }
 
-// FakeSecretStore is an in-memory secrets.SecretStore. Get/Delete follow the
+// FakeSecretStore is an in-memory secrets.SecretStore and
+// secrets.VersionedStore. Get/Delete follow the
 // port's contract: Get of an absent key is an error, Delete of one is not, and
 // List returns metadata only (the value never leaves Get).
 type FakeSecretStore struct {
@@ -119,7 +120,10 @@ type FakeSecretStore struct {
 	updated  map[string]time.Time
 }
 
-var _ secrets.SecretStore = (*FakeSecretStore)(nil)
+var (
+	_ secrets.SecretStore    = (*FakeSecretStore)(nil)
+	_ secrets.VersionedStore = (*FakeSecretStore)(nil)
+)
 
 // NewFakeSecretStore returns an empty store.
 func NewFakeSecretStore() *FakeSecretStore {
@@ -130,15 +134,38 @@ func NewFakeSecretStore() *FakeSecretStore {
 	}
 }
 
-// Get returns the value for key, or secrets.ErrSecretNotFound.
-func (f *FakeSecretStore) Get(_ context.Context, key string) (string, error) {
+// Get returns the value for key, or an error matching both secrets.ErrNotFound
+// and secrets.ErrSecretNotFound.
+func (f *FakeSecretStore) Get(ctx context.Context, key string) (string, error) {
+	v, _, err := f.GetVersion(ctx, key)
+	return v, err
+}
+
+// GetVersion returns key's value and version (1 after the first Put), or an
+// error matching secrets.ErrNotFound.
+func (f *FakeSecretStore) GetVersion(_ context.Context, key string) (string, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	v, ok := f.values[key]
 	if !ok {
-		return "", fmt.Errorf("%w: %q", secrets.ErrSecretNotFound, key)
+		return "", 0, fmt.Errorf("%w: %w: %q", secrets.ErrNotFound, secrets.ErrSecretNotFound, key)
 	}
-	return v, nil
+	return v, int64(f.versions[key]), nil
+}
+
+// PutIfVersion writes key=value only when key's version equals version (0:
+// only when key is absent); otherwise it returns secrets.ErrVersionConflict
+// and leaves the value alone.
+func (f *FakeSecretStore) PutIfVersion(_ context.Context, key, value string, version int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if int64(f.versions[key]) != version {
+		return fmt.Errorf("%w: %q at version %d", secrets.ErrVersionConflict, key, version)
+	}
+	f.values[key] = value
+	f.versions[key]++
+	f.updated[key] = time.Now()
+	return nil
 }
 
 // Put upserts key=value and bumps the key's version.
