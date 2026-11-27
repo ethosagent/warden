@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
@@ -42,14 +41,21 @@ var ErrEpochNotPublished = errors.New("controlplane: user grant epoch recorded b
 const (
 	// epochPruneInterval is how often the retention ticker prunes the table.
 	epochPruneInterval = time.Minute
-	// stateGrantHWM is the bundle_state name of the newest epoch ever recorded.
-	stateGrantHWM = "user_grant_hwm"
+	// stateGrantSection is "<seq>:<userGrantEpochs section JSON>" of the newest
+	// envelope signed with the section: the bytes a seq was signed with are
+	// frozen, so a re-sign or a restart under the same seq signs the same
+	// content even after a prune (a worker hashes every section byte).
+	stateGrantSection = "user_grant_section"
 	// maxBumpAttempts bounds the retries of a Bump whose head moved under it.
 	maxBumpAttempts = 3
 )
 
-// GrantEpochMigrations is the cpstate migration of the epoch table. Registered
-// in every mode (with BundleMigrations) so the downgrade guard knows it.
+// GrantEpochMigrations is the cpstate migration of the epoch table. It is NOT
+// Optional: the control plane can enable perUserSecrets at runtime (a served
+// config edit), so the table must exist whatever the flag says. The state
+// database's schema_version therefore grows by one on every control plane that
+// runs this build, with the feature on or off, and a backup taken here cannot
+// be restored on the previous binary (the downgrade guard refuses it).
 func GrantEpochMigrations() []cpstate.Migration {
 	return []cpstate.Migration{{
 		ID: "bundles/0002",
@@ -86,8 +92,7 @@ func (t grantEpochTable) all(ctx context.Context) (map[string]int64, error) {
 	return out, nil
 }
 
-// put records epoch for userKey (never lowering an existing one) and raises
-// the stored high-water mark, in one transaction.
+// put records epoch for userKey (never lowering an existing one).
 func (t grantEpochTable) put(ctx context.Context, userKey string, epoch int64, at time.Time) error {
 	tx, err := t.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -100,40 +105,10 @@ func (t grantEpochTable) put(ctx context.Context, userKey string, epoch int64, a
 		userKey, epoch, at.UnixMilli()); err != nil {
 		return fmt.Errorf("grant epochs: write: %w", err)
 	}
-	var cur string
-	err = tx.QueryRowContext(ctx, `SELECT value FROM bundle_state WHERE name = ?`, stateGrantHWM).Scan(&cur)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("grant epochs: read high-water mark: %w", err)
-	}
-	if n, perr := strconv.ParseInt(cur, 10, 64); perr != nil || n < epoch {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO bundle_state (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value`,
-			stateGrantHWM, strconv.FormatInt(epoch, 10)); err != nil {
-			return fmt.Errorf("grant epochs: write high-water mark: %w", err)
-		}
-	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("grant epochs: commit: %w", err)
 	}
 	return nil
-}
-
-// hwm returns the newest epoch ever recorded (0 = none). It survives a prune,
-// so the signed content's fingerprint moves only on a Bump.
-func (t grantEpochTable) hwm(ctx context.Context) (int64, error) {
-	var v string
-	err := t.db.QueryRowContext(ctx, `SELECT value FROM bundle_state WHERE name = ?`, stateGrantHWM).Scan(&v)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, fmt.Errorf("grant epochs: read high-water mark: %w", err)
-	}
-	n, perr := strconv.ParseInt(v, 10, 64)
-	if perr != nil || n < 0 {
-		return 0, errors.New("grant epochs: unreadable high-water mark")
-	}
-	return n, nil
 }
 
 // pruneBefore deletes entries bumped before cutoff and returns how many.
@@ -224,20 +199,18 @@ func (e *EpochStore) Bump(ctx context.Context, userKey string) (int64, error) {
 	return entry.Seq, nil
 }
 
-// Prune deletes the entries older than 2 x workerCacheTTL at now and
-// returns how many. It appends no publish-log row and signs nothing: the next
-// bundle simply carries fewer entries. A control plane that serves no sections
-// prunes at the longest allowed TTL.
+// Prune deletes the entries older than 2 x MaxPerUserWorkerCacheTTL at now and
+// returns how many. It uses the longest allowed TTL, not the current one, so
+// lowering workerCacheTTL cannot drop an epoch a partitioned worker, still
+// holding a token cached under the old TTL, needs. It appends no publish-log
+// row and signs nothing: the next seq's bundle simply carries fewer entries
+// (the bytes already signed for the current seq are frozen).
 func (e *EpochStore) Prune(ctx context.Context, now time.Time) (int64, error) {
 	ps := e.srv.policy
 	ps.refreshMu.Lock()
-	ttl := ps.bundles.pu.ttl
 	db := ps.bundles.state.db
 	ps.refreshMu.Unlock()
-	if ttl <= 0 {
-		ttl = config.MaxPerUserWorkerCacheTTL
-	}
-	return (grantEpochTable{db: db}).pruneBefore(ctx, now.Add(-2*ttl))
+	return (grantEpochTable{db: db}).pruneBefore(ctx, now.Add(-2*config.MaxPerUserWorkerCacheTTL))
 }
 
 // runEpochPrune prunes the epoch table once at start and then every

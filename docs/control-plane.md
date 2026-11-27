@@ -1451,6 +1451,7 @@ fails when the two differ.
 | `/dashboard/api/llmproviders` | POST | admin | `llmproviders.write` | `none` |
 | `/dashboard/api/llmproviders` | PUT | admin | `llmproviders.write` | `none` |
 | `/dashboard/api/mcp` | GET | viewer | `mcp.read` | `traffic:read` |
+| `/dashboard/api/per-user-secrets` | PUT | admin | `per_user_secrets.write` | `none` |
 | `/dashboard/api/policy` | GET | viewer | `policy.read` | `policy:read` |
 | `/dashboard/api/policy` | POST | editor | `policy.write` | `policy:write` |
 | `/dashboard/api/policy` | PUT | editor | `policy.write` | `none` |
@@ -3294,11 +3295,25 @@ A worker that pins the key and verifies the envelope is described in
   stays. A change of the block appends a `per_user_secrets` row first, like a
   JWKS change. A revocation (`EpochStore.Bump`, called by the portal revoke and
   offboarding) appends a `user_grant` row, records the epoch and signs a bundle
-  that wakes the long poll. Entries older than 2 x `workerCacheTTL` are pruned
-  by a one-minute ticker, which appends no row. A save that enables the block or
-  adds an agent to a mapping is refused with `409 workers_lack_capability` while
-  a connected worker bound to that agent lacks `usersecrets/v1`; an admin may
-  pass `force=true`, which the admin audit records with the worker ids.
+  that wakes the long poll. Entries older than 2 x the longest allowed
+  `workerCacheTTL` (30 minutes) are pruned by a one-minute ticker, which appends
+  no row. The `userGrantEpochs` bytes signed for a seq are frozen (kept in
+  `bundle_state`, so also across a restart): a worker hashes every section byte,
+  so a re-sign of one seq never differs, and a pruned entry leaves the section
+  only with the next seq. `PUT /dashboard/api/per-user-secrets` (admin only; no
+  API key) saves the block. It is refused with `409 workers_lack_capability`
+  while a connected worker bound to an agent the save newly serves lacks
+  `usersecrets/v1`; an admin may pass `?force=true`, which the admin audit
+  records with the worker ids, and an editor gets `403 role_required`. A mapping
+  added by editing the served config instead logs one
+  `per_user_secrets_workers_lack_capability` warning naming those workers. An
+  enabled block that fails the startup checks or cannot be read is not served
+  (the last section stays), `/healthz` answers `degraded: perUserSecrets stale`
+  and one line is logged per transition. The epoch table comes from migration
+  `bundles/0002`, which is not optional (the block can be enabled at runtime):
+  `schema_version` grows by one on every control plane running this build,
+  feature on or off, so a backup taken on it cannot be restored on the previous
+  binary.
 - **Credential.** `settings.secrets.accessKeyId` and `secretAccessKey` are not in
   the signed payload. They travel in the envelope's unsigned `credentials`
   sidecar and the payload carries their SHA-256. Nothing logs either.

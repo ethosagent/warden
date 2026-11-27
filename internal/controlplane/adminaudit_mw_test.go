@@ -274,6 +274,9 @@ var auditedRequests = map[routeKey]auditedRequest{
 	// Break-glass emergency apply and its review (W-P2-APPR-07).
 	{http.MethodPost, "/dashboard/api/changes/{id}/emergency-apply"}: {"/dashboard/api/changes/cd_1/emergency-apply", `{"reason":"the idp is down, applying"}`},
 	{http.MethodPost, "/dashboard/api/changes/{id}/review"}:          {"/dashboard/api/changes/cd_1/review", `{"comment":"reviewed"}`},
+
+	// Per-user secrets block (W-P3-PUS-08).
+	{http.MethodPut, perUserSecretsPath}: {perUserSecretsPath, `{"enabled":false}`},
 }
 
 // allAuditedRoutes lists every audited row of both route tables in a stable
@@ -315,8 +318,11 @@ func TestAdminAuditAllAuditedRoutes(t *testing.T) {
 	e.srv.dash.SetKeysSource(stubKeys{})
 	e.srv.dash.SetChangeDrafts(stubChanges{})
 	e.srv.dash.SetWorkerCertAdmin(stubWorkerCerts{})
+	perUserPath := e.srv.cfg.PolicyPath
+	e.srv.cfg.PerUserLoad = func() (config.PerUserSecretsConfig, error) { return loadPerUserSecrets(perUserPath) }
+	e.srv.cfg.PerUserCheck = func(config.PerUserSecretsConfig) error { return nil }
 	admin := e.session(t, groupAdmin)
-	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "worker_enrollments": true, "blocked_users": true, "agents": true, "api_keys": true, "token_sessions": true}
+	hashed := map[string]bool{"policy": true, "settings": true, "integrations": true, "detection": true, "llmproviders": true, "worker_tokens": true, "worker_enrollments": true, "blocked_users": true, "agents": true, "api_keys": true, "token_sessions": true, "per_user_secrets": true}
 	routes := allAuditedRoutes()
 	var tokID, enrollID, keyID string
 	if len(routes) != len(auditedRequests) {

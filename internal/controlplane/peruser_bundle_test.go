@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -262,7 +264,13 @@ func TestBundlePerUserOffByteIdentical(t *testing.T) {
 	}
 	for name, src := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, reasons := perUserGoldenPayload(t, src)
+			got, reasons, legacyETag := perUserGoldenPayload(t, src)
+			if len(reasons) != 1 {
+				t.Errorf("publish log reasons = %v, want only the initial import row", reasons)
+			}
+			if wantETag, err := os.ReadFile(filepath.Join("testdata", "policy_overlay_none.golden.etag")); err != nil || legacyETag != strings.TrimSpace(string(wantETag)) {
+				t.Errorf("legacy /policy ETag = %q, want golden %q (%v)", legacyETag, wantETag, err)
+			}
 			if !bytes.Equal(got, want) {
 				t.Errorf("payload differs from golden\n got: %s\nwant: %s", got, want)
 			}
@@ -279,7 +287,7 @@ func TestBundlePerUserOffByteIdentical(t *testing.T) {
 // fixture with every nondeterministic input pinned (clock, cpID, token JWKS)
 // and returns the decoded payload bytes of the envelope it serves and the
 // publish-log reasons.
-func perUserGoldenPayload(t *testing.T, src *puBlock) ([]byte, []string) {
+func perUserGoldenPayload(t *testing.T, src *puBlock) ([]byte, []string, string) {
 	t.Helper()
 	db := openPolicyState(t)
 	if err := (bundleState{db: db.SQL()}).put(context.Background(), stateCPID, "cp_00000000000000000000000000000001"); err != nil {
@@ -313,7 +321,7 @@ func perUserGoldenPayload(t *testing.T, src *puBlock) ([]byte, []string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return p, h.reasons(t)
+	return p, h.reasons(t), `"` + h.ps.currentETag() + `"`
 }
 
 // TestBundlePerUserCheckGate: an enabled block is served only after
@@ -449,7 +457,7 @@ func TestEpochStoreBump(t *testing.T) {
 	if err != nil || epochBob <= epoch {
 		t.Fatalf("second user's epoch = %d, %v; want above %d", epochBob, err, epoch)
 	}
-	h.clk.Advance(2*5*time.Minute + time.Second)
+	h.clk.Advance(2*config.MaxPerUserWorkerCacheTTL + time.Second)
 	rowsBefore := len(h.publishRows(t))
 	n, err := e.Prune(context.Background(), h.clk.Now())
 	if err != nil || n != 2 {
@@ -467,17 +475,22 @@ func TestEpochStoreBump(t *testing.T) {
 	}
 }
 
-// TestEpochStorePruneKeepsBundleSignable: a prune drops expired entries
-// without a new seq, and neither a re-sign of the same seq nor a restart after
-// it is refused as "content changed under an unchanged seq".
+// TestEpochStorePruneKeepsBundleSignable: a worker that applied the bundle of a
+// seq still accepts its re-sign (the resign ticker, a key re-sign) and the one
+// a restarted control plane signs after a prune dropped the entry: the bytes
+// signed for a seq never change (bundle.Verify would answer ErrEquivocation).
+// The pruned entry disappears with the next seq.
 func TestEpochStorePruneKeepsBundleSignable(t *testing.T) {
 	db := openPolicyState(t)
 	src := &puBlock{cfg: puOn()}
 	h := newPerUserBundleHarness(t, src, db, nil)
-	if _, err := h.s.GrantEpochs().Bump(context.Background(), puUserKey(t, "alice")); err != nil {
+	alice, bob := puUserKey(t, "alice"), puUserKey(t, "bob")
+	if _, err := h.s.GrantEpochs().Bump(context.Background(), alice); err != nil {
 		t.Fatal(err)
 	}
+	applied := btState(h.verify(t, h.bundleResp(t).body, bundle.State{}))
 	seq := h.latest(t).Seq
+
 	h.clk.Advance(time.Hour)
 	if n, err := h.s.GrantEpochs().Prune(context.Background(), h.clk.Now()); err != nil || n != 1 {
 		t.Fatalf("Prune = %d, %v", n, err)
@@ -486,12 +499,27 @@ func TestEpochStorePruneKeepsBundleSignable(t *testing.T) {
 	if h.degraded() || strings.Contains(h.logs.String(), "refusing to sign") {
 		t.Fatalf("a re-sign after a prune was refused:\n%s", h.logs.String())
 	}
-	if got := h.epochs(t); len(got) != 0 {
-		t.Errorf("the re-signed bundle still carries the pruned entry: %v", got)
+	re := h.verify(t, h.bundleResp(t).body, applied) // fails on ErrEquivocation
+	if !re.Refresh || re.Seq != seq {
+		t.Errorf("re-sign after a prune: refresh=%v seq=%d, want a refresh of seq %d", re.Refresh, re.Seq, seq)
 	}
+
+	// A restarted control plane signs the same bytes for the seq.
 	h2 := newPerUserBundleHarness(t, &puBlock{cfg: puOn()}, db, clocktest.NewFake(h.clk.Now()), h.fk)
 	if h2.degraded() || h2.latest(t).Seq != seq {
-		t.Errorf("restart after a prune: degraded=%v seq=%d want %d", h2.degraded(), h2.latest(t).Seq, seq)
+		t.Fatalf("restart after a prune: degraded=%v seq=%d want %d", h2.degraded(), h2.latest(t).Seq, seq)
+	}
+	h2.ps.refresh(true)
+	if re2 := h2.verify(t, h2.bundleResp(t).body, applied); !re2.Refresh || re2.Seq != seq {
+		t.Errorf("restart: refresh=%v seq=%d, want a refresh of seq %d", re2.Refresh, re2.Seq, seq)
+	}
+
+	// The next seq drops the pruned entry.
+	if _, err := h2.s.GrantEpochs().Bump(context.Background(), bob); err != nil {
+		t.Fatal(err)
+	}
+	if got := h2.epochs(t); len(got) != 1 || got[alice] != 0 || got[bob] == 0 {
+		t.Errorf("userGrantEpochs after the next seq = %v, want only bob", got)
 	}
 }
 
@@ -576,6 +604,7 @@ func puLiveBlock(t *testing.T, path string) config.PerUserSecretsConfig {
 // block; a save that adds no agent is never refused.
 func TestPerUserRolloutGuard(t *testing.T) {
 	s, path := perUserGuardServer(t)
+	bg := WithPrincipal(context.Background(), Principal{Kind: PrincipalSession, Groups: []string{groupAdmin}})
 	beat(s, "old-a", "agent-a", config.CapBlocklistV1)
 	beat(s, "ok-a", "agent-a", config.CapUserSecretsV1)
 	beat(s, "old-b", "agent-b", config.CapBlocklistV1)
@@ -583,7 +612,7 @@ func TestPerUserRolloutGuard(t *testing.T) {
 
 	// Enabling for agent-a: refused, naming only old-a.
 	var lack *dashboard.WorkersLackCapabilityError
-	err := s.WritePerUserSecrets(context.Background(), puOn("agent-a"))
+	err := s.WritePerUserSecrets(bg, puOn("agent-a"))
 	if !errors.As(err, &lack) || strings.Join(lack.Workers, ",") != "old-a" {
 		t.Fatalf("enable with an old worker = %v, want WorkersLackCapabilityError [old-a]", err)
 	}
@@ -592,7 +621,7 @@ func TestPerUserRolloutGuard(t *testing.T) {
 	}
 
 	// An editor cannot force; an admin can, and it is audited.
-	forced := dashboard.WithForce(context.Background())
+	forced := dashboard.WithForce(bg)
 	editor := WithPrincipal(forced, Principal{Kind: PrincipalSession, Groups: []string{groupEditor}})
 	var role *dashboard.RoleRequiredError
 	if err := s.WritePerUserSecrets(editor, puOn("agent-a")); !errors.As(err, &role) || role.Need != "admin" {
@@ -614,18 +643,18 @@ func TestPerUserRolloutGuard(t *testing.T) {
 	}
 
 	// Adding agent-b to the mapping is refused for old-b only.
-	err = s.WritePerUserSecrets(context.Background(), puOn("agent-a", "agent-b"))
+	err = s.WritePerUserSecrets(bg, puOn("agent-a", "agent-b"))
 	if !errors.As(err, &lack) || strings.Join(lack.Workers, ",") != "old-b" {
 		t.Fatalf("adding agent-b = %v, want [old-b]", err)
 	}
 	// A save that adds no agent (a scope change) is never refused, though old-a is connected.
 	changed := puOn("agent-a")
 	changed.Mappings[0].Scopes = []string{"another.scope"}
-	if err := s.WritePerUserSecrets(context.Background(), changed); err != nil {
+	if err := s.WritePerUserSecrets(bg, changed); err != nil {
 		t.Fatalf("a save adding no agent = %v", err)
 	}
 	// Disabling is never refused.
-	if err := s.WritePerUserSecrets(context.Background(), config.PerUserSecretsConfig{}); err != nil {
+	if err := s.WritePerUserSecrets(bg, config.PerUserSecretsConfig{}); err != nil {
 		t.Fatalf("disabling = %v", err)
 	}
 	// Once the old worker is offline (stale), the save goes through.
@@ -633,7 +662,7 @@ func TestPerUserRolloutGuard(t *testing.T) {
 	s.registry.now = func() time.Time { return now }
 	beat(s, "old-a", "agent-a", config.CapBlocklistV1)
 	now = now.Add(staleAfter + time.Second)
-	if err := s.WritePerUserSecrets(context.Background(), puOn("agent-a")); err != nil {
+	if err := s.WritePerUserSecrets(bg, puOn("agent-a")); err != nil {
 		t.Fatalf("enable with only an offline old worker = %v", err)
 	}
 	if got := puLiveBlock(t, path); !got.Enabled || len(got.Mappings) != 1 {
@@ -667,5 +696,158 @@ func TestPerUserWriteChecks(t *testing.T) {
 	unwired := New(Config{PolicyPath: path})
 	if err := unwired.WritePerUserSecrets(context.Background(), puOn()); !errors.As(err, &inv) {
 		t.Fatalf("enabling on a control plane without the feature wired = %v", err)
+	}
+}
+
+const puRouteBody = `{"enabled":true,"workerCacheTTLSeconds":300,"mappings":[{"placeholder":"GOOGLE_USER_PLACEHOLDER","provider":"google","scopes":["s1"],"domains":["gmail.googleapis.com"],"in":["header"],"agents":["agent-a"]}]}`
+
+// TestPerUserSecretsRoute: PUT /dashboard/api/per-user-secrets, over HTTP. The
+// rollout guard answers 409 workers_lack_capability naming the workers; an admin
+// with ?force=true succeeds and the admin audit row carries force and the worker
+// ids; an editor is 403 role_required with and without force; a viewer, a
+// missing session and a wrong method are refused; an unknown member is 400.
+func TestPerUserSecretsRoute(t *testing.T) {
+	e := newAuditEnv(t, auditEnvOpts{console: authzConsole(defaultRoles()), token: dashTestToken})
+	path := e.srv.cfg.PolicyPath
+	e.srv.cfg.PerUserLoad = func() (config.PerUserSecretsConfig, error) { return loadPerUserSecrets(path) }
+	e.srv.cfg.PerUserCheck = func(config.PerUserSecretsConfig) error { return nil }
+	admin, editor, viewer := e.session(t, groupAdmin), e.session(t, groupEditor), e.session(t, groupViewer)
+	beat(e.srv, "old-a", "agent-a", config.CapBlocklistV1)
+
+	rec := e.send(admin, "", http.MethodPut, perUserSecretsPath, puRouteBody)
+	if b := decodeLack(t, rec.Body.String()); rec.Code != http.StatusConflict || b.Error != "workers_lack_capability" || strings.Join(b.Workers, ",") != "old-a" {
+		t.Fatalf("enable with an old worker = %d %s, want 409 workers_lack_capability [old-a]", rec.Code, rec.Body.String())
+	}
+	if puLiveBlock(t, path).Enabled {
+		t.Fatal("a refused save reached the config file")
+	}
+	for name, id := range map[string]string{"editor": editor, "viewer": viewer} {
+		for _, q := range []string{"", "?force=true"} {
+			if rec := e.send(id, "", http.MethodPut, perUserSecretsPath+q, puRouteBody); rec.Code != http.StatusForbidden {
+				t.Errorf("%s PUT%s = %d %s, want 403", name, q, rec.Code, rec.Body.String())
+			}
+		}
+	}
+	if rec := e.send("", "", http.MethodPut, perUserSecretsPath, puRouteBody); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no session = %d, want 401", rec.Code)
+	}
+	if rec := e.send(admin, "", http.MethodPost, perUserSecretsPath, puRouteBody); rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST = %d, want 405", rec.Code)
+	}
+	if rec := e.send(admin, "", http.MethodPut, perUserSecretsPath, `{"enabled":true,"token":"x"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown member = %d %s, want 400", rec.Code, rec.Body.String())
+	}
+
+	rec = e.send(admin, "", http.MethodPut, perUserSecretsPath+"?force=true", puRouteBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("forced by an admin = %d %s", rec.Code, rec.Body.String())
+	}
+	if !puLiveBlock(t, path).Enabled {
+		t.Fatal("the forced save did not reach the config file")
+	}
+	var row *adminaudit.Input
+	for _, in := range e.rec.inputs() {
+		if in.Action == "per_user_secrets.write" && in.Details[adminaudit.DetailForce] == "true" {
+			in := in
+			row = &in
+		}
+	}
+	if row == nil || row.Details[adminaudit.DetailWorkersLacking] != "old-a" {
+		t.Fatalf("no per_user_secrets.write audit row with force and the worker ids: %+v", e.rec.inputs())
+	}
+}
+
+// TestPerUserSecretsRouteNoneMode: with console.auth none the route needs the
+// admin bearer.
+func TestPerUserSecretsRouteNoneMode(t *testing.T) {
+	e := newAuditEnv(t, auditEnvOpts{token: dashTestToken, adminToken: "admin-token-for-per-user"})
+	path := e.srv.cfg.PolicyPath
+	e.srv.cfg.PerUserLoad = func() (config.PerUserSecretsConfig, error) { return loadPerUserSecrets(path) }
+	e.srv.cfg.PerUserCheck = func(config.PerUserSecretsConfig) error { return nil }
+	if rec := e.send("", "", http.MethodPut, perUserSecretsPath, puRouteBody); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no bearer = %d, want 401", rec.Code)
+	}
+	if rec := e.send("", "admin-token-for-per-user", http.MethodPut, perUserSecretsPath, puRouteBody); rec.Code != http.StatusOK {
+		t.Errorf("admin bearer = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPerUserPruneUsesLongestTTL: prune keeps an entry for 2 x the longest
+// allowed workerCacheTTL, not 2 x the configured one, so lowering the TTL cannot
+// drop an epoch a worker still holding a token under the old TTL needs.
+func TestPerUserPruneUsesLongestTTL(t *testing.T) {
+	cfg := puOn()
+	cfg.WorkerCacheTTL = config.MinPerUserWorkerCacheTTL
+	h := newPerUserBundleHarness(t, &puBlock{cfg: cfg}, nil, nil)
+	e := h.s.GrantEpochs()
+	if _, err := e.Bump(context.Background(), puUserKey(t, "alice")); err != nil {
+		t.Fatal(err)
+	}
+	h.clk.Advance(2*config.MinPerUserWorkerCacheTTL + time.Minute)
+	if n, err := e.Prune(context.Background(), h.clk.Now()); err != nil || n != 0 {
+		t.Fatalf("Prune after 2 x the configured TTL = %d, %v, want 0", n, err)
+	}
+	h.clk.Advance(2 * config.MaxPerUserWorkerCacheTTL)
+	if n, err := e.Prune(context.Background(), h.clk.Now()); err != nil || n != 1 {
+		t.Fatalf("Prune after 2 x the longest TTL = %d, %v, want 1", n, err)
+	}
+}
+
+// TestPerUserSecretsStale: an enabled block that fails the startup check, or
+// cannot be read, is reported on /healthz (degraded: perUserSecrets stale) and
+// logged once per transition, not on every build; serving it again clears it.
+func TestPerUserSecretsStale(t *testing.T) {
+	src := &puBlock{cfg: puOn()}
+	h := newPerUserBundleHarness(t, src, nil, nil)
+	health := func() string {
+		rec := httptest.NewRecorder()
+		h.s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		return rec.Body.String()
+	}
+	if got := health(); got != "ok\n" {
+		t.Fatalf("healthz = %q, want ok", got)
+	}
+	src.setCheckErr(errors.New("consent.store is gone"))
+	for i := 0; i < 3; i++ {
+		h.ps.Refresh()
+	}
+	if got := health(); !strings.Contains(got, "degraded: perUserSecrets stale") {
+		t.Fatalf("healthz = %q, want perUserSecrets stale", got)
+	}
+	if n := strings.Count(h.logs.String(), "perUserSecrets is stale"); n != 1 {
+		t.Errorf("stale logged %d times over 3 builds, want once", n)
+	}
+	src.setCheckErr(nil)
+	h.ps.Refresh()
+	if got := health(); got != "ok\n" {
+		t.Errorf("healthz after recovery = %q, want ok", got)
+	}
+	src.mu.Lock()
+	src.loadErr = errors.New("read failed")
+	src.mu.Unlock()
+	h.ps.Refresh()
+	if got := health(); !strings.Contains(got, "perUserSecrets stale") {
+		t.Errorf("healthz with an unreadable block = %q", got)
+	}
+}
+
+// TestPerUserFileEditWarnsLackingWorkers: a mapping that adds an agent through
+// an edit of the served config (which no 409 can stop) logs one WARN naming the
+// connected workers that lack usersecrets/v1, once per change.
+func TestPerUserFileEditWarnsLackingWorkers(t *testing.T) {
+	src := &puBlock{cfg: puOn("agent-a")}
+	h := newPerUserBundleHarness(t, src, nil, nil)
+	beat(h.s, "old-b", "agent-b", config.CapBlocklistV1)
+	beat(h.s, "ok-b", "agent-b", config.CapUserSecretsV1)
+	h.ps.Refresh()
+	if strings.Contains(h.logs.String(), "per_user_secrets_workers_lack_capability") {
+		t.Fatal("warned with no new agent")
+	}
+	src.set(puOn("agent-a", "agent-b"))
+	h.ps.Refresh()
+	h.ps.Refresh()
+	logs := h.logs.String()
+	if n := strings.Count(logs, "per_user_secrets_workers_lack_capability"); n != 1 || !strings.Contains(logs, `"workers":["old-b"]`) {
+		t.Errorf("warnings = %d (want 1 naming old-b):\n%s", n, logs)
 	}
 }

@@ -1,12 +1,15 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethosagent/warden/internal/bundle"
@@ -48,8 +51,12 @@ type perUserState struct {
 
 // resolvePerUser reloads the block and updates b.pu. A block that cannot be read
 // or does not pass the check leaves the last served state in place (never a
-// section built from an unchecked block); a block that loads and is disabled or
-// absent turns the feature off. The caller holds refreshMu.
+// section built from an unchecked block) and marks the feature stale (/healthz,
+// one log line per transition); a block that loads and is disabled or absent
+// turns the feature off. When a newly served mapping adds an agent whose
+// connected worker lacks usersecrets/v1 it logs one WARN naming the workers (a
+// file edit cannot be refused the way WritePerUserSecrets can). The caller holds
+// refreshMu.
 func (ps *policyServer) resolvePerUser() {
 	b := ps.bundles
 	src := b.perUserSrc
@@ -58,28 +65,72 @@ func (ps *policyServer) resolvePerUser() {
 	}
 	cfg, err := src.load()
 	if err != nil {
-		b.logger.Warn("control plane: perUserSecrets could not be read; keeping the section last served", "error", boundedErr(err))
+		b.puStale("the block could not be read", err)
 		return
 	}
 	if !cfg.Enabled {
-		b.pu = perUserState{}
+		b.pu, b.puPairs = perUserState{}, nil
+		b.puRecovered()
 		return
 	}
 	if src.check == nil {
-		b.logger.Error("control plane: perUserSecrets is enabled but this control plane has no startup check for it; not serving the section")
+		b.puStale("no startup check is wired", nil)
 		return
 	}
 	if err := src.check(cfg); err != nil {
-		b.logger.Error("control plane: perUserSecrets is enabled but does not pass the startup checks; keeping the section last served",
-			"error", boundedErr(err))
+		b.puStale("the block does not pass the startup checks", err)
 		return
 	}
 	raw, err := perUserSectionJSON(cfg)
 	if err != nil {
-		b.logger.Error("control plane: perUserSecrets section not encoded; keeping the section last served", "error", boundedErr(err))
+		b.puStale("the section could not be encoded", err)
 		return
 	}
+	b.puRecovered()
+	if !bytes.Equal(raw, b.pu.raw) {
+		ps.warnWorkersLackUserSecrets(b.puPairs, perUserPairs(cfg))
+	}
 	b.pu = perUserState{raw: raw, ttl: cfg.WorkerCacheTTL}
+	b.puPairs = perUserPairs(cfg)
+}
+
+// puStale marks the served per-user section stale: the block in the config is
+// not served. It logs once per transition into the state.
+func (b *bundlePublisher) puStale(why string, err error) {
+	if b.pustale.Swap(true) {
+		return
+	}
+	attrs := []any{"reason", why}
+	if err != nil {
+		attrs = append(attrs, "error", boundedErr(err))
+	}
+	b.logger.Error("control plane: perUserSecrets is stale: the section last served stays in force", attrs...)
+}
+
+// puRecovered clears the stale mark, logging the transition once.
+func (b *bundlePublisher) puRecovered() {
+	if b.pustale.Swap(false) {
+		b.logger.Info("control plane: perUserSecrets is serving the block in the config again")
+	}
+}
+
+// perUserStale reports whether an enabled or unreadable block in the config is
+// not being served (/healthz).
+func (ps *policyServer) perUserStale() bool {
+	return ps.bundles != nil && ps.bundles.pustale.Load()
+}
+
+// warnWorkersLackUserSecrets logs the connected workers that serve an agent a
+// mapping was just added for and lack usersecrets/v1.
+func (ps *policyServer) warnWorkersLackUserSecrets(have, want map[string]map[string]bool) {
+	if ps.registry == nil {
+		return
+	}
+	lacking, total := ps.registry.WorkersLackingCap(config.CapUserSecretsV1, perUserAffected(have, want))
+	if len(lacking) > 0 {
+		ps.bundles.logger.Warn("per_user_secrets_workers_lack_capability: workers serving an agent with a new per-user mapping lack usersecrets/v1 and will forward the placeholder",
+			"workers", lacking, "total", total)
+	}
 }
 
 // perUserSectionJSON encodes cfg as the perUserSecrets section. Slices are never
@@ -114,41 +165,62 @@ func nonNil(v []string) []string {
 }
 
 // perUserFingerprint extends the content fingerprint fp with the per-user
-// sections. It is called only when the feature is on, so a control plane
-// without it keeps the fingerprint it persisted before this feature.
-//
-// The userGrantEpochs entries are fingerprinted by the newest epoch ever
-// recorded (hwm), not by their list: every Bump takes a seq of its own and
-// moves hwm, while a prune (which takes none) only drops entries older than
-// 2 x workerCacheTTL, which no worker can still need, so a re-sign after a
-// prune is the same content for the seq.
-func perUserFingerprint(fp string, section json.RawMessage, hwm int64) string {
+// sections' actual bytes. It is called only when the feature is on, so a
+// control plane without it keeps the fingerprint it persisted before this
+// feature.
+func perUserFingerprint(fp string, section, epochs json.RawMessage) string {
 	h := sha256.New()
 	_, _ = h.Write([]byte(fp))
 	_, _ = h.Write([]byte("\x00perUserSecrets\x00"))
 	_, _ = h.Write(section)
-	_, _ = h.Write([]byte("\x00userGrantEpochs\x00" + strconv.FormatInt(hwm, 10)))
+	_, _ = h.Write([]byte("\x00userGrantEpochs\x00"))
+	_, _ = h.Write(epochs)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// perUserSections returns the sections to sign and the fingerprint input: both
-// nil when the feature is off. The caller holds refreshMu.
-func (ps *policyServer) perUserSections(ctx context.Context) (perUser, epochs json.RawMessage, hwm int64, err error) {
+// epochsFor returns the userGrantEpochs section to sign for seq. Bytes already
+// signed for seq (frozen, also across a restart) are reused as they are:
+// a worker's ContentSHA256 covers every section byte, so a re-sign of one seq
+// must not differ, whatever a prune removed since. A new seq builds the section
+// from the table, which is where pruned entries disappear. The caller holds
+// refreshMu.
+func (ps *policyServer) epochsFor(ctx context.Context, seq int64) (json.RawMessage, error) {
 	b := ps.bundles
-	if b.pu.raw == nil {
-		return nil, nil, 0, nil
+	if b.frozenSeq == seq && b.frozenEpochs != nil {
+		return b.frozenEpochs, nil
 	}
-	t := grantEpochTable{db: b.state.db}
-	entries, err := t.all(ctx)
+	entries, err := (grantEpochTable{db: b.state.db}).all(ctx)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, err
 	}
-	if hwm, err = t.hwm(ctx); err != nil {
-		return nil, nil, 0, err
+	return epochSection(entries)
+}
+
+// freezeEpochs records the section signed for seq. It runs before the signed
+// record is stored and the envelope published.
+func (ps *policyServer) freezeEpochs(ctx context.Context, seq int64, raw json.RawMessage) error {
+	b := ps.bundles
+	if b.frozenSeq == seq && b.frozenEpochs != nil {
+		return nil
 	}
-	epochs, err = epochSection(entries)
-	if err != nil {
-		return nil, nil, 0, err
+	if err := b.state.put(ctx, stateGrantSection, strconv.FormatInt(seq, 10)+":"+string(raw)); err != nil {
+		return err
 	}
-	return b.pu.raw, epochs, hwm, nil
+	b.frozenSeq, b.frozenEpochs = seq, raw
+	return nil
+}
+
+// loadFrozenEpochs reads the frozen section at startup.
+func (b *bundlePublisher) loadFrozenEpochs(ctx context.Context) error {
+	v, ok, err := b.state.get(ctx, stateGrantSection)
+	if err != nil || !ok {
+		return err
+	}
+	seq, raw, found := strings.Cut(v, ":")
+	n, perr := strconv.ParseInt(seq, 10, 64)
+	if !found || perr != nil || n < 1 || !json.Valid([]byte(raw)) {
+		return errors.New("bundle_state has an unreadable userGrantEpochs record")
+	}
+	b.frozenSeq, b.frozenEpochs = n, json.RawMessage(raw)
+	return nil
 }

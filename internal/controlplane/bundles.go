@@ -293,6 +293,14 @@ type bundlePublisher struct {
 	perUser    trackedInput
 	perUserSrc *perUserSource
 	pu         perUserState
+	// puPairs are the (agent, placeholder) pairs pu serves; pustale is set while
+	// the block in the config is not being served (see resolvePerUser).
+	puPairs map[string]map[string]bool
+	pustale atomic.Bool
+	// frozenSeq and frozenEpochs are the userGrantEpochs bytes signed for that
+	// seq (see epochsFor).
+	frozenSeq    int64
+	frozenEpochs json.RawMessage
 	// tokenIssuer is tokenService.issuer, signed as the payload's tokenIssuer
 	// ("" = the control plane mints no tokens). Guarded by refreshMu.
 	tokenIssuer string
@@ -431,6 +439,9 @@ func (ps *policyServer) startBundles(ctx context.Context) error {
 			return fmt.Errorf("control-plane: %w", err)
 		}
 	}
+	if err := b.loadFrozenEpochs(ctx); err != nil {
+		return fmt.Errorf("control-plane: %w", err)
+	}
 	if v, ok, err := b.state.get(ctx, stateSigned); err != nil {
 		return fmt.Errorf("control-plane: %w", err)
 	} else if ok {
@@ -551,11 +562,7 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 	// The per-user block is read and checked on every build, so a block edited
 	// in the served config is served only after it passed the startup checks.
 	ps.resolvePerUser()
-	perUser, epochs, hwm, err := ps.perUserSections(ctx)
-	if err != nil {
-		b.fail(ctx, 0, kid, err)
-		return
-	}
+	perUser := b.pu.raw
 	if err := ps.cover(ctx, &b.perUser, hashOf(string(perUser)), head, etag); err != nil {
 		b.fail(ctx, 0, kid, err)
 		return
@@ -578,8 +585,13 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		return
 	}
 	fp := contentFingerprint(policy, creds, jwks, b.tokenIssuer)
+	var epochs json.RawMessage
 	if perUser != nil {
-		fp = perUserFingerprint(fp, perUser, hwm)
+		if epochs, err = ps.epochsFor(ctx, last.Seq); err != nil {
+			b.fail(ctx, last.Seq, kid, err)
+			return
+		}
+		fp = perUserFingerprint(fp, perUser, epochs)
 	}
 	cur := b.cur
 	switch {
@@ -640,7 +652,13 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		issuedAt: now, expiresAt: bd.ExpiresAt, fp: fp, tokenKIDs: tokenKIDs,
 	}
 	// Persist before publishing: an envelope nobody can prove was recorded is
-	// never served.
+	// never served. The epochs bytes are frozen for the seq first.
+	if epochs != nil {
+		if err := ps.freezeEpochs(ctx, sb.seq, epochs); err != nil {
+			b.fail(ctx, last.Seq, kid, err)
+			return
+		}
+	}
 	if err := b.state.put(ctx, stateSigned, strconv.FormatInt(sb.seq, 10)+":"+fp); err != nil {
 		b.fail(ctx, last.Seq, kid, err)
 		return

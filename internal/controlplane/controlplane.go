@@ -671,6 +671,12 @@ func (s *Server) Handler() http.Handler {
 			_, _ = w.Write([]byte("degraded: bundle signing failed\n"))
 			degraded = true
 		}
+		if s.policy.perUserStale() {
+			// The perUserSecrets block in the config is not being served (it fails
+			// the startup checks or cannot be read); the last section stays.
+			_, _ = w.Write([]byte("degraded: perUserSecrets stale\n"))
+			degraded = true
+		}
 		if s.WorkerCADegraded() {
 			// /policy and the rest serve; the worker CA is not issuing.
 			_, _ = w.Write([]byte("degraded: worker_ca key unavailable\n"))

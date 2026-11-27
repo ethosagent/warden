@@ -236,6 +236,10 @@ func authzTable() map[routeKey]authzRow {
 		{get, tokenSessionsListPath, readRow(admin, "token_sessions.read", none)},
 		{post, tokenSessionsRevokeAllPath, auditedRow(admin, "token_sessions.revoke_all", auditTargetTokenSessions, none)},
 		{post, tokenSessionRevokePath, auditedRow(admin, "token_sessions.revoke", auditTargetTokenSessions, none)},
+		// Per-user secrets block (W-P3-PUS-08): admin only; ScopeNone, so no API
+		// key reaches it. The writer repeats the admin check and applies the
+		// workers_lack_capability rollout guard.
+		{put, perUserSecretsPath, auditedRow(admin, "per_user_secrets.write", auditTargetPerUserSecrets, none)},
 		// API key management (W-P2-APIK-03), served by the control plane itself.
 		// Every row is ScopeNone but /self: no key lists, creates or revokes keys.
 		// The handlers apply the object-level rules (own keys unless admin; create
