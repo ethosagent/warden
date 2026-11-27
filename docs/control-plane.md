@@ -3596,8 +3596,10 @@ poll. A worker backing off after control-plane errors applies it after at most t
 - **Transparent mode.** There is no CONNECT, so only an `X-Warden-Identity` header
   on terminated traffic identifies a user; a transparent connection is tracked
   only once such a header resolves.
-- **Rate limits restart.** Every policy replace resets the rate-limit windows, so a
-  block change resets them fleet-wide.
+- **Rate limits restart.** Every policy replace resets the rate-limit windows of
+  the allowlist entries, so a block change resets them fleet-wide. The per-user
+  limit windows ([policy.md](policy.md)) are the exception: a block change does
+  not reset them.
 
 ### Degraded modes
 
@@ -3677,6 +3679,75 @@ and a changed cap value need no check. `warden policy import` runs offline and
 cannot see connected workers: it refuses a file that adds a cap against the
 head unless `--force` is passed, and the `policy.import` audit row then records
 `force` and `capability`.
+
+## Per-user limits rollout
+
+The rules (`userLimits`, `defaultUserLimit`, `anonymousLimit`) are documented in
+[policy.md](policy.md): the tiers, `perAgent`, the anonymous bucket, why a strict
+guarantee needs identity mode `require`, per-worker rate limits (N workers allow
+up to N times the rate), the cost overshoot bound, raw-tunnel handling, estimated
+(not billed) spend, the UTC-day reset and the NTP requirement. This section is
+the operator side on the control plane.
+
+**Order.** Control plane first, then workers; only then save the first rule.
+
+1. Upgrade the control plane. Until a rule is saved nothing changes: `/policy`
+   and its ETag are byte-identical.
+2. Upgrade the workers. A worker advertises `userlimits/v1` (it enforces rate
+   limits and understands the rule keys) and `usercost/v1` (it enforces
+   `dailyCostUSD` and `costBlockedUsers`) on its heartbeat. An older worker
+   refuses a whole policy wire that carries a limit rule and freezes on its last
+   good policy, and fails open on cost caps.
+3. Check the fleet view (`GET /dashboard/api/workers`, the Workers tab) shows both
+   capabilities on every worker you rely on. The Users usage view also warns when
+   a connected worker lacks `userlimits/v1`.
+4. Save the rules. A save that adds a rule with a `rateLimit` answers
+   `409 workers_lack_capability` (`userlimits/v1`) while a worker lacks it, and one
+   that adds or sets `dailyCostUSD` does the same for `usercost/v1` (see the
+   rollout guard above). The guards run in one fixed order (identity require
+   mode, `userlimits/v1`, `usercost/v1`) so every writer names the same first 409.
+   `?force=true` by an admin goes through; the admin audit row accumulates every
+   forced capability and the workers lacking it.
+
+Changing `userLimits`, `defaultUserLimit` or `anonymousLimit` is a widening edit
+for the two-person rule (a rule can move a user to a looser budget), so with
+approvals on it is held for review.
+
+### How the pieces fit
+
+- Workers forward every event with `agent_id` and `limit_rule` to
+  `/central/ingest`. The control plane keeps a per-user daily rollup
+  (`user_usage_daily`, 35 days, independent of events retention) updated in the
+  same transaction as the event insert, so a retried batch never double counts.
+- The cost aggregator (above) turns today's rollup into `costBlockedUsers`.
+  Time from the last over-cap request to a block on another worker: the worker's
+  forward interval, plus up to the 30 s recompute debounce, plus one policy
+  long-poll cycle. The block survives a worker or control plane restart (the
+  worker ledger is reseeded from local events; the control plane persists its last
+  good list) and lapses at the next UTC midnight on each worker, even with the
+  control plane stopped.
+- Two enforcement points never share state: a worker's rate buckets and its
+  ledger are its own. Only the cost block list moves between workers.
+
+### The Users usage view
+
+`GET /dashboard/api/usage/users?window=24h|7d|30d&sort=cost|requests&limit=` (role
+viewer, or an API key with `traffic:read`) returns per user: requests, denies by
+reason (`user_rate_limited`, `user_cost_limited`, ...), estimated cost, top
+agents, the matched rule, its cap, today's spend and whether the user is
+cost-blocked, plus the anonymous (unattributed) totals. It reads the fleet rollup,
+so it answers `404 usage_unavailable` when the control plane's analytics store
+cannot produce it. Responses are cached for 30 s per (window, sort, limit). Claims are
+rendered with text, never HTML, and no metric label carries a sub or email.
+Drill down with `?user=` on the traffic view.
+
+### Known limits
+
+- Costs are estimates (bytes/4 at the built-in prices), not invoices.
+- A gRPC call refused after its response headers is not charged to the ledger
+  (see policy.md); a follow-up closes it.
+- With `--analytics-provider memory` the control plane publishes no cost blocks: each
+  worker's own ledger is the only cap.
 
 ## What's deliberately not here (yet)
 
