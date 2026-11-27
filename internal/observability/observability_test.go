@@ -410,3 +410,49 @@ func TestBundleMetricsNilSafe(t *testing.T) {
 	m.RecordBundleRejected("bad_signature")
 	m.SetBundleState(1, time.Second, true)
 }
+
+// TestUserLimitMetrics: warden.user_limit.denied.total carries only the
+// bounded kind (anything else is "other"), and the bucket gauge and the
+// bucket-table-full counter are unlabelled observables read on each scrape.
+func TestUserLimitMetrics(t *testing.T) {
+	m, h, shutdown := newWithHandler(t)
+	defer func() { _ = shutdown(context.Background()) }()
+
+	for _, k := range []string{"rate", "rate", "cost", "unmeasurable", "alice@corp.example"} {
+		m.RecordUserLimitDenied(k)
+	}
+	if err := m.RegisterUserLimitBuckets(func() int64 { return 7 }, func() int64 { return 3 }); err != nil {
+		t.Fatal(err)
+	}
+	body := scrape(t, h)
+	for _, want := range []string{
+		`warden_user_limit_denied_total{kind="rate",`,
+		`warden_user_limit_denied_total{kind="cost",`,
+		`warden_user_limit_denied_total{kind="unmeasurable",`,
+		`warden_user_limit_denied_total{kind="other",`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape lacks %s\n%s", want, body)
+		}
+	}
+	var gauge, capped bool
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "warden_user_limit_buckets") && strings.HasSuffix(line, " 7") {
+			gauge = true
+		}
+		if strings.HasPrefix(line, "warden_user_limit_bucket_cap_denied_total") && strings.HasSuffix(line, " 3") {
+			capped = true
+		}
+	}
+	if !gauge || !capped {
+		t.Errorf("bucket gauge %v, cap counter %v\n%s", gauge, capped, body)
+	}
+	if strings.Contains(body, "alice") || strings.Contains(body, "sub=") || strings.Contains(body, "email=") {
+		t.Errorf("a user-limit series carries identity\n%s", body)
+	}
+	var nilM *Metrics
+	nilM.RecordUserLimitDenied("rate")
+	if err := nilM.RegisterUserLimitBuckets(nil, nil); err != nil {
+		t.Errorf("nil Register = %v", err)
+	}
+}

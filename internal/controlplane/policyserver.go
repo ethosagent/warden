@@ -272,6 +272,11 @@ func (ps *policyServer) refresh(resign bool) {
 		}
 		return
 	}
+	if head > 0 {
+		// File mode lints the loaded file (loadFile); a versioned head is
+		// linted here, when it is applied.
+		ps.lintServed(wire)
+	}
 	etag := etagFor(wire)
 	ps.recordPublish(ctx, head, etag, fps)
 	ps.watch.set(wire, etag, fps)
@@ -507,6 +512,39 @@ func (ps *policyServer) loadFile() (policyWire, error) {
 	// returns nil when the config is pure allow/deny, so the "settings" key stays
 	// absent in that case (back-compat).
 	return policyWireOfPolicy(p), nil
+}
+
+// lintServed logs config.LintUserLimits for a served versioned head, each
+// distinct warning once. The identity modes come from the head's settings.
+// Whether a worker has a CA is known only to that worker, which lints its own
+// effective config, so the CA warning is not raised here.
+func (ps *policyServer) lintServed(w policyWire) {
+	if len(w.UserLimits) == 0 && w.DefaultUserLimit == nil && w.AnonymousLimit == nil {
+		return
+	}
+	for _, msg := range config.LintUserLimits(lintPolicyOfWire(w)) {
+		if _, dup := ps.lintWarned.LoadOrStore(msg, struct{}{}); !dup {
+			ps.logger.Warn("control plane: " + msg)
+		}
+	}
+}
+
+// lintPolicyOfWire is the policy LintUserLimits needs from a served wire: the
+// limit rules plus the agents' and the default identity modes.
+func lintPolicyOfWire(w policyWire) config.Policy {
+	p := policyOfWire(w)
+	// A non-empty CA path only switches off the per-worker CA warning (see
+	// lintServed); nothing reads the value.
+	p.TLS.CACert = "per-worker"
+	if w.Settings != nil {
+		if w.Settings.Identity != nil {
+			p.Identity = *w.Settings.Identity
+		}
+		for _, a := range w.Settings.Agents {
+			p.Agents = append(p.Agents, config.AgentPolicy{ID: a.ID, Policy: a.Policy, Identity: a.Identity})
+		}
+	}
+	return p
 }
 
 // ServePolicy serves the current allow/deny policy with ETag-based long-poll.
