@@ -552,6 +552,38 @@ func (m *Metrics) RegisterUserLimitBuckets(buckets func() int64, capDenied func(
 	return nil
 }
 
+// RegisterUserCostLedger registers the worker's per-user cost ledger
+// counters (W-P3-PUL-04), read on each collection: ledger keys refused because
+// the ledger was full (those users are refused, fail closed), and boot-time
+// ledger seeds from the local store that failed (the ledger then started
+// empty, fail open). Unlabelled: never a sub, email, group or rule. Nil-safe.
+func (m *Metrics) RegisterUserCostLedger(refused func() int64, seedFailures func() int64) error {
+	if m == nil {
+		return nil
+	}
+	if _, err := m.meter.Int64ObservableCounter(
+		"warden.user_cost.ledger_refused.total",
+		metric.WithDescription("New per-user cost ledger keys refused (fail closed) because the ledger was full."),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(refused())
+			return nil
+		}),
+	); err != nil {
+		return fmt.Errorf("observability: user cost ledger refused counter: %w", err)
+	}
+	if _, err := m.meter.Int64ObservableCounter(
+		"warden.user_cost.seed_failures.total",
+		metric.WithDescription("Boot-time seeds of the per-user cost ledger from the local store that failed; the ledger started empty."),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(seedFailures())
+			return nil
+		}),
+	); err != nil {
+		return fmt.Errorf("observability: user cost seed failures counter: %w", err)
+	}
+	return nil
+}
+
 const identityOtherVal = "other"
 
 var (

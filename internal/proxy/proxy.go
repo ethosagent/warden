@@ -486,6 +486,9 @@ type Proxy struct {
 	// is process-wide (not per-connection) so a degraded control is visible
 	// without log spam.
 	wsDowngradeOnce sync.Once
+	// ledgerFullOnce guards a single WARN when the per-user cost ledger is
+	// full and a new user is refused (fail closed, W-P3-PUL-04).
+	ledgerFullOnce sync.Once
 
 	// sessions is the open-session registry CloseBlockedSessions cuts from.
 	sessions *sessionRegistry

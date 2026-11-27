@@ -501,12 +501,12 @@ func (e *Evaluator) userLimit(rc RequestContext, agentID string, peek bool) Requ
 	}
 	r, truncated := ls.match(rc.Subject, agentID, NormalizeHost(rc.Domain))
 	if truncated {
-		return RequestVerdict{Decision: Deny, Reason: denyreason.IdentityGroupsTruncated, LimitRule: r.name}
+		return RequestVerdict{Decision: Deny, Reason: denyreason.IdentityGroupsTruncated, LimitRule: r.name, DailyCostUSD: r.dailyCostUSD}
 	}
 	if r == nil {
 		return RequestVerdict{Decision: Allow}
 	}
-	v := RequestVerdict{Decision: Allow, LimitRule: r.name}
+	v := RequestVerdict{Decision: Allow, LimitRule: r.name, DailyCostUSD: r.dailyCostUSD}
 	if !r.hasRate {
 		return v
 	}

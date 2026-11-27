@@ -705,10 +705,18 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// events so a restart keeps a capped user capped. A failed seed starts it
 	// empty (the cap is soft; fleet cost blocks still apply) and is logged.
 	userCost := cost.NewLedger(clk.Now)
+	var costSeedFailures int64
 	if n, seedErr := seedCostLedger(ctx, store, userCost, agentID); seedErr != nil {
+		costSeedFailures = 1
 		logger.Warn("user cost ledger not seeded from the local store; today's earlier spend is not counted", "error", seedErr)
 	} else if n > 0 {
 		logger.Debug("user cost ledger seeded", "keys", n)
+	}
+	if ucErr := metrics.RegisterUserCostLedger(
+		func() int64 { return int64(userCost.Refused()) },
+		func() int64 { return costSeedFailures },
+	); ucErr != nil {
+		logger.Warn("user cost metrics not registered", "error", ucErr)
 	}
 
 	// Optional auth transforms (OAuth2 / SigV4 / HMAC / API-key) per destination.

@@ -158,6 +158,10 @@ type requestScope struct {
 	costCapped  bool
 	costCharged bool
 	costKey     cost.LedgerKey
+	// peekRule and peekCostUSD are the rule userLimitStage peeked and its
+	// dailyCostUSD, so the charge re-checks the cost cap without a match.
+	peekRule    string
+	peekCostUSD float64
 
 	judgeReason string
 	wasMCP      bool

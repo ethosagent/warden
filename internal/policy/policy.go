@@ -102,6 +102,9 @@ type RequestVerdict struct {
 	// RetryAfter is how long until the applied rule's rate window ends, set on
 	// a user_rate_limited deny only.
 	RetryAfter time.Duration
+	// DailyCostUSD is the dailyCostUSD of the rule LimitRule names (0: no cost
+	// cap), so the worker's cost cap (W-P3-PUL-04) needs no second match.
+	DailyCostUSD float64
 }
 
 // RequestContext is everything the evaluator needs to decide one request for

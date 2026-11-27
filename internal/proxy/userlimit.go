@@ -126,39 +126,79 @@ type userCostCheck struct {
 	v      policy.RequestVerdict
 }
 
-// userCost checks the cost cap that applies to subj on domain. opaque says
-// the traffic cannot be measured at all (a tunnel); req, when set, is the
-// request, unmeasurable when it is a WebSocket upgrade. With no ledger, or a
-// destination the estimator does not track, it does nothing and allocates
-// nothing.
-func (p *Proxy) userCost(subj *identity.Subject, domain string, req *http.Request, opaque bool) (c userCostCheck) {
-	l := p.cfg.UserCost
-	if l == nil || p.cfg.Cost == nil {
-		return c
+// costTracked reports whether a cost cap can apply on domain at all: the
+// ledger is wired and the estimator prices the destination.
+func (p *Proxy) costTracked(domain string) bool {
+	if p.cfg.UserCost == nil || p.cfg.Cost == nil {
+		return false
 	}
-	if _, tracked := p.cfg.Cost.Tracks(domain); !tracked {
+	_, tracked := p.cfg.Cost.Tracks(domain)
+	return tracked
+}
+
+// userCost checks the cost cap that applies to subj on domain at a
+// connection-level site (no rate verdict to read the rule from), matching the
+// rule itself. opaque says the traffic cannot be measured at all (a tunnel).
+// With no ledger, or a destination the estimator does not track, it does
+// nothing and allocates nothing.
+func (p *Proxy) userCost(subj *identity.Subject, domain string, opaque bool) (c userCostCheck) {
+	if !p.costTracked(domain) {
 		return c
 	}
 	r, ok := p.cfg.Policy.MatchUserLimit(subj, p.cfg.AgentID, domain)
-	if !ok || r.DailyCostUSD <= 0 {
+	if !ok {
+		return c
+	}
+	return p.checkCostCap(subj, r.Name, r.DailyCostUSD, nil, opaque)
+}
+
+// userCostRule checks the cost cap of rule (capped at capUSD, the rate
+// verdict's DailyCostUSD) for a request to domain: the request path reads the
+// rule from its peek or charge, so the rule is matched once. req, when set, is
+// unmeasurable when it is a WebSocket upgrade.
+func (p *Proxy) userCostRule(subj *identity.Subject, domain, rule string, capUSD float64, req *http.Request) (c userCostCheck) {
+	if capUSD <= 0 || !p.costTracked(domain) {
+		return c
+	}
+	return p.checkCostCap(subj, rule, capUSD, req, false)
+}
+
+// noteLedgerFull warns once that the cost ledger is full: new users under a
+// cost cap are refused until UTC midnight (warden.user_cost.ledger_refused
+// counts them). No user is named.
+func (p *Proxy) noteLedgerFull() {
+	p.ledgerFullOnce.Do(func() {
+		p.cfg.Logger.Warn("per-user cost ledger is full; new users under a cost cap are refused until UTC midnight",
+			"max_keys", cost.MaxLedgerKeys)
+	})
+}
+
+// checkCostCap is the cap check proper, for a tracked destination with the
+// ledger wired.
+func (p *Proxy) checkCostCap(subj *identity.Subject, rule string, capUSD float64, req *http.Request, opaque bool) (c userCostCheck) {
+	if capUSD <= 0 {
 		return c
 	}
 	var sub string
 	if subj != nil {
 		sub = subj.Sub
 	}
-	c.capped, c.key = true, cost.UserKey(sub, p.cfg.AgentID, r.Name)
+	c.capped, c.key = true, cost.UserKey(sub, p.cfg.AgentID, rule)
 	if opaque || (req != nil && isWebSocketUpgrade(req.Header)) {
 		c.denied = true
-		c.v = policy.RequestVerdict{Decision: policy.Deny, Reason: denyreason.UserCostUnmeasurable, LimitRule: r.Name}
+		c.v = policy.RequestVerdict{Decision: policy.Deny, Reason: denyreason.UserCostUnmeasurable, LimitRule: rule}
 		return c
 	}
+	l := p.cfg.UserCost
 	now := l.Now()
 	spent, known := l.Spent(c.key)
-	if !known || spent >= r.DailyCostUSD || p.cfg.Policy.IsCostBlocked(sub, r.Name, now) {
+	if !known {
+		p.noteLedgerFull()
+	}
+	if !known || spent >= capUSD || p.cfg.Policy.IsCostBlocked(sub, rule, now) {
 		c.denied = true
 		c.v = policy.RequestVerdict{
-			Decision: policy.Deny, Reason: denyreason.UserCostLimited, LimitRule: r.Name,
+			Decision: policy.Deny, Reason: denyreason.UserCostLimited, LimitRule: rule,
 			RetryAfter: cost.NextUTCMidnight(now).Sub(now),
 		}
 	}
@@ -221,12 +261,11 @@ func (p *Proxy) userLimitStage(s *requestScope) (endSession bool) {
 	if v.Decision == policy.Deny {
 		return p.denyUserLimit(s, v)
 	}
-	// No rule applies (always the case with no limits configured): no cost
-	// cap either.
-	if v.LimitRule != "" {
-		if c := p.userCost(s.subject, s.domain, s.req, false); c.denied {
-			return p.denyUserLimit(s, c.v)
-		}
+	// The peeked rule's cost cap (none when no rule applies, always the case
+	// with no limits configured). The charge re-checks it with this rule.
+	s.peekRule, s.peekCostUSD = v.LimitRule, v.DailyCostUSD
+	if c := p.userCostRule(s.subject, s.domain, v.LimitRule, v.DailyCostUSD, s.req); c.denied {
+		return p.denyUserLimit(s, c.v)
 	}
 	// A peek is not a charge: limit_rule is set only once the request is
 	// charged, so a request refused later carries none.
@@ -244,17 +283,26 @@ func (p *Proxy) chargeUserLimitNow(s *requestScope) (denied bool) {
 		return false
 	}
 	s.chargeLimit = false
-	// The cost cap first: a request it refuses consumes no rate budget.
-	c := p.userCost(s.subject, s.domain, s.req, false)
-	if c.denied {
+	// The cost cap first, under the peeked rule: a request it refuses
+	// consumes no rate budget.
+	if c := p.userCostRule(s.subject, s.domain, s.peekRule, s.peekCostUSD, s.req); c.denied {
 		return p.denyUserLimit(s, c.v)
 	}
-	s.costCapped, s.costKey = c.capped, c.key
 	v := p.cfg.Policy.ChargeUserLimit(p.userLimitRC(s), p.cfg.AgentID)
 	// Set before any event of this request is recorded (the deny below and the
 	// allow at the end both read it).
 	s.limitRule = v.LimitRule
 	if v.Decision != policy.Deny {
+		// The charged rule's cost cap names the ledger key the estimate is
+		// added to (the charged rule, should a reload have changed it since
+		// the peek).
+		if v.DailyCostUSD > 0 && p.costTracked(s.domain) {
+			var sub string
+			if s.subject != nil {
+				sub = s.subject.Sub
+			}
+			s.costCapped, s.costKey = true, cost.UserKey(sub, p.cfg.AgentID, v.LimitRule)
+		}
 		return false
 	}
 	return p.denyUserLimit(s, v)
@@ -286,7 +334,7 @@ func (p *Proxy) denyUserLimit(s *requestScope, v policy.RequestVerdict) bool {
 // checked.
 func (p *Proxy) connUserLimit(ci connIdentity, domain string, port int, charge, opaque bool) policy.RequestVerdict {
 	subj := p.connSubject(ci)
-	if c := p.userCost(subj, domain, nil, opaque); c.denied {
+	if c := p.userCost(subj, domain, opaque); c.denied {
 		return c.v
 	}
 	rc := policy.RequestContext{Domain: domain, Port: port, Scheme: policy.SchemeHTTPS, Subject: subj}

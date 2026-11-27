@@ -557,3 +557,25 @@ func TestUserCostCap_TerminatedHostSpellings(t *testing.T) {
 		})
 	}
 }
+
+// fullLedger is a cost ledger with no room: every key reads untracked.
+type fullLedger struct{ now time.Time }
+
+func (fullLedger) Add(cost.LedgerKey, float64)          {}
+func (fullLedger) Spent(cost.LedgerKey) (float64, bool) { return 0, false }
+func (l fullLedger) Now() time.Time                     { return l.now }
+
+// A full ledger fails closed: a new user under a cost cap is refused with
+// user_cost_limited, and the worker warns once.
+func TestUserCostCap_LedgerFullFailsClosed(t *testing.T) {
+	e := newCostEnv(t, config.Policy{UserLimits: []config.UserLimit{costEngRule(5)}}, func(c *Config) {
+		c.UserCost = fullLedger{now: costNoon}
+	})
+	for i := 0; i < 2; i++ {
+		resp, body := e.h1To(costHost, "").get(aliceHdr)
+		assertCostLimited(t, e, resp, body)
+	}
+	if n := strings.Count(e.logs.String(), "per-user cost ledger is full"); n != 1 {
+		t.Errorf("ledger-full WARN logged %d times, want 1", n)
+	}
+}
