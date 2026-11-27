@@ -172,6 +172,10 @@ func (a policyApplier) publishDraft(ctx context.Context, d approvals.Draft, clr 
 				return err
 			}
 		}
+		// Likewise a draft that introduces a per-user rate limit.
+		if err := a.s.userLimitsGuard(ctx, *w, docWire(doc)); err != nil {
+			return err
+		}
 		w.Allowlist, w.Denylist, w.Settings = doc.Allowlist, doc.Denylist, doc.Settings
 		w.UserLimits, w.DefaultUserLimit, w.AnonymousLimit = doc.UserLimits, doc.DefaultUserLimit, doc.AnonymousLimit
 		return nil

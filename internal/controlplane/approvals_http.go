@@ -92,7 +92,11 @@ func (a changeDraftAPI) changeErr(ctx context.Context, err error) error {
 	case errors.As(err, &ce):
 		return err
 	case errors.As(err, &wl):
-		return fail(http.StatusConflict, "workers_lack_capability", map[string]any{"workers": wl.Workers})
+		f := map[string]any{"workers": wl.Workers}
+		if wl.Capability != "" {
+			f["capability"] = wl.Capability
+		}
+		return fail(http.StatusConflict, "workers_lack_capability", f)
 	case errors.Is(err, approvals.ErrNotFound):
 		return fail(http.StatusNotFound, "not_found", nil)
 	case errors.Is(err, errNotAuthor):
