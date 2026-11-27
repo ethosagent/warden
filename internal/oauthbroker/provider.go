@@ -114,6 +114,7 @@ type Provider struct {
 	// hinted and blockedLogged rate-limit the operator log lines to one per
 	// provider until a refresh succeeds.
 	hinted, blockedLogged atomic.Bool
+	revokeBlockedLogged   atomic.Bool
 }
 
 // RevokeEndpoint returns RevokeURL with {client_id} replaced by the

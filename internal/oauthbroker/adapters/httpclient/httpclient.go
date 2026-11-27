@@ -107,7 +107,11 @@ func (p *Poster) Do(ctx context.Context, r oauthbroker.Request) (int, []byte, er
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, MaxBodyBytes+1))
+	limit := int64(MaxBodyBytes)
+	if r.MaxBytes > 0 && r.MaxBytes < MaxBodyBytes {
+		limit = int64(r.MaxBytes)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return 0, nil, err
 	}

@@ -102,3 +102,18 @@ func TestDoDeleteWithBodyAndHardening(t *testing.T) {
 		t.Fatalf("loopback must be blocked for Do too: %v", err)
 	}
 }
+
+func TestDoHonoursMaxBytes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, strings.Repeat("x", 5000))
+	}))
+	defer srv.Close()
+	c, err := New([]string{"127.0.0.0/8"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, b, err := c.Do(t.Context(), oauthbroker.Request{Method: http.MethodPost, URL: srv.URL, MaxBytes: 100})
+	if err != nil || len(b) != 101 {
+		t.Fatalf("read must stop at MaxBytes+1: len=%d err=%v", len(b), err)
+	}
+}

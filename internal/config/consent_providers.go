@@ -242,6 +242,18 @@ func validateOAuthProvider(i int, p OAuthProviderConfig) error {
 			return err
 		}
 	}
+	if (p.Type == OAuthProviderGitHub || p.Type == OAuthProviderGitHubApp) && p.RevokeURL == "" {
+		// The built-in revoke URL is api.github.com; against a GitHub
+		// Enterprise Server it would answer 404 and leave the token live.
+		for _, u := range []struct{ k, v string }{{"authURL", p.AuthURL}, {"tokenURL", p.TokenURL}} {
+			if u.v == "" {
+				continue
+			}
+			if pu, err := url.Parse(u.v); err != nil || !strings.EqualFold(pu.Hostname(), "github.com") {
+				return fmt.Errorf("config: %s is required: revokeURL is required for GitHub Enterprise (%s is not on github.com)", f("revokeURL"), f(u.k))
+			}
+		}
+	}
 	if p.Type == OAuthProviderGitHubApp && len(p.AllowedScopes) > 0 {
 		return fmt.Errorf("config: %s must be empty for a githubApp provider (permissions come from the app)", f("allowedScopes"))
 	}

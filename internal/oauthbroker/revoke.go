@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -117,7 +119,16 @@ type Request struct {
 	// BasicUser and BasicPass, when BasicUser is set, become the HTTP Basic
 	// Authorization header. Callers form-urlencode them for RFC 6749 clients.
 	BasicUser, BasicPass string
+	// MaxBytes bounds the response read (the adapter reads at most MaxBytes+1
+	// bytes); 0 means the adapter default, MaxProviderResponseBytes.
+	MaxBytes int
 }
+
+// String, GoString and LogValue print a placeholder: a Request holds tokens
+// and client credentials.
+func (Request) String() string       { return redacted }
+func (Request) GoString() string     { return redacted }
+func (Request) LogValue() slog.Value { return slog.StringValue(redacted) }
 
 // Requester is the second narrow provider HTTP port next to FormPoster. It
 // has the same hardening contract (no environment proxy, no redirects, SSRF
@@ -155,6 +166,9 @@ func Revoke(ctx context.Context, p *Provider, rec TokenRecord, clientSecret Secr
 	}
 	status, outcome, err := p.revoke(ctx, rec, clientSecret)
 	p.countRevoke(outcome)
+	if outcome == RevokeOK || outcome == RevokeAlready {
+		p.revokeBlockedLogged.Store(false)
+	}
 	if p.logger != nil {
 		var ms int64
 		if p.now != nil {
@@ -195,10 +209,28 @@ func (p *Provider) revoke(ctx context.Context, rec TokenRecord, secret Secret) (
 	case config.OAuthProviderGitHub, config.OAuthProviderGitHubApp:
 		// GitHub's grant endpoint takes the access token (a refresh token is
 		// not accepted) and the client credentials as basic auth.
-		if rec.AccessToken == "" || secret.IsZero() {
+		access := rec.AccessToken
+		if rec.Expiry > 0 && rec.RefreshToken != "" && p.now != nil && rec.Expiry < p.now().UTC().Unix() {
+			// An expired token would 404 as "already revoked" while the grant
+			// lives on, so mint a fresh access token first. It is not persisted.
+			fresh, rErr := p.refresh(ctx, rec, secret)
+			switch {
+			case rErr == nil:
+				access = fresh.AccessToken
+			case errors.Is(rErr, ErrRefreshInvalidGrant):
+				return 0, RevokeAlready, nil
+			case errors.Is(rErr, ErrBlockedDestination):
+				return 0, RevokeFailed, &RevokeError{Provider: p.ID, blocked: true}
+			case errors.Is(rErr, ErrRefreshRetryable):
+				return 0, RevokeRetryable, &RevokeError{Provider: p.ID, Retryable: true}
+			default:
+				return fail(0)
+			}
+		}
+		if access == "" || secret.IsZero() {
 			return fail(0)
 		}
-		b, mErr := json.Marshal(map[string]string{"access_token": rec.AccessToken})
+		b, mErr := json.Marshal(map[string]string{"access_token": access})
 		if mErr != nil {
 			return fail(0)
 		}
@@ -220,11 +252,12 @@ func (p *Provider) revoke(ctx context.Context, rec TokenRecord, secret Secret) (
 
 	ctx, cancel := context.WithTimeout(ctx, RevokeTimeout)
 	defer cancel()
+	req.MaxBytes = MaxRevokeResponseBytes
 	status, body, derr := rq.Do(ctx, req)
 	if derr != nil {
 		var be *BlockedError
 		if errors.As(derr, &be) {
-			if p.logger != nil && p.blockedLogged.CompareAndSwap(false, true) {
+			if p.logger != nil && p.revokeBlockedLogged.CompareAndSwap(false, true) {
 				p.logger.Error("oauth_revoke_blocked_destination",
 					"provider", p.ID, "reason", be.Reason, "addr_class", be.AddrClass,
 					"hint", "the provider revoke endpoint resolves to an address the SSRF policy refuses")
@@ -242,7 +275,7 @@ func (p *Provider) revoke(ctx context.Context, rec TokenRecord, secret Secret) (
 		return status, RevokeRetryable, &RevokeError{Provider: p.ID, Status: status, Retryable: true}
 	case status >= 200 && status < 300:
 		return status, RevokeOK, nil
-	case status == 404 && p.Type != config.OAuthProviderGoogle && p.Type != config.OAuthProviderGeneric:
+	case status == 404 && p.githubNotFound(body):
 		return status, RevokeAlready, nil
 	case status == 400 && p.Type != config.OAuthProviderGitHub && p.Type != config.OAuthProviderGitHubApp:
 		var e struct {
@@ -253,4 +286,28 @@ func (p *Provider) revoke(ctx context.Context, rec TokenRecord, secret Secret) (
 		}
 	}
 	return fail(status)
+}
+
+// githubNotFound reports whether a 404 from a github or githubApp revoke means
+// "the app has no grant for this token". A 404 from anywhere else (a wrong
+// host, a proxy, an HTML error page) is a failure: it must not be taken for
+// success while the token stays live. The revoke host must be the token host
+// or, for the built-in pair, api.github.com next to github.com.
+func (p *Provider) githubNotFound(body []byte) bool {
+	if p.Type != config.OAuthProviderGitHub && p.Type != config.OAuthProviderGitHubApp {
+		return false
+	}
+	ru, err1 := url.Parse(p.RevokeEndpoint())
+	tu, err2 := url.Parse(p.TokenURL)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	rh, th := ru.Hostname(), tu.Hostname()
+	if !strings.EqualFold(rh, th) && !(strings.EqualFold(th, "github.com") && strings.EqualFold(rh, "api.github.com")) {
+		return false
+	}
+	var e struct {
+		Message string `json:"message"`
+	}
+	return json.Unmarshal(body, &e) == nil && e.Message == "Not Found"
 }
