@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ethosagent/warden/internal/portal"
@@ -186,7 +187,7 @@ func (p *portalService) requireSession(next http.Handler) http.Handler {
 			Groups: sc.sess.Groups, SessionHash: sc.sess.IDHash,
 		})
 		ctx = context.WithValue(ctx, portalSessionKey{}, sc)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, p.stripConsoleCredentials(r.WithContext(ctx)))
 	})
 }
 
@@ -194,7 +195,7 @@ func (p *portalService) requireSession(next http.Handler) http.Handler {
 // request's path and query when the login flow would accept them, else ""
 // (the portal home).
 func (p *portalService) loginNext(r *http.Request) string {
-	next := r.URL.Path
+	next := r.URL.EscapedPath()
 	if r.URL.RawQuery != "" {
 		next += "?" + r.URL.RawQuery
 	}
@@ -202,6 +203,31 @@ func (p *portalService) loginNext(r *http.Request) string {
 		return ""
 	}
 	return next
+}
+
+// stripConsoleCredentials returns r without the credentials a portal handler
+// must never act on: the Authorization header (WARDEN_CP_TOKEN, worker
+// tokens, wak_ keys) and the console session cookie. The header map is
+// cloned, so the caller's request is unchanged.
+func (p *portalService) stripConsoleCredentials(r *http.Request) *http.Request {
+	r2 := *r
+	r2.Header = r.Header.Clone()
+	r2.Header.Del("Authorization")
+	if p.consoleCookie != "" {
+		cookies := r.Cookies()
+		r2.Header.Del("Cookie")
+		parts := make([]string, 0, len(cookies))
+		for _, c := range cookies {
+			if c.Name == p.consoleCookie {
+				continue
+			}
+			parts = append(parts, (&http.Cookie{Name: c.Name, Value: c.Value}).String())
+		}
+		if len(parts) > 0 {
+			r2.Header.Set("Cookie", strings.Join(parts, "; "))
+		}
+	}
+	return &r2
 }
 
 func safeMethod(m string) bool {

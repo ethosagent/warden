@@ -68,6 +68,9 @@ type portalService struct {
 	// audit records a callback's outcome in the admin audit log
 	// (Server.recordPortalLogin); nil when admin audit is disabled.
 	audit func(*http.Request, portalLoginResult)
+	// consoleCookie is the console session cookie's name, stripped from a
+	// request before a portal handler sees it ("" without console sessions).
+	consoleCookie string
 	// auditLogout records a portal logout (Server.recordPortalLogout); nil
 	// when admin audit is disabled.
 	auditLogout func(r *http.Request, p portal.Principal, status int)
@@ -81,7 +84,7 @@ func (s *Server) initPortal() {
 		return
 	}
 	cc := *s.cfg.Consent
-	p := &portalService{cfg: cc, blocks: s.blocks, logger: s.cfg.Logger}
+	p := &portalService{cfg: cc, blocks: s.blocks, logger: s.cfg.Logger, consoleCookie: s.sessionCookie.Name}
 	s.portal = p
 	cookie, err := webauth.NewCookie(cc.OIDC.RedirectURL, portal.SessionCookieBase)
 	if err != nil {

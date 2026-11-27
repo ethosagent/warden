@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/portal"
 	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/internal/webauth"
 	"github.com/ethosagent/warden/test/fakes"
@@ -53,18 +54,19 @@ func TestPortalConsoleIsolation(t *testing.T) {
 	decodeMe(t, r.serve(http.MethodGet, "/portal/api/me", pc))
 
 	t.Run("portal cookie opens no console route", func(t *testing.T) {
-		// Every /dashboard/api/* route of the authz table and every /central/*
-		// and /auth/me route of the control plane's own table, with the portal
-		// cookie, the portal's CSRF token and the portal's Origin.
+		// Every route of the authz table (the whole /dashboard/ surface) and
+		// every /central/* and /auth/* row of the control plane's own table,
+		// with the portal cookie, the portal's CSRF token and the portal's
+		// Origin. An API route answers 401; an HTML page may instead send the
+		// browser to the console sign-in. Nothing answers 2xx on the strength
+		// of the portal session.
 		type route struct{ method, path string }
 		var routes []route
 		for k := range authzTable() {
-			if strings.HasPrefix(k.Path, "/dashboard/api/") {
-				routes = append(routes, route{k.Method, k.Path})
-			}
+			routes = append(routes, route{k.Method, k.Path})
 		}
 		for k := range cpRouteTable() {
-			if strings.HasPrefix(k.Path, "/central/") || k.Path == "/auth/me" {
+			if strings.HasPrefix(k.Path, "/central/") || strings.HasPrefix(k.Path, "/auth/") {
 				routes = append(routes, route{k.Method, k.Path})
 			}
 		}
@@ -73,6 +75,7 @@ func TestPortalConsoleIsolation(t *testing.T) {
 			t.Fatalf("walked only %d routes; the tables look wrong", len(routes))
 		}
 		hdr := map[string]string{CSRFHeader: portalCSRF(pc), "Origin": portalOrigin, "Content-Type": "application/json"}
+		consoleRows := len(r.srv.sessionsRowsForTest(t))
 		for _, rt := range routes {
 			path := concretePath(rt.path)
 			// The same portal session id pasted into the console cookie name is
@@ -80,10 +83,17 @@ func TestPortalConsoleIsolation(t *testing.T) {
 			pasted := &http.Cookie{Name: r.srv.sessionCookie.Name, Value: pc.Value}
 			for name, c := range map[string]*http.Cookie{"portal cookie": pc, "portal id as console cookie": pasted} {
 				rec := r.portalReq(rt.method, path, "{}", hdr, c)
-				if rec.Code != http.StatusUnauthorized {
-					t.Errorf("%s %s with the %s = %d %s, want 401", rt.method, path, name, rec.Code, strings.TrimSpace(rec.Body.String()))
+				if !portalRefusedOnConsole(rt.path, rec) {
+					t.Errorf("%s %s with the %s = %d %s %q, want 401 (or a redirect to sign-in)",
+						rt.method, path, name, rec.Code, rec.Header().Get("Location"), strings.TrimSpace(rec.Body.String()))
 				}
 			}
+		}
+		// Walking the console's auth routes neither ended the portal session
+		// nor minted a console one.
+		decodeMe(t, r.serve(http.MethodGet, "/portal/api/me", pc))
+		if n := len(r.srv.sessionsRowsForTest(t)); n != consoleRows {
+			t.Fatalf("console sessions %d -> %d after the walk", consoleRows, n)
 		}
 	})
 
@@ -105,20 +115,39 @@ func TestPortalConsoleIsolation(t *testing.T) {
 			"wak_ API key":                {hdr: map[string]string{"Authorization": "Bearer wak_" + strings.Repeat("b", 40)}},
 			"portal id as console cookie": {cookies: []*http.Cookie{{Name: r.srv.sessionCookie.Name, Value: pc.Value}}},
 		}
-		for name, tc := range cases {
-			if rec := r.portalReq(http.MethodGet, "/portal/api/me", "", tc.hdr, tc.cookies...); rec.Code != http.StatusUnauthorized {
-				t.Errorf("GET /portal/api/me with %s = %d, want 401", name, rec.Code)
+		// Every /portal row of the control plane's table but the public ones
+		// (sign-in, callback, the stub page), which need no session.
+		public := map[string]bool{portalLoginPath: true, portalCallbackPath: true, portalHomePath: true}
+		var routes []routeKey
+		for k := range cpRouteTable() {
+			if (k.Path == "/portal" || strings.HasPrefix(k.Path, "/portal/")) && !public[k.Path] {
+				routes = append(routes, k)
 			}
+		}
+		if len(routes) < 3 {
+			t.Fatalf("walked only %d portal rows", len(routes))
+		}
+		for name, tc := range cases {
 			hdr := map[string]string{CSRFHeader: consoleCSRF}
 			for k, v := range tc.hdr {
 				hdr[k] = v
 			}
-			if rec := r.portalReq(http.MethodPost, "/portal/logout", "", hdr, tc.cookies...); rec.Code != http.StatusUnauthorized {
-				t.Errorf("POST /portal/logout with %s = %d, want 401", name, rec.Code)
-			}
-			// A browser page load is sent to the portal sign-in, not let in.
-			if rec := r.portalReq(http.MethodGet, "/portal/connect/abc", "", tc.hdr, tc.cookies...); rec.Code != http.StatusFound {
-				t.Errorf("GET /portal/connect/abc with %s = %d, want 302 to sign-in", name, rec.Code)
+			for _, rt := range routes {
+				path := concretePath(rt.Path)
+				// Every method each row could see: its own and a write.
+				for _, m := range []string{rt.Method, http.MethodPost} {
+					rec := r.portalReq(m, path, "", hdr, tc.cookies...)
+					want := http.StatusUnauthorized
+					if portal.SignedOutRedirects(m, path) {
+						want = http.StatusFound
+					}
+					if rec.Code != want {
+						t.Errorf("%s %s with %s = %d, want %d", m, path, name, rec.Code, want)
+					}
+					if want == http.StatusFound && !strings.HasPrefix(rec.Header().Get("Location"), portalLoginPath) {
+						t.Errorf("%s %s with %s redirected to %q, want the portal sign-in", m, path, name, rec.Header().Get("Location"))
+					}
+				}
 			}
 		}
 		// The stub page sees no portal user for a console session.
@@ -126,6 +155,34 @@ func TestPortalConsoleIsolation(t *testing.T) {
 			t.Fatal("the portal stub accepted a console session")
 		}
 	})
+}
+
+// portalRefusedOnConsole reports whether a console-side route refused a
+// request that carried only portal credentials. Accepted: 401; a redirect to
+// the console sign-in (an HTML page sends /auth/login?next=, /auth/login
+// itself starts a fresh console login at the issuer, /auth/callback with no
+// console state bounces with login_error=state_invalid); 404 only for
+// /auth/breakglass, which is not mounted without console.breakGlass; and 204
+// only from POST /auth/logout, which with no console session just clears the
+// console cookie (the caller checks the portal session survives and no
+// console session appears). Never any other 2xx.
+func portalRefusedOnConsole(pattern string, rec *httptest.ResponseRecorder) bool {
+	loc := rec.Header().Get("Location")
+	switch {
+	case rec.Code == http.StatusUnauthorized:
+		return true
+	case pattern == "/auth/logout":
+		return rec.Code == http.StatusNoContent
+	case pattern == "/auth/breakglass":
+		return rec.Code == http.StatusNotFound
+	case rec.Code != http.StatusFound:
+		return false
+	case pattern == "/auth/login":
+		return strings.Contains(loc, "client_id="+rigClientID+"&")
+	case pattern == "/auth/callback":
+		return strings.HasSuffix(loc, "login_error=state_invalid")
+	}
+	return strings.HasPrefix(loc, "/auth/login?next=")
 }
 
 // countingPortalStore counts every call the portal middleware makes.
@@ -247,7 +304,7 @@ func TestPortalSessionRevocation(t *testing.T) {
 		if rec := r.serve(http.MethodGet, sessionsPath+"?kind=portal", sam); rec.Code != http.StatusUnauthorized {
 			t.Fatalf("a portal session listing sessions = %d, want 401", rec.Code)
 		}
-		if rec := r.serve(http.MethodGet, sessionsPath+"?kind=bogus", admin); rec.Code != http.StatusBadRequest {
+		if rec := r.serve(http.MethodGet, sessionsPath+"?kind=bogus", admin); rec.Code != http.StatusBadRequest || errBody(t, rec) != "invalid_kind" {
 			t.Fatalf("kind=bogus = %d, want 400", rec.Code)
 		}
 
@@ -332,4 +389,14 @@ func listSessionsVia(t *testing.T, r *portalRig, c *http.Cookie, kind string) (m
 		out[v.Sub] = true
 	}
 	return out, rec.Body.String()
+}
+
+// sessionsRowsForTest lists the console sessions table.
+func (s *Server) sessionsRowsForTest(t *testing.T) []webauth.Session {
+	t.Helper()
+	list, err := s.sessions.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return list
 }

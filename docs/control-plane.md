@@ -1001,7 +1001,9 @@ the portal session middleware (and `/connect/*` will):
 
 - It reads only the `__Host-warden_portal` cookie and `portal_sessions`. A console
   session cookie, the `WARDEN_CP_TOKEN` bearer, a worker token or certificate and a
-  `wak_` API key are never read, so none of them opens a portal route; and the
+  `wak_` API key are never read, so none of them opens a portal route (the
+  `Authorization` header and the console cookie are also stripped before a portal
+  handler runs); and the
   console's middleware never reads the portal cookie, so a portal session gets `401`
   on every `/dashboard/api/*` route, on `/central/secrets` and on `/auth/me`. The
   worker routes (`/policy`, `/control/heartbeat`, `/central/ingest`) never touch the
@@ -1465,7 +1467,7 @@ The *Console sessions* card on the Settings page uses the same API:
   carries `"kind":"portal"`); `?kind=console` or no `kind` is the console. A portal
   revoke by `sub` ends portal sign-ins only (API keys and the IdP link stay) and logs
   `portal_session_revoked`. `404 portal_disabled` when the portal is off; any other
-  `kind` is `400`.
+  `kind` is `400 invalid_kind`.
 
 **The UI follows the role.** After `GET /auth/me` succeeds the dashboard shows the
 signed-in email, the role and a *Log out* button, and hides every control whose

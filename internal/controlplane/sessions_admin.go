@@ -57,7 +57,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		s.handlePortalSessions(w, r, p)
 		return
 	default:
-		writeAuthJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be console or portal"})
+		writeAuthJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_kind", "detail": "kind must be console or portal"})
 		return
 	}
 	switch r.Method {

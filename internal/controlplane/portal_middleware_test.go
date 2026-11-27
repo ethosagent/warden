@@ -57,6 +57,19 @@ func (r *portalRig) probeBehind() http.Handler {
 			http.Error(w, "a console principal reached a portal handler", http.StatusInternalServerError)
 			return
 		}
+		// No console credential reaches a portal handler.
+		if req.Header.Get("Authorization") != "" {
+			http.Error(w, "the Authorization header reached a portal handler", http.StatusInternalServerError)
+			return
+		}
+		if _, err := req.Cookie(r.srv.sessionCookie.Name); err == nil {
+			http.Error(w, "the console cookie reached a portal handler", http.StatusInternalServerError)
+			return
+		}
+		if _, err := req.Cookie(portalCookie); err != nil {
+			http.Error(w, "the portal cookie was dropped", http.StatusInternalServerError)
+			return
+		}
 		_, _ = io.WriteString(w, p.Sub+"|"+req.PostFormValue("provider"))
 	}))
 }
@@ -122,6 +135,22 @@ func TestPortalCSRF(t *testing.T) {
 	}
 	if rec := do(http.MethodPost, "csrf="+url.QueryEscape(tok)+"&provider=google", map[string]string{"Content-Type": form}); rec.Code != http.StatusOK || rec.Body.String() != "pat|google" {
 		t.Fatalf("form token = %d %q, want 200 and the form still readable", rec.Code, rec.Body)
+	}
+	// A bearer and a console cookie sent alongside are stripped before the
+	// handler runs (the probe fails on either); other cookies are kept.
+	req := httptest.NewRequest(http.MethodPost, "/connect/start", nil)
+	req.Header.Set(CSRFHeader, tok)
+	req.Header.Set("Authorization", "Bearer "+dashTestToken)
+	req.AddCookie(c)
+	req.AddCookie(&http.Cookie{Name: r.srv.sessionCookie.Name, Value: "console-id"})
+	req.AddCookie(&http.Cookie{Name: "__Host-warden_connect", Value: "keep"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("request with a bearer and a console cookie = %d %s", rec.Code, rec.Body)
+	}
+	if req.Header.Get("Authorization") == "" {
+		t.Fatal("the caller's request was mutated")
 	}
 	// Safe methods need no token.
 	for _, m := range []string{http.MethodGet, http.MethodHead, http.MethodOptions} {
@@ -306,6 +335,10 @@ func TestPortalRedirectToLogin(t *testing.T) {
 	if rec := r.serve(http.MethodGet, "/portal/connect/abc?x=1"); rec.Header().Get("Location") != "/portal/login?next=%2Fportal%2Fconnect%2Fabc%3Fx%3D1" {
 		t.Fatalf("query not kept in next: %q", rec.Header().Get("Location"))
 	}
+	// An escaped path round-trips as sent, not decoded.
+	if rec := r.serve(http.MethodGet, "/portal/connect/a%2Fb"); rec.Header().Get("Location") != "/portal/login?next=%2Fportal%2Fconnect%2Fa%252Fb" {
+		t.Fatalf("escaped path in next = %q", rec.Header().Get("Location"))
+	}
 	if rec := r.serve(http.MethodHead, "/portal/connect/abc"); rec.Code != http.StatusFound {
 		t.Fatalf("signed-out HEAD = %d, want 302", rec.Code)
 	}
@@ -398,5 +431,50 @@ func TestPortalSessionRoutesNotMounted(t *testing.T) {
 	}
 	if portalMePath != portal.MePath || portalLogoutPath != portal.LogoutPath || !strings.HasPrefix(portal.MePath, portal.APIPrefix) {
 		t.Fatal("the portal session mux patterns drifted from the portal package's paths")
+	}
+}
+
+// TestPortalBlockWatchRevokes: a block another process writes (the offline
+// CLI, through its own BlockStore) ends portal sessions when the watch sees it.
+func TestPortalBlockWatchRevokes(t *testing.T) {
+	r := newPortalRig(t, portalRigOpts{})
+	r.ready()
+	r.idp.SetLogin(fakes.Valid("pat", "pat@example.com"))
+	c := r.login("")
+	other := NewBlockStore(r.db, BlockStoreOptions{})
+	if _, err := other.Add(context.Background(), BlockEntry{Sub: "pat"}, "cli:test"); err != nil {
+		t.Fatal(err)
+	}
+	r.srv.blocks.watchChanged(context.Background())
+	if n := r.count("portal_sessions"); n != 0 {
+		t.Fatalf("portal_sessions after the watched block = %d, want 0", n)
+	}
+	if rec := r.serve(http.MethodGet, "/portal/api/me", c); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("me after the watched block = %d, want 401", rec.Code)
+	}
+	if !strings.Contains(r.logs.String(), `"msg":"portal_session_revoked","by_sub":"system:blocklist_watch","target_sub":"pat","count":1`) {
+		t.Fatalf("no watch portal_session_revoked line: %s", r.logs.String())
+	}
+}
+
+// TestPortalBlockedNonASCIIEmail: a block on a non-ASCII email, in another
+// case than the session's, is still denied on the next portal request from
+// the snapshot alone (the Add-path revoke is unset here).
+func TestPortalBlockedNonASCIIEmail(t *testing.T) {
+	r := newPortalRig(t, portalRigOpts{})
+	r.ready()
+	r.idp.SetLogin(fakes.Valid("zoe", "Zoë@Exämple.com"))
+	c := r.login("")
+	decodeMe(t, r.serve(http.MethodGet, "/portal/api/me", c))
+	r.srv.blocks.SetPortalSessionRevoker(nil)
+	blockAdd(t, r.srv, BlockEntry{Email: "ZOË@EXÄMPLE.COM"})
+	if r.count("portal_sessions") != 1 {
+		t.Fatal("the revoker was unset but the session went")
+	}
+	if rec := r.serve(http.MethodGet, "/portal/api/me", c); rec.Code != http.StatusForbidden || errBody(t, rec) != portal.CodeUserBlocked {
+		t.Fatalf("me for a blocked non-ASCII email = %d %s, want 403 user_blocked", rec.Code, rec.Body)
+	}
+	if r.count("portal_sessions") != 0 {
+		t.Fatal("the blocked principal's portal session was not deleted")
 	}
 }
