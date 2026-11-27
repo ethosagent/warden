@@ -42,6 +42,8 @@ type ucOpts struct {
 	clk       *clocktest.Fake
 	fk        *fakeBundleKeys
 	policy    string
+	// wrap, when set, wraps the fleet store the Server is built over.
+	wrap func(*analytics.FleetSQLiteStore) analytics.FleetStore
 }
 
 func newUserCostEnv(t *testing.T, o ucOpts) *ucEnv {
@@ -64,9 +66,13 @@ func newUserCostEnv(t *testing.T, o ucOpts) *ucEnv {
 	}
 	t.Cleanup(func() { _ = fleet.Close() })
 	logs := &syncBuf{}
+	var store analytics.FleetStore = fleet
+	if o.wrap != nil {
+		store = o.wrap(fleet)
+	}
 	cfg := Config{
 		PolicyPath: o.policy, State: o.db, PolicyStore: PolicyStoreVersioned,
-		Store: fleet, Clock: o.clk, Logger: slog.New(slog.NewJSONHandler(logs, nil)),
+		Store: store, Clock: o.clk, Logger: slog.New(slog.NewJSONHandler(logs, nil)),
 	}
 	if o.bundles != "" {
 		if o.fk == nil {
@@ -347,29 +353,106 @@ func TestUserCostAggregator_StoreErrorKeepsList(t *testing.T) {
 }
 
 // TestUserCostAggregator_RestartRebuildsBeforeFirstPoll: a new control plane
-// over the same state and fleet DB serves the list from its first long-poll:
-// Start rebuilds it from the rollup before returning.
+// over the same state and fleet DB has the list from its first load: New
+// rebuilds it synchronously, with no loop running (Start is never called). A
+// worker holding the pre-restart ETag gets 304: the restarted CP serves the
+// same bytes, list included.
 func TestUserCostAggregator_RestartRebuildsBeforeFirstPoll(t *testing.T) {
 	e := newUserCostEnv(t, ucOpts{})
 	e.setRules(t, []config.UserLimit{engLLM(0.01)}, nil)
 	e.spend(t, "worker-a", "alice", "eng-llm", 0.006)
 	e.spend(t, "worker-b", "alice", "eng-llm", 0.006)
+	e.recompute()
+	list, preETag, _ := e.served(t)
+	if len(list) != 1 {
+		t.Fatalf("before restart = %v, want alice", list)
+	}
 	if err := e.fleet.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	e2 := newUserCostEnv(t, ucOpts{db: e.db, fleetPath: e.fleetPath, clk: e.clk})
+	wire, etag, ok, _ := e2.s.policy.snapshot()
+	if !ok || fmt.Sprint(wire.CostBlockedUsers) != fmt.Sprint(list) || `"`+etag+`"` != preETag {
+		t.Fatalf("after restart, before any loop = %v %q (ok %v), want %v %s", wire.CostBlockedUsers, etag, ok, list, preETag)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/policy", nil)
+	req.Header.Set("If-None-Match", preETag)
+	e2.s.policy.ServePolicy(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("first poll with the pre-restart ETag = %d %s, want 304", rec.Code, rec.Body.String())
+	}
+}
+
+// failingFleet is a FleetSQLiteStore whose TodayCostByRule fails while fail
+// is set.
+type failingFleet struct {
+	*analytics.FleetSQLiteStore
+	fail atomic.Bool
+}
+
+func (f *failingFleet) TodayCostByRule(ctx context.Context, day string) ([]analytics.UserRuleCost, error) {
+	if f.fail.Load() {
+		return nil, errors.New("disk I/O error")
+	}
+	return f.FleetSQLiteStore.TodayCostByRule(ctx, day)
+}
+
+// TestUserCostAggregator_RestartWithFailingRollupFailsClosed: a restart whose
+// rollup query fails never serves the cost-capped policy without the list
+// (workers keep their cached one); once the query recovers, the loop's retry
+// serves it.
+func TestUserCostAggregator_RestartWithFailingRollupFailsClosed(t *testing.T) {
+	prev := userCostStartupBackoff
+	userCostStartupBackoff = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { userCostStartupBackoff = prev })
+
+	e := newUserCostEnv(t, ucOpts{})
+	e.setRules(t, []config.UserLimit{engLLM(0.01)}, nil)
+	e.spend(t, "worker-a", "alice", "eng-llm", 0.02)
+	e.recompute()
+	if err := e.fleet.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var ff *failingFleet
+	e2 := newUserCostEnv(t, ucOpts{db: e.db, fleetPath: e.fleetPath, clk: e.clk, wrap: func(s *analytics.FleetSQLiteStore) analytics.FleetStore {
+		ff = &failingFleet{FleetSQLiteStore: s}
+		ff.fail.Store(true)
+		return ff
+	}})
+	served := func() (int, string) {
+		rec := httptest.NewRecorder()
+		e2.s.policy.ServePolicy(rec, httptest.NewRequest(http.MethodGet, "/policy", nil))
+		return rec.Code, rec.Body.String()
+	}
+	check := func(when string) {
+		t.Helper()
+		if code, body := served(); code == http.StatusOK && !strings.Contains(body, `"sub":"alice"`) {
+			t.Fatalf("%s: served a cost-capped policy without the list: %s", when, body)
+		}
+	}
+	check("after New")
+	if code, _ := served(); code == http.StatusOK {
+		t.Fatal("with no good load /policy answered 200")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	e2.s.Start(ctx)
-	rec := httptest.NewRecorder()
-	// A long-poll from a worker holding the pre-restart ETag returns at once
-	// with the rebuilt list.
-	req := httptest.NewRequest(http.MethodGet, "/policy?wait=1s", nil)
-	e2.s.policy.ServePolicy(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"costBlockedUsers":[{"sub":"alice","rule":"eng-llm","day":"`+e.today()+`"}]`) {
-		t.Fatalf("first poll after restart = %d %s, want alice blocked", rec.Code, rec.Body.String())
+	e2.s.policy.Refresh() // the reload ticker
+	check("after Start and a reload")
+	if e2.s.userCost.RecomputeErrors() < 2 {
+		t.Errorf("recompute errors = %d, want the startup attempts counted", e2.s.userCost.RecomputeErrors())
 	}
+
+	ff.fail.Store(false)
+	btEventually(t, "the retry serves the list", func() bool {
+		check("while recovering")
+		e2.clk.Advance(time.Second)
+		code, body := served()
+		return code == http.StatusOK && strings.Contains(body, `"sub":"alice"`)
+	})
 }
 
 // TestUserCostAggregator_RuleChanges: removing the cap drops its entries at
@@ -479,7 +562,10 @@ func TestUserCostAggregator_Limits(t *testing.T) {
 		analytics.UserRuleCost{Sub: "   ", Rule: "eng-llm", CostUSD: 1e9},
 		analytics.UserRuleCost{Sub: strings.Repeat("x", 256), Rule: "eng-llm", CostUSD: 1e9},
 	)
-	got := a.buildBlocks(rows, caps, day)
+	got, cut := a.buildBlocks(rows, caps, day)
+	if len(got) != config.MaxCostBlockedUsers || cut != 10 {
+		t.Fatalf("%d entries, %d cut; want %d and 10", len(got), cut, config.MaxCostBlockedUsers)
+	}
 	if len(got) != config.MaxCostBlockedUsers {
 		t.Fatalf("%d entries, want %d", len(got), config.MaxCostBlockedUsers)
 	}
@@ -492,7 +578,8 @@ func TestUserCostAggregator_Limits(t *testing.T) {
 	for i := range config.MaxCostBlockedUsers {
 		rows = append(rows, analytics.UserRuleCost{Sub: fmt.Sprintf("%05d", i) + strings.Repeat("s", 250), Rule: "eng-llm", CostUSD: 2})
 	}
-	a.blocks = a.buildBlocks(rows, caps, day)
+	a.blocks, _ = a.buildBlocks(rows, caps, day)
+	a.computed = true
 	w := policyWire{Allowlist: []config.AllowlistEntry{{Domain: "a.com"}}, UserLimits: []config.UserLimit{engLLM(1)}}
 	fp, err := a.apply(context.Background(), &w)
 	if err != nil || fp == "" {
@@ -504,6 +591,9 @@ func TestUserCostAggregator_Limits(t *testing.T) {
 	}
 	if err := config.ValidateCostBlockedUsers(w.CostBlockedUsers); err != nil {
 		t.Fatal(err)
+	}
+	if got := a.Truncated(); got != int64(config.MaxCostBlockedUsers-len(w.CostBlockedUsers)) {
+		t.Errorf("truncated gauge = %d, want %d", got, config.MaxCostBlockedUsers-len(w.CostBlockedUsers))
 	}
 	for i := 1; i < len(w.CostBlockedUsers); i++ {
 		if !lessCostBlocked(w.CostBlockedUsers[i-1], w.CostBlockedUsers[i]) {
@@ -530,12 +620,14 @@ func TestUserCostAggregator_MemoryProviderOff(t *testing.T) {
 		t.Fatal("warned with no cost rule served")
 	}
 	e := &ucEnv{s: s}
-	e.setRules(t, []config.UserLimit{engLLM(0.01)}, nil)
+	e.setRules(t, []config.UserLimit{engLLM(0.01)}, nil) // as an import would: only the reload sees it
+	if n := strings.Count(logs.String(), "fleet cost blocks are off"); n != 1 {
+		t.Fatalf("after the reload that served a cap: %d WARN lines, want 1:\n%s", n, logs.String())
+	}
 	s.policy.Refresh()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	s.Start(ctx)
-	s.warnUserCostOff(wireCostCaps(baseDoc(t, s))) // a later save adding a cap
 	if body, _ := servePolicyOnce(t, s.policy); strings.Contains(string(body), "costBlockedUsers") {
 		t.Fatalf("memory provider served cost blocks: %s", body)
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"math"
 	"sort"
@@ -46,7 +47,22 @@ const (
 	// userCostRecomputeFailedMsg is the ERROR logged when a recompute's query
 	// fails; the previous list is kept.
 	userCostRecomputeFailedMsg = "user_cost_recompute_failed"
+	// userCostRetry is how often the loop retries while no recompute has
+	// succeeded since start.
+	userCostRetry = 5 * time.Second
 )
+
+// userCostStartupBackoff are the waits between the startup attempts New makes
+// before the first policy load. A var so tests can shorten it.
+var userCostStartupBackoff = []time.Duration{100 * time.Millisecond, 300 * time.Millisecond, time.Second}
+
+// errUserCostPending fails the user_cost overlay, and so the whole policy
+// load, while a cost cap is served and no recompute has succeeded since this
+// process started. The policy server then keeps its last-known-good wire (or,
+// before the first load, answers /policy with an error), so workers keep their
+// cached list instead of receiving a cost-capped policy without it: a restart
+// with a failing rollup must never unblock the fleet's over-cap users.
+var errUserCostPending = errors.New("fleet cost blocks not computed yet since start")
 
 // costBlock is one served entry plus what the aggregator needs to rank and
 // size it.
@@ -66,8 +82,12 @@ type userCostAggregator struct {
 	logger   *slog.Logger
 	debounce time.Duration
 	// served returns the policy currently served and whether one has loaded;
-	// each rule's dailyCostUSD is looked up by name in it.
+	// each rule's dailyCostUSD is looked up by name in it. base is the policy
+	// before overlays, used until the first load (the startup recompute runs
+	// before it).
 	served func() (policyWire, bool)
+	base   func(ctx context.Context) (policyWire, error)
+	retry  time.Duration
 	// refresh is the policy server's Refresh: it re-runs the overlays, appends
 	// the publish-log row and wakes long-poll waiters.
 	refresh func()
@@ -82,6 +102,9 @@ type userCostAggregator struct {
 	// overlay kicks a recompute when the served caps differ from it.
 	capsFP  string
 	lastRun time.Time
+	// computed is set by the first recompute that succeeds; until then the
+	// overlay fails any load that serves a cost cap (errUserCostPending).
+	computed bool
 	// trimWarned is set once the overlay has logged a size cut of the current
 	// list, so the 3s reload does not repeat it.
 	trimWarned bool
@@ -91,13 +114,18 @@ type userCostAggregator struct {
 	// to export.
 	recomputeErrors atomic.Int64
 	blocked         atomic.Int64
+	// countCut and sizeCut are the entries left out of the current list by
+	// the MaxCostBlockedUsers cap and by the policy size limit; Truncated is
+	// their sum (in memory, for W-P5-RETN-06 to export).
+	countCut atomic.Int64
+	sizeCut  atomic.Int64
 }
 
 // newUserCostAggregator builds the aggregator over q. served and refresh are
 // set by the caller before the first recompute.
 func newUserCostAggregator(q analytics.UserUsageQuerier, clk clock.Clock, logger *slog.Logger) *userCostAggregator {
 	return &userCostAggregator{
-		q: q, clock: clk, logger: logger, debounce: userCostDebounce,
+		q: q, clock: clk, logger: logger, debounce: userCostDebounce, retry: userCostRetry,
 		kick: make(chan struct{}, 1),
 	}
 }
@@ -108,6 +136,18 @@ func (a *userCostAggregator) RecomputeErrors() int64 { return a.recomputeErrors.
 // BlockedUsers is the in-memory warden_cp_cost_blocked_users gauge: the size
 // of the list the last good recompute built.
 func (a *userCostAggregator) BlockedUsers() int64 { return a.blocked.Load() }
+
+// Truncated is the in-memory warden_cp_cost_blocked_users_truncated gauge:
+// over-cap users left out of the served list by the entry cap or the policy
+// size limit.
+func (a *userCostAggregator) Truncated() int64 { return a.countCut.Load() + a.sizeCut.Load() }
+
+// isComputed reports whether a recompute has succeeded since start.
+func (a *userCostAggregator) isComputed() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.computed
+}
 
 // notify asks the run loop for a recompute; it never blocks.
 func (a *userCostAggregator) notify() {
@@ -130,22 +170,59 @@ func (a *userCostAggregator) onEvents(_ string, events []analytics.Event) {
 }
 
 // run recomputes after each notify (at most once per debounce) and at each
-// UTC midnight, until ctx is done.
+// UTC midnight, until ctx is done. While no recompute has succeeded since
+// start it also retries every a.retry.
 func (a *userCostAggregator) run(ctx context.Context) {
 	for {
 		midnight := a.clock.NewTimer(untilNextUTCDay(a.clock.Now()))
+		var retryC <-chan time.Time
+		var retryT interface{ Stop() bool }
+		if !a.isComputed() {
+			rt := a.clock.NewTimer(a.retry)
+			retryC, retryT = rt.C(), rt
+		}
+		stop := func() {
+			midnight.Stop()
+			if retryT != nil {
+				retryT.Stop()
+			}
+		}
 		select {
 		case <-ctx.Done():
-			midnight.Stop()
+			stop()
 			return
 		case <-midnight.C():
+			stop()
+		case <-retryC:
+			stop()
 		case <-a.kick:
-			midnight.Stop()
+			stop()
 			if !a.waitDebounce(ctx) {
 				return
 			}
 		}
 		a.recompute(ctx)
+	}
+}
+
+// prime is the startup recompute New runs before the first policy load:
+// up to len(backoff)+1 attempts with the given waits between them. It
+// reports whether one succeeded; if none did, the overlay fails the load
+// (errUserCostPending) and the loop keeps retrying once started.
+func (a *userCostAggregator) prime(ctx context.Context, backoff []time.Duration) bool {
+	for i := 0; ; i++ {
+		a.recomputeOnce(ctx, false)
+		if a.isComputed() {
+			return true
+		}
+		if i >= len(backoff) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(backoff[i]):
+		}
 	}
 }
 
@@ -179,14 +256,28 @@ func untilNextUTCDay(now time.Time) time.Duration {
 // refreshes the policy server (one publish-log row, a new ETag and bundle
 // seq, long-poll waiters woken). A query error keeps the previous list and
 // ETag. With no cost rule served nothing is queried and the list is empty.
-func (a *userCostAggregator) recompute(ctx context.Context) {
+func (a *userCostAggregator) recompute(ctx context.Context) { a.recomputeOnce(ctx, true) }
+
+// recomputeOnce is recompute; refresh false skips the policy Refresh (the
+// startup attempt, which runs before the first load).
+func (a *userCostAggregator) recomputeOnce(ctx context.Context, refresh bool) {
 	now := a.clock.Now()
 	day := analytics.UsageDay(now)
 	var caps map[string]float64
 	if w, ok := a.served(); ok {
 		caps = costCapsOf(w)
+	} else if a.base != nil {
+		w, err := a.base(ctx)
+		if err != nil {
+			// No policy to read caps from: nothing can be computed yet.
+			a.recomputeErrors.Add(1)
+			a.logger.Error(userCostRecomputeFailedMsg, "error", boundedErr(err))
+			return
+		}
+		caps = costCapsOf(w)
 	}
 	var next []costBlock
+	cut := 0
 	if len(caps) > 0 {
 		rows, err := a.q.TodayCostByRule(ctx, day)
 		if err != nil {
@@ -199,29 +290,38 @@ func (a *userCostAggregator) recompute(ctx context.Context) {
 			a.logger.Error(userCostRecomputeFailedMsg, "error", boundedErr(err))
 			return
 		}
-		next = a.buildBlocks(rows, caps, day)
+		next, cut = a.buildBlocks(rows, caps, day)
 	}
 	a.mu.Lock()
-	changed := !sameCostBlocks(a.blocks, next)
-	a.blocks, a.capsFP, a.lastRun = next, capsFingerprint(caps), now
+	// The first success after start always refreshes: it clears the pending
+	// state the overlay failed loads with.
+	changed := !a.computed || !sameCostBlocks(a.blocks, next)
+	a.blocks, a.capsFP, a.lastRun, a.computed = next, capsFingerprint(caps), now, true
 	if changed {
 		a.trimWarned = false
 	}
 	a.mu.Unlock()
 	a.blocked.Store(int64(len(next)))
+	a.countCut.Store(int64(cut))
 	if !changed {
 		return
 	}
+	if cut > 0 {
+		a.logger.Warn("user cost blocks: list cut to the limit", "dropped", cut, "limit", config.MaxCostBlockedUsers)
+	}
 	a.logger.Info("user cost blocks updated", "blocked", len(next), "day", day)
-	a.refresh()
+	if refresh {
+		a.refresh()
+	}
 }
 
 // buildBlocks turns the rollup's (sub, rule, cost) rows into the users at or
 // over their rule's cap on day. Anonymous spend, unknown or removed rule
 // names (the rollup's "!invalid" among them) and rows that would not pass
 // config.ValidateCostBlockedUsers are skipped, never mapped onto a rule. The
-// result is in priority order and capped at config.MaxCostBlockedUsers.
-func (a *userCostAggregator) buildBlocks(rows []analytics.UserRuleCost, caps map[string]float64, day string) []costBlock {
+// result is in priority order and capped at config.MaxCostBlockedUsers; cut
+// is how many over-cap users the cap left out.
+func (a *userCostAggregator) buildBlocks(rows []analytics.UserRuleCost, caps map[string]float64, day string) (blocks []costBlock, cut int) {
 	var out []costBlock
 	skipped := 0
 	seen := make(map[config.CostBlockedUser]struct{})
@@ -259,10 +359,10 @@ func (a *userCostAggregator) buildBlocks(rows []analytics.UserRuleCost, caps map
 		a.logger.Warn("user cost blocks: rollup rows skipped", "skipped", skipped)
 	}
 	if len(out) > config.MaxCostBlockedUsers {
-		a.logger.Warn("user cost blocks: list cut to the limit", "over_cap", len(out), "limit", config.MaxCostBlockedUsers)
+		cut = len(out) - config.MaxCostBlockedUsers
 		out = out[:config.MaxCostBlockedUsers]
 	}
-	return out
+	return out, cut
 }
 
 // apply is the user_cost overlay. It serves the entries of the last good list
@@ -275,12 +375,20 @@ func (a *userCostAggregator) apply(_ context.Context, w *policyWire) (string, er
 	caps := costCapsOf(*w)
 	fp := capsFingerprint(caps)
 	a.mu.Lock()
-	blocks, stale := a.blocks, fp != a.capsFP
+	blocks, stale, computed := a.blocks, fp != a.capsFP, a.computed
 	a.mu.Unlock()
 	if stale {
 		a.notify()
 	}
-	if len(caps) == 0 || len(blocks) == 0 {
+	if len(caps) == 0 {
+		a.sizeCut.Store(0)
+		return "", nil
+	}
+	if !computed {
+		return "", errUserCostPending
+	}
+	if len(blocks) == 0 {
+		a.sizeCut.Store(0)
 		return "", nil
 	}
 	today := analytics.UsageDay(a.clock.Now())
@@ -291,9 +399,13 @@ func (a *userCostAggregator) apply(_ context.Context, w *policyWire) (string, er
 		}
 	}
 	if len(keep) == 0 {
+		a.sizeCut.Store(0)
 		return "", nil
 	}
-	keep = a.fitBody(*w, keep)
+	keep, err := a.fitBody(*w, keep)
+	if err != nil {
+		return "", err
+	}
 	list := make([]config.CostBlockedUser, len(keep))
 	for i, b := range keep {
 		list[i] = b.entry
@@ -307,26 +419,29 @@ func (a *userCostAggregator) apply(_ context.Context, w *policyWire) (string, er
 }
 
 // fitBody returns the longest prefix of keep whose entries fit next to the
-// rest of w in config.MaxPolicyBytes less the margin.
-func (a *userCostAggregator) fitBody(w policyWire, keep []costBlock) []costBlock {
+// rest of w in config.MaxPolicyBytes less the margin. An encoding error fails
+// the load (never an empty list).
+func (a *userCostAggregator) fitBody(w policyWire, keep []costBlock) ([]costBlock, error) {
 	total := 0
 	for _, b := range keep {
 		total += b.size
 	}
 	b, err := json.Marshal(projectScoped(w))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	// The key, its quotes, the brackets and the comma before it.
 	budget := config.MaxPolicyBytes - userCostWireMargin - len(b) - len(`,"costBlockedUsers":[]`)
 	if total <= budget {
-		return keep
+		a.sizeCut.Store(0)
+		return keep, nil
 	}
 	n, used := 0, 0
 	for n < len(keep) && used+keep[n].size <= budget {
 		used += keep[n].size
 		n++
 	}
+	a.sizeCut.Store(int64(len(keep) - n))
 	a.mu.Lock()
 	warn := !a.trimWarned
 	a.trimWarned = true
@@ -334,7 +449,7 @@ func (a *userCostAggregator) fitBody(w policyWire, keep []costBlock) []costBlock
 	if warn {
 		a.logger.Warn("user cost blocks: list cut to fit the policy size limit", "blocked", len(keep), "served", n)
 	}
-	return keep[:n]
+	return keep[:n], nil
 }
 
 // costCapsOf maps each served rule with a dailyCostUSD to its cap: userLimits
@@ -444,6 +559,9 @@ func (s *Server) warnUserCostOff(caps map[string]float64) {
 func (s *Server) initUserCost() {
 	q, ok := s.central.(analytics.UserUsageQuerier)
 	if _, mem := s.central.(*analytics.CentralStore); mem || !ok {
+		// Every successful load checks for a cap, so one served later (an
+		// import, an external edit) is warned about too.
+		s.policy.onLoaded = func(w policyWire) { s.warnUserCostOff(wireCostCaps(w)) }
 		return
 	}
 	a := newUserCostAggregator(q, s.cfg.Clock, s.cfg.Logger)
@@ -451,16 +569,23 @@ func (s *Server) initUserCost() {
 		w, _, ok, _ := s.policy.snapshot()
 		return w, ok
 	}
+	a.base = s.policy.loadBase
 	a.refresh = s.policy.Refresh
 	if err := s.policy.addOverlay(wireOverlay{name: userCostOverlayName, apply: a.apply}); err != nil {
 		s.cfg.Logger.Error("control plane: user_cost overlay not registered", "error", err)
 		return
 	}
 	s.userCost = a
+	// Rebuild the list before the first load, so a restart serves it from the
+	// first /policy; with a failing rollup the load fails closed instead.
+	if !a.prime(context.Background(), userCostStartupBackoff) {
+		s.cfg.Logger.Error("control plane: fleet cost blocks could not be rebuilt at startup; /policy is held at last-known-good while a dailyCostUSD rule is served, retrying")
+	}
 }
 
-// startUserCost rebuilds the list from the rollup before returning, so the
-// first long-poll after a restart already carries it, then starts the loop.
+// startUserCost starts the recompute loop. New already rebuilt the list
+// (prime); if that failed, one more attempt runs here before Start returns
+// and the loop retries every userCostRetry until one succeeds.
 func (s *Server) startUserCost(ctx context.Context) {
 	if s.userCost == nil {
 		if w, _, ok, _ := s.policy.snapshot(); ok {
@@ -468,6 +593,8 @@ func (s *Server) startUserCost(ctx context.Context) {
 		}
 		return
 	}
-	s.userCost.recompute(ctx)
+	if !s.userCost.isComputed() {
+		s.userCost.recompute(ctx)
+	}
 	go s.userCost.run(ctx)
 }
