@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"net/http"
@@ -168,6 +169,21 @@ func TestConnectStartRouteAuth(t *testing.T) {
 			t.Errorf("%s = %d, want 401", name, rec.Code)
 		}
 	}
+	// The same holds for a signed-out GET: a credential is 401, not a redirect.
+	greq := httptest.NewRequest(http.MethodGet, "/connect/start", nil)
+	greq.Header.Set("Authorization", "Bearer admin-token")
+	grec := httptest.NewRecorder()
+	r.h.ServeHTTP(grec, greq)
+	if grec.Code != http.StatusUnauthorized {
+		t.Errorf("GET with a bearer and no session = %d, want 401", grec.Code)
+	}
+	greq = httptest.NewRequest(http.MethodGet, "/connect/start", nil)
+	greq.AddCookie(&http.Cookie{Name: r.srv.sessionCookie.Name, Value: "console-session"})
+	grec = httptest.NewRecorder()
+	r.h.ServeHTTP(grec, greq)
+	if grec.Code != http.StatusUnauthorized {
+		t.Errorf("GET with a console cookie and no session = %d, want 401", grec.Code)
+	}
 	console := &http.Cookie{Name: r.srv.sessionCookie.Name, Value: "console-session"}
 	if rec := r.connectPost(console, "", form, nil); rec.Code != http.StatusUnauthorized {
 		t.Errorf("console cookie = %d, want 401", rec.Code)
@@ -324,5 +340,40 @@ func TestOAuthBrokerGateRun(t *testing.T) {
 				t.Fatalf("Run = %v, want the persistent consent.store refusal", err)
 			}
 		})
+	}
+}
+
+// stubBlocks blocks every sub, standing in for a block list that changed
+// between the middleware's snapshot read and the broker's own check.
+type stubBlocks struct{ blocked bool }
+
+func (s stubBlocks) IsBlocked(context.Context, string, string) (bool, error) { return s.blocked, nil }
+
+// TestConnectStartRouteBrokerBlocked: when the broker's BlockChecker blocks a
+// user the session middleware's snapshot let through, the broker answers 403
+// user_blocked itself and writes no attempt.
+func TestConnectStartRouteBrokerBlocked(t *testing.T) {
+	r, c, tok := connectRig(t)
+	b, err := oauthbroker.New(oauthbroker.Config{
+		Registry: r.srv.cfg.OAuthRegistry, Store: r.srv.cfg.GrantStore, Blocks: stubBlocks{blocked: true},
+		RedirectURL: "https://cp.example/connect/callback", UserKey: secrets.UserKey, Rand: rand.Reader, Now: time.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := r.srv.connectWrap(oauthbrokerhttp.New(oauthbrokerhttp.Config{
+		Broker: b, Cookie: oauthbrokerhttp.Cookie{Name: connectCookieName, Secure: true},
+	}).Start())
+	req := httptest.NewRequest(http.MethodPost, "/connect/start", strings.NewReader("provider=google"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(CSRFHeader, tok)
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "user_blocked") {
+		t.Fatalf("= %d %s, want the broker's 403 user_blocked", rec.Code, rec.Body)
+	}
+	if r.attemptRows() != 0 {
+		t.Fatal("a blocked user left an attempt")
 	}
 }

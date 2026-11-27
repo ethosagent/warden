@@ -420,8 +420,9 @@ func TestConnectStartAuthURL(t *testing.T) {
 }
 
 // TestConnectStartUnionsActiveGrant: the provider is asked for the union of the
-// active grant's scopes and the new ones, and that union is what the attempt
-// records.
+// active grant's scopes that are still allowed and the new ones, and that union
+// is what the attempt records. A scope the operator has since removed from
+// allowedScopes (legacy.scope) is never requested again.
 func TestConnectStartUnionsActiveGrant(t *testing.T) {
 	e := newStartEnv(t, nil)
 	ctx := context.Background()
@@ -437,12 +438,35 @@ func TestConnectStartUnionsActiveGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	q := mustLocation(t, res)
-	if got := q.Get("scope"); got != "calendar.readonly drive.readonly legacy.scope" {
-		t.Fatalf("scope = %q, want the union", got)
+	if got := q.Get("scope"); got != "calendar.readonly drive.readonly" {
+		t.Fatalf("scope = %q, want the union without the removed scope", got)
 	}
 	att, err := e.store.ConsumeAttempt(ctx, oauthbroker.HashState(q.Get("state")))
-	if err != nil || !slices.Equal(att.Scopes, []string{"calendar.readonly", "drive.readonly", "legacy.scope"}) {
+	if err != nil || !slices.Equal(att.Scopes, []string{"calendar.readonly", "drive.readonly"}) || slices.Contains(att.Scopes, "legacy.scope") {
 		t.Fatalf("attempt scopes = %v, %v", att.Scopes, err)
+	}
+}
+
+// TestConnectStartStaleGrantScopesGitHubApp: a githubApp has an empty cap, so
+// stale scopes on its grant never make the attempt's scopes non-empty.
+func TestConnectStartStaleGrantScopesGitHubApp(t *testing.T) {
+	e := newStartEnv(t, nil)
+	ctx := context.Background()
+	g, err := e.store.BeginGrant(ctx, oauthbroker.GrantRef{UserKey: wantUserKey("alice"), Iss: startIss, Sub: "alice", Provider: "ghapp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.store.ActivateGrant(ctx, g.GrantID, []string{"repo"}, oauthbroker.Account{}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.b.Start(ctx, req("alice", "ghapp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := mustLocation(t, res)
+	att, err := e.store.ConsumeAttempt(ctx, oauthbroker.HashState(q.Get("state")))
+	if err != nil || len(att.Scopes) != 0 || q.Has("scope") {
+		t.Fatalf("attempt scopes = %v, scope param %q, %v; want none", att.Scopes, q.Get("scope"), err)
 	}
 }
 

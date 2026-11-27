@@ -174,7 +174,11 @@ func (b *Broker) start(ctx context.Context, req StartRequest, st *startState) (S
 	switch g, err := b.store.GetGrant(ctx, st.userKey, prov.ID); {
 	case err == nil:
 		if g.State == GrantActive {
-			want = UnionScopes(g.Scopes, capped)
+			// Re-cap what the grant already holds: a scope the operator has
+			// since removed from allowedScopes (or a githubApp, which has none)
+			// is dropped silently, never requested again.
+			keep, _ := prov.CapScopes(g.Scopes)
+			want = UnionScopes(keep, capped)
 		}
 	case errors.Is(err, ErrNotFound):
 	default:

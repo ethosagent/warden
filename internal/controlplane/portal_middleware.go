@@ -258,7 +258,7 @@ func safeMethod(m string) bool {
 
 // connectWrap puts a /connect/* route behind the portal session middleware.
 // A signed-out request of any method is sent to /portal/login with 303 (a
-// relative next only for GET). A POST that carries a console credential (an
+// relative next only for GET). A request of any method that carries a console credential (an
 // Authorization header: the admin bearer, a worker token or a wak_ key; or the
 // console session cookie) is answered 401 instead: none of them authenticates
 // here, and redirecting a machine client to a sign-in page would hide that.
@@ -270,9 +270,6 @@ func (s *Server) connectWrap(h http.Handler) http.Handler {
 	p := s.portal
 	return p.requireSessionWith(h, signedOutPolicy{
 		redirects: func(r *http.Request) bool {
-			if safeMethod(r.Method) {
-				return true
-			}
 			if r.Header.Get("Authorization") != "" {
 				return false
 			}
