@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"maps"
 	"math"
-	"regexp"
 	"sort"
 	"time"
 	"unicode/utf8"
+
+	"github.com/ethosagent/warden/internal/agentid"
 )
 
 // The per-user daily usage rollup (W-P3-PUL-07). Each row is keyed by
@@ -56,10 +57,6 @@ const (
 	// counting.
 	maxUsageRows = 200000
 )
-
-// usageRuleRE is the rule-name charset: the agent-id charset W-P3-PUL-01
-// uses for userLimits names.
-var usageRuleRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // UserUsageQuerier is the read side of the rollup. FleetSQLiteStore answers it
 // with parameterized SQL over user_usage_daily and CentralStore in Go; a later
@@ -191,12 +188,13 @@ func usageDeltaFor(e Event, now time.Time) (usageDelta, bool) {
 }
 
 // usageRule maps a limit rule name to its rollup key: "" and names in the
-// rule-name charset (the agent-id charset, at most 64 bytes) are
+// rule-name charset W-P3-PUL-01 enforces (agentid.ValidID: 1 to 64 bytes of
+// ^[A-Za-z0-9][A-Za-z0-9._:-]*$) are
 // kept, anything else becomes usageRuleInvalid. That value is outside the
 // charset, so it never equals a configured rule and W-P3-PUL-08 never charges
 // it to a real rule's cap.
 func usageRule(rule string) string {
-	if rule == "" || usageRuleRE.MatchString(rule) {
+	if rule == "" || agentid.ValidID(rule) == nil {
 		return rule
 	}
 	return usageRuleInvalid

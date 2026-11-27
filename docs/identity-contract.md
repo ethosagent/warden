@@ -644,11 +644,18 @@ counts twice. Duplicates are recognised by the event's sync id, which each
 worker derives from a random id kept in its local database. The control plane
 scopes it to the proxy id the worker authenticated as. A recreated local
 database, or two replicas sharing a proxy id, therefore never has its events
-dropped as duplicates, and one worker cannot suppress another's events.
+dropped as duplicates. With per-worker credentials (an mTLS worker
+certificate or worker tokens), one worker also cannot suppress another's
+events. With the shared ingest bearer token, the proxy id is self-reported, so
+this holds only as far as workers are trusted not to claim another's id. A
+batch whose acknowledgement was lost while the control plane or a worker was
+upgraded to this version can be counted twice, once (an over-count, never an
+under-count).
 Identifier values are bounded: `sub` is cut to 255 bytes, email to 320 and
-`agent_id` to 128. A `limit_rule` that is not 1 to 64 characters of
-`A-Z a-z 0-9 . _ -` is stored as `!invalid`, which never matches a configured
-rule. The rollup keeps 35 UTC days,
+`agent_id` to 128. Rule names use the agent-id charset: 1 to 64 bytes, a
+letter or digit first, then letters, digits, `.`, `_`, `:` or `-`. A
+`limit_rule` outside it is stored as `!invalid`, which never matches a
+configured rule. The rollup keeps 35 UTC days,
 whatever the events retention or `maxEvents`, so pruning events never changes
 usage totals. It holds no URL, header, body or secret reference. It starts
 empty when an older fleet database is upgraded: events stored before the

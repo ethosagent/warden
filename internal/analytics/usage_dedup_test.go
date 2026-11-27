@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -250,5 +251,29 @@ func TestIngest_SetsOuterAgentID(t *testing.T) {
 	}
 	if g := fake.got[0]; g.AgentID != "claude-code" || g.ProxyID != "authorized-proxy" {
 		t.Fatalf("outer AgentID %q ProxyID %q", g.AgentID, g.ProxyID)
+	}
+}
+
+// Rule names use the agent-id charset PUL-01 enforces (agentid.ValidID): a
+// valid name with ':' keeps its name and shows in TodayCostByRule, so its
+// spend can be published; an invalid one maps to usageRuleInvalid.
+func TestUserUsageDaily_RuleNameCharset(t *testing.T) {
+	for name, s := range usageStores(t, 0, usageDayT) {
+		t.Run(name, func(t *testing.T) {
+			for i, rule := range []string{"eng:llm", "-leading-dash", "eng.llm_v2-x"} {
+				e := usageEvent("c"+string(rune('0'+i)), "alice", "a", rule, usageDayT, 1)
+				if err := s.StoreAggregatedEvent(AggregatedEvent{Event: e}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := s.TodayCostByRule(context.Background(), UsageDay(usageDayT))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []UserRuleCost{{"alice", usageRuleInvalid, 1}, {"alice", "eng.llm_v2-x", 1}, {"alice", "eng:llm", 1}}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("got %+v want %+v", got, want)
+			}
+		})
 	}
 }

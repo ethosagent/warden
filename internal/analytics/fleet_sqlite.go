@@ -276,7 +276,10 @@ func (s *FleetSQLiteStore) StoreAggregatedEvent(e AggregatedEvent) error {
 // Fleet rows stored before this change hold the raw worker UID, which never
 // equals a scoped key, so an upgraded DB keeps its rows and dedups correctly
 // for every batch sent after the upgrade; only a batch whose ack was lost
-// across the upgrade itself can be stored twice, once.
+// across the upgrade itself can be stored twice, once. The same holds for a
+// worker upgrade: the first batch after the worker gains its UID epoch
+// (SQLiteStore.ensureUIDEpoch) carries new UIDs, so a batch whose ack was lost
+// just before the worker upgrade is counted twice, once (an over-count).
 func (e AggregatedEvent) EventUID() string {
 	if e.UID == "" {
 		return ""
