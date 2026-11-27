@@ -759,6 +759,9 @@ func (s *Server) Handler() http.Handler {
 	wire, _, _, _ := s.policy.snapshot()
 	dashPolicy := policyOfWire(wire)
 	dash := dashboard.NewServer(s.central, dashPolicy, emptySecrets)
+	// The usage window's UTC day and the response caches follow the control
+	// plane's clock (a fake clock under the L1 harness).
+	dash.SetClock(s.cfg.Clock.Now)
 	// Retain the dashboard so a settings / llmProviders edit can re-inject the
 	// Explore NL→SQL generator live (see injectExploreLLM). Set before serving.
 	s.dash = dash

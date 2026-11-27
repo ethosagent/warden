@@ -69,7 +69,7 @@ func userLimitsTinyLLM(w http.ResponseWriter, r *http.Request) {
 }
 
 func userLimitsE2E(t *testing.T, h *harness.H) {
-	clearOfUTCMidnight(t, h)
+	start := clearOfUTCMidnight(t, h)
 	h.Upstream(limitedHost)
 	llm := h.Upstream(costCapHost)
 	llm.SetNext(http.HandlerFunc(userLimitsTinyLLM))
@@ -188,6 +188,7 @@ func userLimitsE2E(t *testing.T, h *harness.H) {
 	// 9. The block lapses at the next UTC midnight, with the CP stopped: the
 	// workers ignore a costBlockedUsers entry whose day is over, and a fresh
 	// token the next day is served by both.
+	assertWithinMidnightBudget(t, h, start)
 	h.CP().Stop()
 	now := h.Clock().Now().UTC()
 	nextDay := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 1, 0, time.UTC)
@@ -327,27 +328,49 @@ func advanceUntil(h *harness.H, step time.Duration, desc string, cond func() boo
 	})
 }
 
-// midnightGuard is how close to the next UTC midnight a run may start. The
-// scenarios assert per-UTC-day ledgers and the dashboard usage window reads the
-// real clock (day-granular), so the fake day and the real day must agree and
-// neither may roll over mid-run. The fake clock starts at the real time and the
-// workers verify bundles against it with a small skew, so it cannot simply be
-// jumped past midnight: instead the run waits (in real time) until the real
-// clock is past midnight and re-syncs the fake clock to it.
-const midnightGuard = 10 * time.Minute
+// midnightGuard (G) is how close to the next UTC midnight the fake clock may
+// start. The scenarios assert per-UTC-day ledgers and the usage window, so the
+// fake day must not roll over mid-run. A scenario advances the fake clock by
+// well under G before its deliberate day jump (assertWithinMidnightBudget
+// fails the run otherwise), so a start further than G from midnight is safe.
+const midnightGuard = 30 * time.Minute
 
-// clearOfUTCMidnight makes the scenario correct at any wall-clock time. It is
-// a no-op except within midnightGuard before a UTC midnight.
-func clearOfUTCMidnight(t *testing.T, h *harness.H) {
-	t.Helper()
-	now := time.Now().UTC()
+// fakeClock is the part of the harness fake clock the guard needs.
+type fakeClock interface {
+	Now() time.Time
+	Advance(d time.Duration)
+}
+
+// jumpPastUTCMidnightIfWithin moves c to one minute past the next UTC midnight
+// when it is within g of it, and reports whether it did. The fake clock drives
+// the workers, the control plane and the dashboard's usage window alike, so the
+// jump is consistent everywhere and needs no real waiting. Callers do it before
+// minting any token.
+func jumpPastUTCMidnightIfWithin(c fakeClock, g time.Duration) bool {
+	now := c.Now().UTC()
 	next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
-	if next.Sub(now) >= midnightGuard {
-		return
+	if next.Sub(now) >= g {
+		return false
 	}
-	t.Logf("within %s of UTC midnight: waiting for the new day before starting", midnightGuard)
-	time.Sleep(time.Until(next) + 2*time.Second)
-	if d := time.Since(h.Clock().Now()); d > 0 {
-		h.Clock().Advance(d)
+	c.Advance(next.Add(time.Minute).Sub(now))
+	return true
+}
+
+// clearOfUTCMidnight makes the scenario independent of the wall-clock time and
+// returns the fake start time for assertWithinMidnightBudget.
+func clearOfUTCMidnight(t *testing.T, h *harness.H) time.Time {
+	t.Helper()
+	if jumpPastUTCMidnightIfWithin(h.Clock(), midnightGuard) {
+		t.Logf("fake clock was within %s of UTC midnight: jumped past it before starting", midnightGuard)
+	}
+	return h.Clock().Now()
+}
+
+// assertWithinMidnightBudget fails when the scenario has consumed G of fake
+// time since start: the guard only protects a run that stays inside its budget.
+func assertWithinMidnightBudget(t *testing.T, h *harness.H, start time.Time) {
+	t.Helper()
+	if used := h.Clock().Now().Sub(start); used >= midnightGuard {
+		t.Fatalf("scenario advanced the fake clock %s (>= midnight guard %s): raise the guard or trim the steps", used, midnightGuard)
 	}
 }

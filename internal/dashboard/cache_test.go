@@ -237,3 +237,20 @@ func TestMCPCacheHit(t *testing.T) {
 		t.Fatalf("MCP proxy=worker-9 should recompute, GetEvents=%d, want 2", got)
 	}
 }
+
+// TestSetClock: the injected clock drives the server's time; nil keeps it.
+func TestSetClock(t *testing.T) {
+	srv := NewServer(&fakeDataSource{}, config.Policy{}, &fakeSecretProvider{values: map[string]string{}})
+	if d := time.Since(srv.now()); d < 0 || d > time.Minute {
+		t.Fatalf("default clock is not time.Now: off by %s", d)
+	}
+	fixed := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	srv.SetClock(func() time.Time { return fixed })
+	if got := srv.now(); !got.Equal(fixed) {
+		t.Fatalf("now() = %v, want %v", got, fixed)
+	}
+	srv.SetClock(nil)
+	if got := srv.now(); !got.Equal(fixed) {
+		t.Fatalf("SetClock(nil) replaced the clock: now() = %v", got)
+	}
+}

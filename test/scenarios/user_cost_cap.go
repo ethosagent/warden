@@ -92,7 +92,8 @@ func assertUserCostLimited(t *testing.T, who string, resp *http.Response, body s
 }
 
 func userCostCap(t *testing.T, h *harness.H) {
-	clearOfUTCMidnight(t, h)
+	start := clearOfUTCMidnight(t, h)
+	defer assertWithinMidnightBudget(t, h, start)
 	up := h.Upstream(costCapHost)
 	up.SetNext(http.HandlerFunc(streamedLLM))
 	alice := h.MintUserToken(fakes.Valid("alice", "alice@example.com", "eng"))

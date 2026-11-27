@@ -359,6 +359,15 @@ func WorkersMissingBundleCap(ws []WorkerView) int {
 	return n
 }
 
+// SetClock makes the server read time from now (the response caches and the
+// usage window's UTC day). nil keeps the default, time.Now. The control plane
+// wires its own clock here so a fake clock drives the dashboard too.
+func (s *Server) SetClock(now func() time.Time) {
+	if now != nil {
+		s.now = now
+	}
+}
+
 // NewServer constructs a dashboard Server. The policy argument is the static
 // startup policy used for the secret-usage view; for the allow/deny policy
 // panel prefer SetLivePolicy so the dashboard reflects hot-reloaded policy.
