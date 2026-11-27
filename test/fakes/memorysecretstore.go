@@ -16,7 +16,7 @@ import (
 // Persists() true, so it passes the persistent-store startup checks. GetErr,
 // PutErr, DeleteErr and ListErr, when set, are returned by that verb instead of
 // touching the map (a down backend). Get of an absent key returns an error
-// matching secrets.ErrSecretNotFound.
+// matching both secrets.ErrNotFound and secrets.ErrSecretNotFound.
 type MemorySecretStore struct {
 	mu       sync.Mutex
 	values   map[string]string
@@ -58,7 +58,7 @@ func (m *MemorySecretStore) Get(_ context.Context, key string) (string, error) {
 	}
 	v, ok := m.values[key]
 	if !ok {
-		return "", fmt.Errorf("%w: %q", secrets.ErrSecretNotFound, key)
+		return "", fmt.Errorf("%w: %w: %q", secrets.ErrNotFound, secrets.ErrSecretNotFound, key)
 	}
 	return v, nil
 }

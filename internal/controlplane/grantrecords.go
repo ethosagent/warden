@@ -1,4 +1,4 @@
-// This file is the consent.store implementation of the oauthbroker.GrantStore
+// This file is the consent.store implementation of the oauthbroker.GrantRecords
 // port: guarded read and write helpers for a user's grant record. Keys come
 // only from secrets.UserGrantKey and the record type is
 // oauthbroker.TokenRecord, so there is no second key scheme or record format.
@@ -16,11 +16,10 @@ import (
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
-// isNotFound reports whether err means the key is absent. The AWS store's
-// error matches both sentinels; the in-memory consent.store fake matches only
-// the older secrets.ErrSecretNotFound, so both count.
+// isNotFound reports whether err means the key is absent: every SecretStore
+// wraps secrets.ErrNotFound.
 func isNotFound(err error) bool {
-	return errors.Is(err, secrets.ErrNotFound) || errors.Is(err, secrets.ErrSecretNotFound)
+	return errors.Is(err, secrets.ErrNotFound)
 }
 
 // grantKey derives the store key through the one sanctioned key scheme.
@@ -33,36 +32,36 @@ func grantKey(userKey, provider string) (string, error) {
 }
 
 // loadGrant reads and parses the user's grant for provider. On a
-// secrets.VersionedStore the returned Version carries the backend version so
+// secrets.VersionedStore the returned GrantVersion carries the backend version so
 // StoreRotated can compare-and-swap; on other stores it carries only the
 // grant_id. A missing key returns oauthbroker.ErrGrantMissing; any other store or parse
 // failure is returned wrapped and is not oauthbroker.ErrGrantMissing. Errors name the key
 // (and version), never a value.
-func loadGrant(ctx context.Context, store secrets.SecretStore, userKey, provider string) (oauthbroker.TokenRecord, oauthbroker.Version, error) {
+func loadGrant(ctx context.Context, store secrets.SecretStore, userKey, provider string) (oauthbroker.TokenRecord, oauthbroker.GrantVersion, error) {
 	key, err := grantKey(userKey, provider)
 	if err != nil {
-		return oauthbroker.TokenRecord{}, oauthbroker.Version{}, err
+		return oauthbroker.TokenRecord{}, oauthbroker.GrantVersion{}, err
 	}
 	var (
 		raw string
-		ver oauthbroker.Version
+		ver oauthbroker.GrantVersion
 	)
 	if vs, ok := store.(secrets.VersionedStore); ok {
 		v, n, gerr := vs.GetVersion(ctx, key)
 		if gerr != nil {
-			return oauthbroker.TokenRecord{}, oauthbroker.Version{}, readError(key, gerr)
+			return oauthbroker.TokenRecord{}, oauthbroker.GrantVersion{}, readError(key, gerr)
 		}
-		raw, ver = v, oauthbroker.Version{N: n, Versioned: true}
+		raw, ver = v, oauthbroker.GrantVersion{N: n, Versioned: true}
 	} else {
 		v, gerr := store.Get(ctx, key)
 		if gerr != nil {
-			return oauthbroker.TokenRecord{}, oauthbroker.Version{}, readError(key, gerr)
+			return oauthbroker.TokenRecord{}, oauthbroker.GrantVersion{}, readError(key, gerr)
 		}
 		raw = v
 	}
 	rec, err := oauthbroker.ParseTokenRecord([]byte(raw))
 	if err != nil {
-		return oauthbroker.TokenRecord{}, oauthbroker.Version{}, fmt.Errorf("oauthbroker: grant %q (version %d): %w", key, ver.N, err)
+		return oauthbroker.TokenRecord{}, oauthbroker.GrantVersion{}, fmt.Errorf("oauthbroker: grant %q (version %d): %w", key, ver.N, err)
 	}
 	ver.GrantID = rec.GrantID
 	return rec, ver, nil
@@ -86,14 +85,17 @@ func readError(key string, err error) error {
 //     stored bytes already equal rec the write is reported as success, so a
 //     retry after a transport error (where the first attempt may have landed)
 //     does not read as a conflict.
-//   - On other stores it re-reads, compares grant_id and then Puts. That is
-//     check-then-act: the caller MUST hold GrantLocks for (userKey,
-//     provider) across LoadGrant..StoreRotated.
+//   - On other stores it re-reads, compares grant_id and then Puts
+//     (check-then-act).
+//
+// On EVERY backend the caller MUST hold GrantLocks for (userKey, provider)
+// across LoadGrant..StoreRotated: Vault's Delete resets versions, so CAS is
+// defence in depth, not the guard.
 //
 // Store failures other than a conflict are returned wrapped (not
 // oauthbroker.ErrGrantChanged) and the caller treats them as "token unavailable". Errors
 // carry only the key and version, never a value. The helper does not log.
-func storeRotated(ctx context.Context, store secrets.SecretStore, userKey, provider string, rec oauthbroker.TokenRecord, read oauthbroker.Version) error {
+func storeRotated(ctx context.Context, store secrets.SecretStore, userKey, provider string, rec oauthbroker.TokenRecord, read oauthbroker.GrantVersion) error {
 	key, err := grantKey(userKey, provider)
 	if err != nil {
 		return err
@@ -105,13 +107,18 @@ func storeRotated(ctx context.Context, store secrets.SecretStore, userKey, provi
 	if err != nil {
 		return fmt.Errorf("oauthbroker: grant %q: %w", key, err)
 	}
-	if vs, ok := store.(secrets.VersionedStore); ok && read.Versioned {
+	if vs, ok := store.(secrets.VersionedStore); ok {
+		if !read.Versioned {
+			// The read was unguarded but the store can compare-and-swap:
+			// never downgrade to the unguarded path.
+			return fmt.Errorf("%w: %q: read was not versioned", oauthbroker.ErrGrantChanged, key)
+		}
 		return storeVersioned(ctx, vs, key, string(data), read)
 	}
 	return storeReadCompare(ctx, store, key, string(data), read)
 }
 
-func storeVersioned(ctx context.Context, vs secrets.VersionedStore, key, data string, read oauthbroker.Version) error {
+func storeVersioned(ctx context.Context, vs secrets.VersionedStore, key, data string, read oauthbroker.GrantVersion) error {
 	// Narrow the delete-and-reconnect window (a recreated key restarts at a
 	// low version that could equal the one read) with a cheap pre-check; the
 	// CAS below stays the authority.
@@ -148,7 +155,7 @@ func storeVersioned(ctx context.Context, vs secrets.VersionedStore, key, data st
 	return fmt.Errorf("%w: %q moved past version %d (now %d)", oauthbroker.ErrGrantChanged, key, read.N, nowVer)
 }
 
-func storeReadCompare(ctx context.Context, store secrets.SecretStore, key, data string, read oauthbroker.Version) error {
+func storeReadCompare(ctx context.Context, store secrets.SecretStore, key, data string, read oauthbroker.GrantVersion) error {
 	cur, err := store.Get(ctx, key)
 	if err != nil {
 		if isNotFound(err) {
@@ -175,21 +182,23 @@ func grantIDOf(raw string) (string, bool) {
 	return rec.GrantID, true
 }
 
-// grantStore binds the helpers to one consent.store; it implements
-// oauthbroker.GrantStore.
-type grantStore struct{ s secrets.SecretStore }
+// grantRecords binds the helpers to one consent.store; it implements
+// oauthbroker.GrantRecords.
+type grantRecords struct{ s secrets.SecretStore }
 
-var _ oauthbroker.GrantStore = grantStore{}
+var _ oauthbroker.GrantRecords = grantRecords{}
 
-// NewGrantStore returns the GrantStore over store.
-func NewGrantStore(store secrets.SecretStore) oauthbroker.GrantStore { return grantStore{s: store} }
+// NewGrantRecords returns the GrantRecords over store.
+func NewGrantRecords(store secrets.SecretStore) oauthbroker.GrantRecords {
+	return grantRecords{s: store}
+}
 
-// LoadGrant implements oauthbroker.GrantStore.
-func (g grantStore) LoadGrant(ctx context.Context, userKey, provider string) (oauthbroker.TokenRecord, oauthbroker.Version, error) {
+// LoadGrant implements oauthbroker.GrantRecords.
+func (g grantRecords) LoadGrant(ctx context.Context, userKey, provider string) (oauthbroker.TokenRecord, oauthbroker.GrantVersion, error) {
 	return loadGrant(ctx, g.s, userKey, provider)
 }
 
-// StoreRotated implements oauthbroker.GrantStore.
-func (g grantStore) StoreRotated(ctx context.Context, userKey, provider string, rec oauthbroker.TokenRecord, read oauthbroker.Version) error {
+// StoreRotated implements oauthbroker.GrantRecords.
+func (g grantRecords) StoreRotated(ctx context.Context, userKey, provider string, rec oauthbroker.TokenRecord, read oauthbroker.GrantVersion) error {
 	return storeRotated(ctx, g.s, userKey, provider, rec, read)
 }

@@ -18,11 +18,11 @@ var ErrGrantMissing = errors.New("oauthbroker: grant missing")
 // written. Callers drop the rotated record and re-load if they still need it.
 var ErrGrantChanged = errors.New("oauthbroker: grant changed")
 
-// Version is the opaque read token LoadGrant returns and StoreRotated takes
+// GrantVersion is the opaque read token LoadGrant returns and StoreRotated takes
 // back. It carries the store version (when the backend is a
 // secrets.VersionedStore) and the grant_id that was read. It holds no secret
 // value and is safe to log.
-type Version struct {
+type GrantVersion struct {
 	// N is the backend version of the record that was read; meaningful only
 	// when Versioned is true.
 	N int64
@@ -32,12 +32,17 @@ type Version struct {
 	GrantID string
 }
 
-// GrantStore is the port the refresh engine uses for the user's grant record.
+// GrantRecords is the port the refresh engine uses for the user's grant record
+// (the stored TokenRecord; the broker's grant metadata port is GrantStore).
 // LoadGrant reads and parses it with its store version; StoreRotated writes a
 // rotated record back only while the stored grant is still the one that was
-// read (see adapters/grantstore for the semantics and the GrantLocks
-// requirement on stores without compare-and-swap).
-type GrantStore interface {
-	LoadGrant(ctx context.Context, userKey, provider string) (TokenRecord, Version, error)
-	StoreRotated(ctx context.Context, userKey, provider string, rec TokenRecord, read Version) error
+// read (implemented in internal/controlplane, grantrecords.go).
+//
+// Callers MUST hold GrantLocks for (userKey, provider) across LoadGrant ..
+// StoreRotated on EVERY backend. Versioned compare-and-swap is defence in
+// depth only: Vault's Delete removes the metadata, so a revoke followed by a
+// reconnect restarts versions and a stale read version can match a new grant.
+type GrantRecords interface {
+	LoadGrant(ctx context.Context, userKey, provider string) (TokenRecord, GrantVersion, error)
+	StoreRotated(ctx context.Context, userKey, provider string, rec TokenRecord, read GrantVersion) error
 }
