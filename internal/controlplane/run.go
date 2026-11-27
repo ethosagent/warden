@@ -633,6 +633,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// resolveConsole already proved the variable is non-empty.
 		clientSecret = strings.TrimSpace(os.Getenv(consoleCfg.OIDC.ClientSecretEnv))
 	}
+	var consentSecret string
+	if consentCfg != nil {
+		// resolveConsent already proved the variable is non-empty.
+		consentSecret = strings.TrimSpace(os.Getenv(consentCfg.OIDC.ClientSecretEnv))
+	}
 
 	// Interfaces stay nil (not a typed nil) when the stores were not built.
 	var (
@@ -688,6 +693,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Consent:             consentCfg,
 		UserStore:           userStore,
 		ClientSecret:        clientSecret,
+		ConsentClientSecret: consentSecret,
 		Now:                 clk.Now,
 
 		// The CP's own admin bearer. An explicit --admin-token-env never falls

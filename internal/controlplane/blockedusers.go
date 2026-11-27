@@ -113,6 +113,9 @@ type BlockStore struct {
 	// revoker ends a blocked principal's console sessions; nil when the console
 	// has no sessions.
 	revoker atomic.Pointer[sessionRevokerBox]
+	// portalRevoker ends a blocked principal's portal sessions (W-P3-CSIG-04);
+	// nil when the consent portal is off.
+	portalRevoker atomic.Pointer[sessionRevokerBox]
 }
 
 // SessionRevoker ends console sessions by principal. SessionStore implements
@@ -156,6 +159,17 @@ func (b *BlockStore) SetSessionRevoker(r SessionRevoker) {
 		return
 	}
 	b.revoker.Store(&sessionRevokerBox{r: r})
+}
+
+// SetPortalSessionRevoker sets the revoker Add (and Watch, for another
+// process's write) uses to end the portal sessions of a newly blocked
+// principal. The control plane sets it when the consent portal is on.
+func (b *BlockStore) SetPortalSessionRevoker(r SessionRevoker) {
+	if r == nil {
+		b.portalRevoker.Store(nil)
+		return
+	}
+	b.portalRevoker.Store(&sessionRevokerBox{r: r})
 }
 
 // Ready reports whether a block list has been loaded. Console login refuses
@@ -219,25 +233,50 @@ func (b *BlockStore) refreshSnapshot(ctx context.Context) []config.BlockedUser {
 	return added
 }
 
-// revoke ends every session of the blocked principals in list.
-func (b *BlockStore) revoke(ctx context.Context, list ...config.BlockedUser) {
-	box := b.revoker.Load()
+// revoke ends every console and portal session of the blocked principals in
+// list. actor is who blocked them, for the portal_session_revoked line.
+func (b *BlockStore) revoke(ctx context.Context, actor string, list ...config.BlockedUser) {
+	if box := b.revoker.Load(); box != nil {
+		for _, u := range list {
+			if u.Sub != "" {
+				if _, err := box.r.DeleteBySub(ctx, u.Sub); err != nil {
+					b.logger.Error("blocklist: session revoke failed", "error", err)
+				}
+			}
+			if u.Email != "" {
+				if _, err := box.r.DeleteByEmail(ctx, u.Email); err != nil {
+					b.logger.Error("blocklist: session revoke failed", "error", err)
+				}
+			}
+		}
+	}
+	box := b.portalRevoker.Load()
 	if box == nil {
 		return
 	}
 	for _, u := range list {
+		n := 0
 		if u.Sub != "" {
-			if _, err := box.r.DeleteBySub(ctx, u.Sub); err != nil {
-				b.logger.Error("blocklist: session revoke failed", "error", err)
+			c, err := box.r.DeleteBySub(ctx, u.Sub)
+			if err != nil {
+				b.logger.Error("blocklist: portal session revoke failed", "error", err)
 			}
+			n += c
 		}
 		if u.Email != "" {
-			if _, err := box.r.DeleteByEmail(ctx, u.Email); err != nil {
-				b.logger.Error("blocklist: session revoke failed", "error", err)
+			c, err := box.r.DeleteByEmail(ctx, u.Email)
+			if err != nil {
+				b.logger.Error("blocklist: portal session revoke failed", "error", err)
 			}
+			n += c
 		}
+		b.logger.Info("portal_session_revoked", "by_sub", actor, "target_sub", u.Sub, "count", n)
 	}
 }
+
+// blockWatchActor is the by_sub of a revoke for an entry another process (the
+// offline CLI) added; its own created_by is not read back.
+const blockWatchActor = "system:blocklist_watch"
 
 // BlockWatchInterval is how often the control plane polls for a block-list
 // write by another process (the offline CLI).
@@ -311,7 +350,7 @@ func (b *BlockStore) OnChange(fn func()) {
 // bring them back.
 func (b *BlockStore) watchChanged(ctx context.Context) {
 	added := b.refreshSnapshot(ctx)
-	b.revoke(context.WithoutCancel(ctx), added...)
+	b.revoke(context.WithoutCancel(ctx), blockWatchActor, added...)
 	b.notify()
 }
 
@@ -420,7 +459,7 @@ func (b *BlockStore) Add(ctx context.Context, entry BlockEntry, actor string) (s
 	// Refresh the snapshot first so the middleware denies the principal at
 	// once, then end their sessions (they cannot return after an unblock).
 	b.changed(ctx)
-	b.revoke(context.WithoutCancel(ctx), config.BlockedUser{Sub: sub, Email: email})
+	b.revoke(context.WithoutCancel(ctx), actor, config.BlockedUser{Sub: sub, Email: email})
 	return id, nil
 }
 

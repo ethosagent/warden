@@ -113,6 +113,7 @@ classes:
       - internal/integration
       - internal/integration/webhook
       - internal/mcp/poisoned     # the poisoned MCP server (HTTP I/O) the demo binary and the L1 harness share (#363)
+      - internal/webauth          # CP browser sign-in shared by console and portal: OIDC flow (oauth2), oidc_pending and session stores on cpstate (#276)
 
   # DOMAIN — entities, rules, decisions, ports (interfaces), services. No I/O
   # (L3). Packages are listed explicitly: a new package must be classified here
@@ -134,9 +135,9 @@ classes:
       - internal/approvals   # change drafts, the approval state machine, the Store port and Service (APPR-01)
       - internal/bundle   # signed policy bundle payload, envelope, Sign and Verify (pure; #95)
       - internal/workerca         # worker CA issue/verify, SPIFFE worker ids: pure, x509 creation injected (#88)
-      - internal/oauthbroker   # OAuth broker domain: provider registry, scope caps, token record (BRKR-01)
+      - internal/oauthbroker   # OAuth broker domain: provider registry, scope caps, token record, pending/attempt/grant metadata and the GrantStore port (BRKR-01, BRKR-02)
       - internal/apikeys   # scoped CP API keys: wak_ format, scope registry, Store port, Index (APIK-01)
-      - internal/oauthbroker   # OAuth broker domain: pending, attempt and grant metadata, the GrantStore port, notifier, sweeper (BRKR-02)
+      - internal/portal   # consent portal domain: Principal, Blocklist/LinkWriter ports, admission and next rules (CSIG-02)
 
   # DEVTOOL — developer tooling; no Warden package may import it. Exempt from
   # layering but not from the global X rules.
@@ -157,6 +158,7 @@ classes:
       - test/**
       - internal/agentreg/agentregtest   # Store conformance suite (AREG-01)
       - internal/oauthbroker/oauthbrokertest   # GrantStore conformance suite (BRKR-02)
+      - internal/webauth/webauthtest     # FakeOIDC, the httptest IdP for webauth consumers (#276)
 
 # ---------------------------------------------------------------------------
 # Zones (Z1). Every package must match exactly one. data plane and control
@@ -204,6 +206,8 @@ zones:
     - internal/workerca/adapters/signer/**  # x509.CreateCertificate lives here: only the control plane issues worker certs (#88)
     - internal/apikeys/**   # CP-only API keys: domain and its SQLite adapter (APIK-01)
     - internal/oauthbroker/**   # CP-only OAuth broker: domain, SQLite GrantStore, conformance suite (BRKR-02)
+    - internal/webauth/**   # CP-only browser sign-in and its test fake (#276)
+    - internal/portal   # CP-only consent portal domain (CSIG-02)
   shared:
     - internal/config
     - internal/denyreason

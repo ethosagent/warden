@@ -40,6 +40,7 @@ func StateMigrations() []cpstate.Migration {
 	var migs []cpstate.Migration
 	migs = append(migs, SessionMigrations()...)
 	migs = append(migs, OIDCPendingMigrations()...)
+	migs = append(migs, PortalSessionMigrations()...)
 	migs = append(migs, PolicyStoreMigrations()...)
 	migs = append(migs, BundleMigrations()...)
 	migs = append(migs, adminaudit.Migrations()...)

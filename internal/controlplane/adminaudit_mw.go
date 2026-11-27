@@ -89,6 +89,12 @@ type adminAuditor struct {
 	loginFailedDropped atomic.Int64
 	loginFailedLog     *addrLimiter
 
+	// portalLoginFailed is the same per-address cap for portal.login_failed
+	// rows (W-P3-CSIG-02), kept apart so a portal login flood cannot use up
+	// the console's budget (or the reverse).
+	portalLoginFailed        *windowLimiter
+	portalLoginFailedDropped atomic.Int64
+
 	// blockedSession allows one auth.blocked_session row per principal per
 	// minute (W-P1-BLOCK-07).
 	blockedSession *windowLimiter
@@ -115,6 +121,7 @@ func newAdminAuditor(rec adminaudit.Recorder, probe func(context.Context) error,
 		clock:          clk,
 		logger:         logger,
 	}
+	a.portalLoginFailed = newWindowLimiter(clk, loginFailedPerMinute, loginFailedWindow, loginFailedMaxAddrs)
 	a.trusted = trustedPrefixes(cc.TrustedProxies)
 	return a
 }
@@ -127,6 +134,10 @@ func (s *Server) enableAdminAudit(rec adminaudit.Recorder, probe func(context.Co
 	s.registerBuiltinStateHashers()
 	if s.auth != nil {
 		s.auth.audit = s.recordLogin
+	}
+	if s.portal != nil {
+		s.portal.audit = s.recordPortalLogin
+		s.portal.auditLogout = s.recordPortalLogout
 	}
 }
 
