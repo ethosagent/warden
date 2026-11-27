@@ -643,6 +643,13 @@ func TestChargeUserLimit_TruncatedGroupsFailClosed(t *testing.T) {
 	// another agent the next groups rule that misses (ops) is.
 	wantTruncated(t, e.ChargeUserLimit(ulReq("github.com", truncated("f", "sales")), "agent-ci"), "ci-eng")
 	wantTruncated(t, e.ChargeUserLimit(ulReq("github.com", truncated("f", "sales")), "agent-a"), "ops")
+	// A users rule without groups listed after a groups rule still wins for
+	// its user: the users tier outranks the groups tier, so no truncated deny.
+	e2, _ := ulEval(t, config.Policy{UserLimits: []config.UserLimit{
+		{Name: "eng-any", Match: config.UserLimitMatch{Groups: []string{"eng"}, Agents: []string{"agent-a"}, Domains: []string{"api.openai.com"}}, RateLimit: "10/minute"},
+		{Name: "x-only", Match: config.UserLimitMatch{Users: []string{"x"}}, RateLimit: "10/minute"},
+	}})
+	wantLimit(t, e2.ChargeUserLimit(ulReq("api.openai.com", truncated("x", "sales")), "agent-a"), Allow, "x-only")
 	// The truncated path allocates nothing either.
 	rc := ulReq("api.openai.com", truncated("b", "sales"))
 	if got := testing.AllocsPerRun(100, func() { e.ChargeUserLimit(rc, "agent-a") }); got != 0 {

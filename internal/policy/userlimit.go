@@ -262,6 +262,9 @@ const rankNone = int32(1 << 30)
 // groups was in the list: the missing group may be the one the cut dropped, so
 // the caller fails closed (identity_groups_truncated) instead of falling
 // through to a looser rule or to no limit at all. r is then that skipped rule.
+// This fails closed whenever an earlier groups rule could apply, including a
+// cost-only rule (no rateLimit), whose truncated deny is then stricter than
+// the allow the rule itself would give.
 func (ls *userLimitSet) match(s *identity.Subject, agentID, host string) (r *compiledUserLimit, truncated bool) {
 	r = ls.matchIndexed(s, agentID, host)
 	if s == nil || s.Sub == "" || !s.GroupsTruncated {
@@ -282,7 +285,10 @@ func (ls *userLimitSet) truncatedCandidate(s *identity.Subject, agentID, host st
 	var best *compiledUserLimit
 	consider := func(i int32) {
 		r := &ls.rules[i]
-		if r.groups == nil || r.hasGroup(s) || !r.matches(tierGroups, s, agentID, host) {
+		// Agents and domains first (cheap, and usually decisive), so a
+		// truncated subject with no candidate does not test its whole group
+		// list against every groups rule.
+		if r.groups == nil || !r.matches(tierGroups, s, agentID, host) || r.hasGroup(s) {
 			return
 		}
 		if best == nil || r.rank < best.rank {
@@ -756,6 +762,11 @@ func changedUserLimits(prev, next *userLimitSet) map[string]struct{} {
 // bucket under the new definition keeps it; one that has not is reset lazily
 // by the defHash check in charge, so a bucket that survives a racing walk can
 // never carry an old window into a new rule.
+//
+// One conservative case remains: if a rule changes and is changed back to the
+// old definition before the walk reaches a shard, that shard keeps the old
+// window (its hash matches again) instead of resetting it. That can only be
+// stricter than a reset, never looser.
 func (e *Evaluator) dropUserBuckets(changed map[string]struct{}) {
 	b := e.ub
 	for i := range b.shards {
