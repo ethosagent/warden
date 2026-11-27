@@ -41,19 +41,19 @@ func (h *Handler) Callback() http.Handler {
 		noStore(w)
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
-			writeErrorPage(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			WriteErrorPage(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
 		p, ok := portal.PrincipalFrom(r.Context())
 		if !ok {
-			writeErrorPage(w, http.StatusUnauthorized, portal.CodeUnauthenticated)
+			WriteErrorPage(w, http.StatusUnauthorized, portal.CodeUnauthenticated)
 			return
 		}
 		h.clearCookie(w)
 		q := r.URL.Query()
 		state, code, perr := q.Get("state"), q.Get("code"), q.Get("error")
 		if len(state) > maxStateParam || len(code) > maxCodeParam || len(perr) > maxErrorParam {
-			writeErrorPage(w, http.StatusBadRequest, oauthbroker.CodeStateInvalid)
+			WriteErrorPage(w, http.StatusBadRequest, oauthbroker.CodeStateInvalid)
 			return
 		}
 		browser := ""
@@ -67,10 +67,10 @@ func (h *Handler) Callback() http.Handler {
 		if err != nil {
 			var ce *oauthbroker.CallbackError
 			if !errors.As(err, &ce) {
-				writeErrorPage(w, http.StatusInternalServerError, oauthbroker.CodeInternal)
+				WriteErrorPage(w, http.StatusInternalServerError, oauthbroker.CodeInternal)
 				return
 			}
-			writeErrorPage(w, ce.Status(), ce.Code)
+			WriteErrorPage(w, ce.Status(), ce.Code)
 			return
 		}
 		http.Redirect(w, r, resultLocation(res), http.StatusSeeOther)
@@ -117,14 +117,20 @@ var pageText = map[string]string{
 	oauthbroker.CodeUserBlocked:         "Your account cannot connect services.",
 	oauthbroker.CodeExchangeFailed:      "The provider did not accept the connection. Start the connection again from the portal.",
 	oauthbroker.CodeScopeExceeded:       "The provider granted access that this deployment does not allow, so nothing was saved.",
+	portal.CodeUnauthenticated:          "Sign in to the portal, then start the connection again.",
 	oauthbroker.CodeProviderUnreachable: "The provider could not be reached. Try again in a moment.",
 }
 
-func writeErrorPage(w http.ResponseWriter, status int, code string) {
+// WriteErrorPage writes the callback's generic failure page: a fixed message for
+// code, no-store and no-referrer headers, and a CSP that allows no script. The
+// control plane's session middleware uses it for a signed-out callback, so every
+// callback response is one page shape.
+func WriteErrorPage(w http.ResponseWriter, status int, code string) {
 	msg, ok := pageText[code]
 	if !ok {
 		msg = "The connection could not be completed. Try again later."
 	}
+	noStore(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'")
 	w.WriteHeader(status)

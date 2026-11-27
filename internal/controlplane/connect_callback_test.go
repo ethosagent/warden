@@ -240,3 +240,17 @@ func TestFitDetail(t *testing.T) {
 		t.Fatal("a short value must be unchanged")
 	}
 }
+
+// TestConnectCallbackSignedOutPage: a signed-out callback is the HTML 401 page,
+// not JSON, with no-store and no-referrer.
+func TestConnectCallbackSignedOutPage(t *testing.T) {
+	r, _, _, _ := callbackRig(t)
+	rec := r.serve(http.MethodGet, "/connect/callback?state=x&code=y")
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Header().Get("Content-Type"), "text/html") ||
+		!strings.Contains(rec.Body.String(), "Connection failed") || strings.Contains(rec.Body.String(), `"error"`) {
+		t.Fatalf("signed out = %d %q %s", rec.Code, rec.Header().Get("Content-Type"), rec.Body)
+	}
+	if rec.Header().Get("Referrer-Policy") != "no-referrer" || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("headers = %v", rec.Header())
+	}
+}

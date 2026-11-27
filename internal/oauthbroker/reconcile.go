@@ -76,7 +76,10 @@ func (b *Broker) reconcileOne(ctx context.Context, stale Grant) {
 		return
 	}
 	// The key is this grant's token, unreadable junk, or absent. A record of
-	// some other grant is left alone: it is not ours to delete.
+	// some other grant is left alone: it is not ours to delete. A callback that
+	// died after its Put landed but before Activate also ends here: the stored
+	// token carries this grant's id, so it is deleted and the grant revoked
+	// rather than activated (conservative, per spec: the user reconnects).
 	if raw != "" && (!haveRecord || stored.GrantID == cur.GrantID) {
 		if err := b.vault.Delete(ctx, key); err != nil && !b.notFound(err) {
 			b.logger.Warn("oauth_reconcile_deferred", "provider", stale.Provider, "user_key", stale.UserKey, "reason", "secret_store_delete")
@@ -137,4 +140,63 @@ func (b *Broker) OrphanedGrants() int {
 	b.metrics.mu.Lock()
 	defer b.metrics.mu.Unlock()
 	return b.metrics.orphans
+}
+
+// SweepOrphans deletes consent.store keys under users/<userKey>/<provider>
+// whose grant row is missing or revoked: the leftover of a revoke or a blocked
+// connect whose Delete failed. Each key is re-checked under the grant's
+// GrantLocks entry, and a key is never touched while its row is connecting,
+// active or reconsent_required. Keys not shaped users/<userKey>/<provider> are
+// left alone (CountOrphans still reports them). It returns how many keys it
+// deleted; a store error stops the pass and is returned.
+func (b *Broker) SweepOrphans(ctx context.Context) (int, error) {
+	if b.vault == nil || b.grantKey == nil {
+		return 0, nil
+	}
+	keys, err := b.vault.Keys(ctx)
+	if err != nil {
+		return 0, err
+	}
+	deleted := 0
+	for _, k := range keys {
+		rest, ok := strings.CutPrefix(k, userKeyPrefix)
+		if !ok {
+			continue
+		}
+		userKey, provider, ok := strings.Cut(rest, "/")
+		if !ok || userKey == "" || provider == "" || strings.Contains(provider, "/") {
+			continue
+		}
+		if want, kerr := b.grantKey(userKey, provider); kerr != nil || want != k {
+			continue
+		}
+		done, err := b.sweepOrphan(ctx, userKey, provider, k)
+		if err != nil {
+			return deleted, err
+		}
+		if done {
+			deleted++
+		}
+	}
+	if deleted > 0 {
+		b.logger.Info("oauth_orphan_keys_deleted", "count", deleted)
+	}
+	return deleted, nil
+}
+
+func (b *Broker) sweepOrphan(ctx context.Context, userKey, provider, key string) (bool, error) {
+	unlock := b.locks.Lock(userKey, provider)
+	defer unlock()
+	g, err := b.store.GetGrant(ctx, userKey, provider)
+	switch {
+	case errors.Is(err, ErrNotFound):
+	case err != nil:
+		return false, err
+	case g.State != GrantRevoked:
+		return false, nil
+	}
+	if err := b.vault.Delete(ctx, key); err != nil && !b.notFound(err) {
+		return false, err
+	}
+	return true, nil
 }

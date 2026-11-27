@@ -280,6 +280,9 @@ func (s *Server) sweepOAuthBroker(ctx context.Context) {
 // OrphanInterval until ctx is done. A failed pass is logged and retried.
 func (s *Server) countOrphanedGrants(ctx context.Context) {
 	for {
+		if _, err := s.broker.SweepOrphans(ctx); err != nil && ctx.Err() == nil {
+			s.cfg.Logger.Warn("oauth broker: orphan key sweep failed", "error", err.Error())
+		}
 		if _, err := s.broker.CountOrphans(ctx); err != nil && ctx.Err() == nil {
 			s.cfg.Logger.Warn("oauth broker: orphan count failed", "error", err.Error())
 		}

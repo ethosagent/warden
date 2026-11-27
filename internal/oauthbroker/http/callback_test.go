@@ -149,3 +149,26 @@ func TestConnectCallbackHTTPGuards(t *testing.T) {
 		t.Fatalf("no callbacker = %d", w.Code)
 	}
 }
+
+// TestConnectCallbackHTTPNoReferrer: every callback response, redirect or page,
+// is no-store and no-referrer (the URL it was reached by carries the code).
+func TestConnectCallbackHTTPNoReferrer(t *testing.T) {
+	check := func(name string, w *httptest.ResponseRecorder) {
+		t.Helper()
+		if w.Header().Get("Referrer-Policy") != "no-referrer" || w.Header().Get("Cache-Control") != "no-store" {
+			t.Errorf("%s: headers = %v", name, w.Header())
+		}
+	}
+	ok := &fakeCallbacker{res: oauthbroker.CallbackResult{Result: "granted", Provider: "google"}}
+	check("redirect", get(callbackHandler(ok), "/connect/callback?state=S&code=C", true, "c"))
+	bad := &fakeCallbacker{err: &oauthbroker.CallbackError{Code: oauthbroker.CodeStateInvalid}}
+	check("error page", get(callbackHandler(bad), "/connect/callback?state=S&code=C", true, "c"))
+	check("no session", get(callbackHandler(ok), "/connect/callback?state=S&code=C", false, "c"))
+	check("oversized", get(callbackHandler(ok), "/connect/callback?state="+strings.Repeat("a", 300), true, "c"))
+	w := httptest.NewRecorder()
+	oauthbrokerhttp.WriteErrorPage(w, http.StatusUnauthorized, portal.CodeUnauthenticated)
+	check("exported page", w)
+	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "Sign in") {
+		t.Errorf("exported page = %d %q", w.Code, w.Body)
+	}
+}

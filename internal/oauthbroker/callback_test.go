@@ -95,7 +95,7 @@ func newCBEnv(t *testing.T) *cbEnv {
 	reg, err := oauthbroker.NewRegistry([]config.OAuthProviderConfig{
 		{ID: "google", Type: config.OAuthProviderGoogle, ClientID: fakes.OAuthDefaultClientID, ClientSecretEnv: "CB_SECRET",
 			AuthURL: prov.AuthURL(), TokenURL: prov.TokenURL(),
-			AllowedScopes: []string{"calendar.readonly", "drive.readonly"}, DefaultScopes: []string{"drive.readonly"}},
+			AllowedScopes: []string{"calendar.readonly", "drive.readonly", "email"}, DefaultScopes: []string{"drive.readonly"}},
 		{ID: "github", Type: config.OAuthProviderGitHub, ClientID: fakes.OAuthDefaultClientID, ClientSecretEnv: "CB_SECRET",
 			AuthURL: prov.AuthURL(), TokenURL: prov.TokenURL(),
 			AllowedScopes: []string{"read:user", "repo"}, DefaultScopes: []string{"read:user"}},
@@ -144,7 +144,7 @@ func (e *cbEnv) connect(t *testing.T, sub, provider string, withPending bool, sc
 	var f flow
 	if withPending {
 		p, err := e.store.CreatePending(ctx, oauthbroker.Pending{
-			Iss: startIss, Sub: sub, UserKey: wantUserKey(sub), Provider: provider, Scopes: []string{"calendar.readonly", "drive.readonly", "read:user", "repo"},
+			Iss: startIss, Sub: sub, UserKey: wantUserKey(sub), Provider: provider, Scopes: []string{"calendar.readonly", "drive.readonly", "email", "read:user", "repo"},
 		}, 15*time.Minute)
 		if err != nil {
 			t.Fatal(err)
@@ -914,5 +914,164 @@ func TestConnectCallbackUnusableToken(t *testing.T) {
 			}
 			e.noKey(t, cbSub, "google")
 		})
+	}
+}
+
+// TestConnectCallbackRefreshNotInherited: only the previous active grant's own
+// record under the same client id lends its refresh token; an orphan left by a
+// revoked grant and a record issued to another client are not inherited.
+func TestConnectCallbackRefreshNotInherited(t *testing.T) {
+	ctx := context.Background()
+	t.Run("revoked grant's leftover", func(t *testing.T) {
+		e := newCBEnv(t)
+		if _, err := e.b.Callback(ctx, e.connect(t, cbSub, "google", false, "drive.readonly").req); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.store.RevokeGrant(ctx, wantUserKey(cbSub), "google", ""); err != nil {
+			t.Fatal(err)
+		}
+		e.prov.OmitRefreshToken(true)
+		if _, err := e.b.Callback(ctx, e.connect(t, cbSub, "google", false, "drive.readonly").req); err != nil {
+			t.Fatal(err)
+		}
+		if rec := e.record(t, cbSub, "google"); rec.RefreshToken != "" {
+			t.Fatalf("a revoked grant's refresh token was inherited: %v", rec)
+		}
+	})
+	t.Run("another client id", func(t *testing.T) {
+		e := newCBEnv(t)
+		if _, err := e.b.Callback(ctx, e.connect(t, cbSub, "google", false, "drive.readonly").req); err != nil {
+			t.Fatal(err)
+		}
+		old := e.record(t, cbSub, "google")
+		old.ClientID = "an-older-client"
+		data, err := old.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = e.vault.Put(ctx, e.keyOf(cbSub, "google"), string(data))
+		e.prov.OmitRefreshToken(true)
+		if _, err := e.b.Callback(ctx, e.connect(t, cbSub, "google", false, "drive.readonly").req); err != nil {
+			t.Fatal(err)
+		}
+		if rec := e.record(t, cbSub, "google"); rec.RefreshToken != "" {
+			t.Fatalf("a refresh token of another client id was inherited: %v", rec)
+		}
+	})
+}
+
+// TestConnectCallbackGoogleIdentityScopes: Google answers email and openid with
+// the userinfo URL; that is inside the cap for a google provider only, and a
+// requested "email" is not reported missing when its URL form is granted.
+func TestConnectCallbackGoogleIdentityScopes(t *testing.T) {
+	ctx := context.Background()
+	e := newCBEnv(t)
+	e.prov.GrantScopes("drive.readonly https://www.googleapis.com/auth/userinfo.email openid")
+	f := e.connect(t, cbSub, "google", true, "drive.readonly", "email")
+	res, err := e.b.Callback(ctx, f.req)
+	if err != nil || res.Result != oauthbroker.ResultGranted {
+		t.Fatalf("google identity scopes = %+v, %v", res, err)
+	}
+	if p, _ := e.store.GetPending(ctx, f.pendingID); p.Status != oauthbroker.StatusGranted {
+		t.Fatalf("pending = %+v, want granted (email is not missing)", p)
+	}
+	// Other Google scope URLs, and the same URL on a non-google provider, stay
+	// outside the cap.
+	e.prov.GrantScopes("drive.readonly https://www.googleapis.com/auth/gmail.send")
+	if _, err := e.b.Callback(ctx, e.connect(t, "bob", "google", false, "drive.readonly").req); err == nil {
+		t.Fatal("a non-identity Google URL was accepted")
+	}
+	e.prov.SetStyle(fakes.OAuthGitHub)
+	e.prov.GrantScopes("read:user,https://www.googleapis.com/auth/userinfo.email")
+	_, err = e.b.Callback(ctx, e.connect(t, "carol", "github", false, "read:user").req)
+	if code, _ := cbCode(t, err); code != oauthbroker.CodeScopeExceeded {
+		t.Fatalf("userinfo URL on a github provider = %v", err)
+	}
+}
+
+// TestConnectCallbackSameStateRace: two callbacks racing on one state run
+// exactly one exchange; the other is state_invalid.
+func TestConnectCallbackSameStateRace(t *testing.T) {
+	e := newCBEnv(t)
+	f := e.connect(t, cbSub, "google", false, "drive.readonly")
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = e.b.Callback(context.Background(), f.req)
+		}()
+	}
+	wg.Wait()
+	ok, invalid := 0, 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		default:
+			if code, _ := cbCode(t, err); code == oauthbroker.CodeStateInvalid {
+				invalid++
+			}
+		}
+	}
+	if ok != 1 || invalid != 1 || e.prov.TokenRequests() != 1 {
+		t.Fatalf("ok %d, state_invalid %d, token requests %d; want 1, 1, 1", ok, invalid, e.prov.TokenRequests())
+	}
+}
+
+// TestSweepOrphans: keys whose grant row is missing or revoked are deleted
+// under the grant's lock; keys of connecting, active or reconsent_required
+// grants and keys of another shape are untouched. A block that lands during the
+// exchange with a failing Delete leaves a revoked row and a key, which the
+// sweep then removes, with another user's active grant untouched.
+func TestSweepOrphans(t *testing.T) {
+	e := newCBEnv(t)
+	ctx := context.Background()
+	if _, err := e.b.Callback(ctx, e.connect(t, "bob", "google", false, "drive.readonly").req); err != nil {
+		t.Fatal(err)
+	}
+	f := e.connect(t, cbSub, "google", false, "drive.readonly")
+	e.blocks.calls, e.blocks.from = 0, 2 // the pre-exchange check passes, the post-write one blocks
+	e.vault.SetErrors(nil, nil, errors.New("delete failed"), nil)
+	_, err := e.b.Callback(ctx, f.req)
+	if code, _ := cbCode(t, err); code != oauthbroker.CodeUserBlocked {
+		t.Fatalf("= %v", err)
+	}
+	e.blocks.from = 0
+	if g, _ := e.grant(t, cbSub, "google"); g.State != oauthbroker.GrantRevoked {
+		t.Fatalf("grant = %+v, want revoked", g)
+	}
+	if _, ok := e.vault.Value(e.keyOf(cbSub, "google")); !ok {
+		t.Fatal("the key should have survived the failing Delete")
+	}
+	// While the store keeps failing, the sweep reports it and keeps the key.
+	if _, err := e.b.SweepOrphans(ctx); err == nil {
+		t.Fatal("SweepOrphans swallowed a Delete failure")
+	}
+	e.vault.SetErrors(nil, nil, nil, nil)
+	_ = e.vault.Put(ctx, "users/"+wantUserKey("ghost")+"/google", "{}") // no row
+	_ = e.vault.Put(ctx, "users/malformed", "{}")
+	n, err := e.b.SweepOrphans(ctx)
+	if err != nil || n != 2 {
+		t.Fatalf("SweepOrphans = %d, %v, want 2", n, err)
+	}
+	e.noKey(t, cbSub, "google")
+	if _, ok := e.vault.Value("users/malformed"); !ok {
+		t.Fatal("a key of another shape was deleted")
+	}
+	if rec := e.record(t, "bob", "google"); rec.AccessToken == "" {
+		t.Fatal("an active grant's key was touched")
+	}
+	if g, _ := e.grant(t, "bob", "google"); g.State != oauthbroker.GrantActive {
+		t.Fatalf("active grant = %+v", g)
+	}
+	// A connecting grant's key is never swept.
+	e.vault.SetErrors(nil, errors.New("down"), nil, nil)
+	_, _ = e.b.Callback(ctx, e.connect(t, "dave", "google", false, "drive.readonly").req)
+	e.vault.SetErrors(nil, nil, nil, nil)
+	_ = e.vault.Put(ctx, e.keyOf("dave", "google"), "{}")
+	if n, _ := e.b.SweepOrphans(ctx); n != 0 {
+		t.Fatalf("swept %d keys, want none (a connecting grant owns its key)", n)
 	}
 }

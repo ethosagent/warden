@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/ethosagent/warden/internal/config"
 )
 
 // TokenVault is consent.store as the broker uses it: the CP-only user
@@ -132,6 +134,41 @@ const (
 // when the account identity is read, and they carry no API access.
 var identityScopes = []string{"openid", "email"}
 
+// Google reports the identity scopes email and profile under their full URLs.
+const (
+	googleUserinfoEmail   = "https://www.googleapis.com/auth/userinfo.email"
+	googleUserinfoProfile = "https://www.googleapis.com/auth/userinfo.profile"
+)
+
+// identityAllowance returns the identity scopes a provider may grant beyond its
+// allowedScopes: openid and email everywhere; for google also profile and the
+// userinfo URLs Google answers email and profile with. Nothing else.
+func identityAllowance(p *Provider) []string {
+	if p.Type != config.OAuthProviderGoogle {
+		return identityScopes
+	}
+	return []string{"openid", "email", "profile", googleUserinfoEmail, googleUserinfoProfile}
+}
+
+// canonIdentity maps Google's userinfo URLs to the short scope names the
+// request used, so "email" requested and the URL granted compare equal.
+func canonIdentity(p *Provider, scopes []string) []string {
+	if p.Type != config.OAuthProviderGoogle {
+		return scopes
+	}
+	out := make([]string, 0, len(scopes))
+	for _, s := range scopes {
+		switch s {
+		case googleUserinfoEmail:
+			s = "email"
+		case googleUserinfoProfile:
+			s = "profile"
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 type callbackState struct {
 	provider  string
 	userKey   string
@@ -250,7 +287,7 @@ func (b *Broker) callback(ctx context.Context, req CallbackRequest, st *callback
 	if !scopeSent {
 		granted = requested
 	}
-	if _, outside := CapScopes(granted, UnionScopes(prov.AllowedScopes, identityScopes)); len(outside) > 0 {
+	if _, outside := CapScopes(granted, UnionScopes(prov.AllowedScopes, identityAllowance(prov))); len(outside) > 0 {
 		b.logger.Warn("oauth_connect_scope_exceeded", "provider", prov.ID, "user_key", a.UserKey, "outside_count", len(outside))
 		b.completePending(ctx, a.PendingID, StatusDenied, ReasonScopeExceeded)
 		return CallbackResult{}, cbErr(CodeScopeExceeded)
@@ -258,7 +295,7 @@ func (b *Broker) callback(ctx context.Context, req CallbackRequest, st *callback
 	st.scopes = granted
 	insufficient := false
 	if scopeSent {
-		_, missing := CapScopes(requested, granted)
+		_, missing := CapScopes(canonIdentity(prov, requested), canonIdentity(prov, granted))
 		insufficient = len(missing) > 0
 	}
 	return b.writeGrant(ctx, req, a, prov, tok, granted, insufficient, st)
@@ -299,7 +336,11 @@ func (b *Broker) writeGrant(ctx context.Context, req CallbackRequest, a Attempt,
 		prev, err := b.vault.Get(wctx, key)
 		switch {
 		case err == nil:
-			if old, perr := ParseTokenRecord([]byte(prev)); perr == nil && old.RefreshToken != "" {
+			// Only the previous active grant's own token under this client may
+			// lend its refresh token: a record left by a revoked grant, or one
+			// issued to another client id, is not inherited.
+			if old, perr := ParseTokenRecord([]byte(prev)); perr == nil && old.RefreshToken != "" &&
+				grant.PrevGrantID != "" && old.GrantID == grant.PrevGrantID && old.ClientID == prov.ClientID {
 				rec.RefreshToken, rec.RefreshExpiry = old.RefreshToken, old.RefreshExpiry
 			}
 		case b.notFound(err):
