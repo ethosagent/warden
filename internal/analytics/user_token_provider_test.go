@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -138,22 +139,27 @@ func TestUserTokenProviderMigration(t *testing.T) {
 			}
 		}
 		got, err := s.GetEvents(EventFilter{})
-		if err != nil || len(got) != 1 || got[0].UserTokenProvider != "" {
+		if err != nil || len(got) != 1 || got[0].UserTokenProvider != "" || got[0].UserTokenRetried {
 			t.Fatalf("legacy row lost or wrong defaults: %+v %v", got, err)
 		}
 	})
 }
 
-// An event without a per-user swap marshals without the new keys.
+// An event without a per-user swap marshals to the same bytes as before the
+// new fields existed (the pinned golden), and set fields appear.
 func TestUserTokenProviderOmittedWhenEmpty(t *testing.T) {
-	b, err := json.Marshal(Event{Domain: "x.com", Decision: "allow", Provider: "openai"})
+	got, err := json.Marshal(goldenEvent())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), "user_token") {
-		t.Errorf("event without a per-user swap carries the new keys: %s", b)
+	want, err := os.ReadFile("testdata/event_identity_free.golden.json")
+	if err != nil {
+		t.Fatal(err)
 	}
-	b, _ = json.Marshal(Event{UserTokenProvider: "google", UserTokenRetried: true})
+	if strings.TrimSpace(string(got)) != strings.TrimSpace(string(want)) {
+		t.Errorf("fully populated event without the new fields changed bytes:\n got %s\nwant %s", got, want)
+	}
+	b, _ := json.Marshal(Event{UserTokenProvider: "google", UserTokenRetried: true})
 	if !strings.Contains(string(b), `"user_token_provider":"google"`) || !strings.Contains(string(b), `"user_token_retried":true`) {
 		t.Errorf("set fields missing from JSON: %s", b)
 	}

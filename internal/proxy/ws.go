@@ -197,7 +197,7 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 		})
 		return
 	}
-	p.recordEvent(s.resolved(), analytics.Event{
+	wsEv := analytics.Event{
 		Timestamp:      time.Now(),
 		Domain:         s.domain,
 		Port:           s.port,
@@ -207,7 +207,9 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 		Decision:       "allow",
 		Reason:         s.echoMonitorReason,
 		ResponseStatus: resp.StatusCode,
-	})
+	}
+	s.stampUserToken(&wsEv)
+	p.recordEvent(s.resolved(), wsEv)
 	p.cfg.Metrics.RecordRequest("allow", proto)
 	p.logDecision(decisionLog{
 		Domain: s.domain, Port: s.port, Protocol: proto,
