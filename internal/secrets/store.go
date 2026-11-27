@@ -75,7 +75,10 @@ type SecretStore interface {
 // by-reference-only rule as SecretStore.
 type VersionedStore interface {
 	// GetVersion returns key's current value and version. An absent key wraps
-	// ErrNotFound.
+	// ErrNotFound, and the version is still valid alongside it: 0 for a key
+	// that never existed, or the latest version of a key whose value was
+	// soft-deleted (non-zero). In every case the returned version is the one to
+	// pass to PutIfVersion to write over what was read.
 	GetVersion(ctx context.Context, key string) (value string, version int64, err error)
 
 	// PutIfVersion writes value only when key's current version equals

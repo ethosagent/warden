@@ -228,7 +228,9 @@ func (f *FakeVaultKV) serve(w http.ResponseWriter, r *http.Request) {
 		writeVaultJSON(w, http.StatusForbidden, map[string]any{"errors": []string{"permission denied"}})
 		return
 	}
-	if r.Method == http.MethodGet && r.URL.Path == "/v1/sys/internal/ui/mounts/"+f.mount {
+	if probe, ok := strings.CutPrefix(r.URL.Path, "/v1/sys/internal/ui/mounts/"); r.Method == http.MethodGet && ok &&
+		(probe == f.mount || strings.HasPrefix(probe, f.mount+"/")) {
+		// Like Vault, a probe of any path inside the mount reports the mount.
 		writeVaultJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
 			"type": "kv", "path": f.mount + "/", "options": map[string]string{"version": f.reportVersion},
 		}})

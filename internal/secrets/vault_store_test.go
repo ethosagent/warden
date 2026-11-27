@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/test/fakes"
@@ -56,7 +58,7 @@ func kv2Preflight(w http.ResponseWriter, r *http.Request) bool {
 	if !strings.HasPrefix(r.URL.Path, "/v1/sys/internal/ui/mounts/") {
 		return false
 	}
-	_, _ = w.Write([]byte(`{"data":{"type":"kv","options":{"version":"2"}}}`))
+	_, _ = w.Write([]byte(`{"data":{"type":"kv","path":"secret/","options":{"version":"2"}}}`))
 	return true
 }
 
@@ -602,6 +604,90 @@ func TestVaultStore_NoSecretsInErrorsOrLogs(t *testing.T) {
 	for _, sv := range secretsSeen {
 		if strings.Contains(logs.String(), sv) {
 			t.Fatalf("a log line leaked a secret: %q", logs.String())
+		}
+	}
+}
+
+// TestVaultStore_ProbeHonoursCallerContext: concurrent first calls share one
+// mount probe, and with the probe hanging each returns within its own ctx
+// deadline; with the probe failing they all fail fast.
+func TestVaultStore_ProbeHonoursCallerContext(t *testing.T) {
+	release := make(chan struct{})
+	var probes atomic.Int32
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/sys/internal/ui/mounts/") {
+			probes.Add(1)
+			<-release
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(slow.Close)
+	t.Cleanup(func() { close(release) })
+	s, err := secrets.NewVaultSecretStore(secrets.VaultStoreConfig{Addr: slow.URL, Token: vaultTestToken}, slow.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const callers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	elapsed := make([]time.Duration, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+			defer cancel()
+			start := time.Now()
+			_, errs[i] = s.Get(ctx, "k")
+			elapsed[i] = time.Since(start)
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < callers; i++ {
+		if !errors.Is(errs[i], context.DeadlineExceeded) {
+			t.Errorf("caller %d: err = %v, want its own DeadlineExceeded", i, errs[i])
+		}
+		if elapsed[i] > 2*time.Second {
+			t.Errorf("caller %d waited %v, past its 150ms deadline", i, elapsed[i])
+		}
+	}
+	if n := probes.Load(); n != 1 {
+		t.Errorf("concurrent first calls made %d probes, want 1 shared probe", n)
+	}
+
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(failing.Close)
+	fs, err := secrets.NewVaultSecretStore(secrets.VaultStoreConfig{Addr: failing.URL, Token: vaultTestToken}, failing.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err := fs.Get(ctx, "k")
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), "500") {
+			t.Fatalf("Get with a failing probe = %v, want the probe's 500", err)
+		}
+	}
+}
+
+// TestVaultStore_ProbeRefusesSubPathMount: a mount configured as a sub-path of
+// a KV v2 mount is refused at the probe, before any data request.
+func TestVaultStore_ProbeRefusesSubPathMount(t *testing.T) {
+	kv := fakes.NewFakeVaultKV(t, vaultTestToken)
+	s, err := secrets.NewVaultSecretStore(secrets.VaultStoreConfig{Addr: kv.URL(), Mount: "secret/app", Token: vaultTestToken}, kv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put(context.Background(), "k", "v"); !errors.Is(err, secrets.ErrNotKV2) {
+		t.Fatalf("Put on a sub-path mount = %v, want ErrNotKV2", err)
+	}
+	for _, r := range kv.Requests() {
+		if !strings.HasPrefix(r.Path, "/v1/sys/internal/ui/mounts/") {
+			t.Fatalf("a refused mount must make no data request, saw %s %s", r.Method, r.Path)
 		}
 	}
 }

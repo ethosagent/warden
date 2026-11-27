@@ -38,8 +38,10 @@ import (
 	"net/url"
 	"sort"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -96,8 +98,8 @@ type vaultSecretStore struct {
 	token     string
 	namespace string
 
-	kv2Mu sync.Mutex
-	kv2OK bool // the mount preflight passed; only success is cached
+	kv2OK    atomic.Bool        // the mount preflight passed; only success is cached
+	kv2Probe singleflight.Group // one in-flight preflight shared by concurrent callers
 }
 
 var (
@@ -178,12 +180,36 @@ func isLoopbackHost(host string) bool {
 
 // ensureKV2 checks once, before the store's first request, that the mount is a
 // KV v2 engine. Only success is cached, so a transient failure is retried.
+// Concurrent first calls share one in-flight probe, and each waits only as long
+// as its own ctx allows: the probe runs detached from any one caller's
+// cancellation, bounded by the client timeout.
 func (s *vaultSecretStore) ensureKV2(ctx context.Context) error {
-	s.kv2Mu.Lock()
-	defer s.kv2Mu.Unlock()
-	if s.kv2OK {
+	if s.kv2OK.Load() {
 		return nil
 	}
+	probeCtx := context.WithoutCancel(ctx)
+	ch := s.kv2Probe.DoChan("kv2", func() (any, error) {
+		if s.kv2OK.Load() {
+			return nil, nil
+		}
+		if err := s.probeKV2(probeCtx); err != nil {
+			return nil, err
+		}
+		s.kv2OK.Store(true)
+		return nil, nil
+	})
+	select {
+	case res := <-ch:
+		return res.Err
+	case <-ctx.Done():
+		return fmt.Errorf("mount check: %w", ctx.Err())
+	}
+}
+
+// probeKV2 asks Vault what engine serves the mount. It refuses anything but a
+// KV v2 mount rooted exactly at the configured mount path, so a sub-path of a
+// KV v2 mount (e.g. "secret/app" for mount "secret/") is refused.
+func (s *vaultSecretStore) probeKV2(ctx context.Context) error {
 	status, body, err := s.do(ctx, http.MethodGet, s.base+"/v1/sys/internal/ui/mounts/"+escapeVaultPath(s.mount), nil)
 	if err != nil {
 		return fmt.Errorf("mount check: %w", err)
@@ -194,6 +220,7 @@ func (s *vaultSecretStore) ensureKV2(ctx context.Context) error {
 	var r struct {
 		Data struct {
 			Type    string `json:"type"`
+			Path    string `json:"path"`
 			Options struct {
 				Version string `json:"version"`
 			} `json:"options"`
@@ -205,7 +232,9 @@ func (s *vaultSecretStore) ensureKV2(ctx context.Context) error {
 	if r.Data.Type != "kv" || r.Data.Options.Version != "2" {
 		return ErrNotKV2
 	}
-	s.kv2OK = true
+	if r.Data.Path != s.mount+"/" {
+		return fmt.Errorf("mount check: %q is not the root of its mount: %w", s.mount, ErrNotKV2)
+	}
 	return nil
 }
 
