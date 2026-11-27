@@ -42,6 +42,7 @@ import (
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/oauthbroker"
 	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/internal/workerca"
 )
@@ -223,6 +224,12 @@ type Config struct {
 	// and later features that register scopes use these, never their own.
 	APIKeyStore    apikeys.Store
 	APIKeyRegistry *apikeys.Registry
+	// GrantStore is the OAuth broker's metadata store (W-P3-BRKR-02), set only
+	// when the broker is enabled (consent.providers non-empty, --state-dir, a
+	// persistent consent.store; wired in W-P3-BRKR-03) over a cpstate DB opened
+	// with the broker migrations enabled. Start runs its 1-minute sweeper. Nil
+	// means the broker is off: no sweeper, no tables.
+	GrantStore oauthbroker.GrantStore
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -544,6 +551,9 @@ func New(cfg Config) *Server {
 func (s *Server) Start(ctx context.Context) {
 	if s.approvals != nil {
 		go s.sweepApprovals(ctx)
+	}
+	if s.cfg.GrantStore != nil {
+		go s.sweepOAuthBroker(ctx)
 	}
 	if s.sessions != nil {
 		go s.sweepSessions(ctx)
