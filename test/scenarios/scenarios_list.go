@@ -194,6 +194,11 @@ var All = slices.Concat(
 		// token-less request uses the anonymous rule, and only the user over the
 		// limit gets 429 user_rate_limited; events carry agent_id and limit_rule.
 		{Name: "user_rate_limit", Opts: userRateLimitOpts(), Run: userRateLimit},
+		// Per-user daily cost caps (W-P3-PUL-04): a streamed LLM answer is
+		// priced from the relayed bytes; over the cap the user gets 403
+		// user_cost_limited, another user keeps his budget, and a worker
+		// restart reseeds the ledger from local events.
+		{Name: "user_cost_cap", Opts: userCostCapOpts(), Run: userCostCap},
 		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
 		// gateway through RequestMeta without changing any verdict.
 		{Name: "mcp_subject_seam_unchanged", Opts: mcpSubjectOpts(), Run: mcpSubjectSeamUnchanged},

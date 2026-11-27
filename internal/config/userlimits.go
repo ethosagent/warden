@@ -32,8 +32,8 @@ const (
 
 // UserLimit is one per-user limit rule: a rate limit and/or a daily
 // estimated-cost cap, applied to the requests its Match selects. The worker
-// enforces rateLimit on every request (W-P3-PUL-09); dailyCostUSD is not
-// enforced yet and is refused (see unenforcedUserLimits).
+// enforces rateLimit on every request (W-P3-PUL-09) and dailyCostUSD on every
+// request to a cost-tracked destination (W-P3-PUL-04).
 type UserLimit struct {
 	// Name identifies the rule in buckets, the decision log and cost blocks.
 	// Required and unique in userLimits; empty on defaultUserLimit and
@@ -107,11 +107,6 @@ func copyUserLimits(in []UserLimit) []UserLimit {
 	}
 	return out
 }
-
-// allowUnenforcedUserLimits lifts the not-yet-enforced guard on dailyCostUSD.
-// It is false in production; W-P3-PUL-04 replaces the guard with the real
-// enforcement. Tests set it to exercise the wire.
-var allowUnenforcedUserLimits = false
 
 // NormalizeUserLimits normalizes and validates the per-user limit rules in p:
 // userLimits, defaultUserLimit and anonymousLimit. Users, groups, agents and
@@ -275,28 +270,6 @@ func sortDedup(in []string) []string {
 		}
 	}
 	return out
-}
-
-// unenforcedUserLimits is the fail-closed guard for daily cost caps: rate
-// limits are enforced (W-P3-PUL-09), but until W-P3-PUL-04 enforces
-// dailyCostUSD a rule that sets one would be silently ignored, so it is
-// refused instead.
-func unenforcedUserLimits(p Policy) error {
-	if allowUnenforcedUserLimits {
-		return nil
-	}
-	for i, l := range p.UserLimits {
-		if l.DailyCostUSD != 0 {
-			return fmt.Errorf("config: policy.userLimits[%d].dailyCostUSD: not yet enforced; remove it until a release that enforces per-user cost caps", i)
-		}
-	}
-	switch {
-	case p.DefaultUserLimit != nil && p.DefaultUserLimit.DailyCostUSD != 0:
-		return fmt.Errorf("config: policy.defaultUserLimit.dailyCostUSD: not yet enforced; remove it until a release that enforces per-user cost caps")
-	case p.AnonymousLimit != nil && p.AnonymousLimit.DailyCostUSD != 0:
-		return fmt.Errorf("config: policy.anonymousLimit.dailyCostUSD: not yet enforced; remove it until a release that enforces per-user cost caps")
-	}
-	return nil
 }
 
 // ValidateCostBlockedUsers checks the wire-only cost block list: at most

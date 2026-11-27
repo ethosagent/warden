@@ -622,9 +622,6 @@ func validate(p Policy) error {
 	if err := ValidateUserLimits(p); err != nil {
 		return err
 	}
-	if err := unenforcedUserLimits(p); err != nil {
-		return err
-	}
 	// A control-plane-managed worker (controlPlane configured, not local-only)
 	// gets its policy from the CP and boots fail-closed, so it needs no local
 	// allowlist. Every other mode must declare at least one allow entry.

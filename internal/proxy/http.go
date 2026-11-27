@@ -17,6 +17,7 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/cost"
 	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
@@ -151,12 +152,19 @@ type requestScope struct {
 	policyAllowed bool
 	chargeLimit   bool
 	limitRule     string
-	judgeReason   string
-	wasMCP        bool
-	mcpTool       string
-	mcpReason     string
-	mcpSessKey    string
-	closeAfter    bool
+	// costCapped marks a request charged under a rule with dailyCostUSD to a
+	// cost-tracked destination; its estimate is added to costKey once
+	// (costCharged) after the response is relayed (W-P3-PUL-04).
+	costCapped  bool
+	costCharged bool
+	costKey     cost.LedgerKey
+
+	judgeReason string
+	wasMCP      bool
+	mcpTool     string
+	mcpReason   string
+	mcpSessKey  string
+	closeAfter  bool
 
 	// sess is the connection's registry session (nil for none): blockStage binds
 	// the request's identities to it.
@@ -1381,6 +1389,7 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 	p.beforeTerminal()
 
 	if p.echoStreamDone(s) {
+		p.chargeUserCostCut(s)
 		return true // echo guard cut the stream; its deny is the only event
 	}
 	if errors.Is(scanErr, sse.ErrEventTooLarge) {
@@ -1389,6 +1398,8 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 		s.mcpReason = string(denyreason.MCPSSEEventTooLarge)
 	}
 	if blocked {
+		// Events before the blocked one already reached the agent.
+		p.chargeUserCostCut(s)
 		// A gateway (or held-event) deny names itself; an empty verdict reason
 		// falls back to the declared mcp_gateway_deny (#409).
 		p.emitDeny(s, gatewayDenyReason(preferEchoReason(s.mcpReason, s.echoMonitorReason)), denyExtra{
@@ -1401,6 +1412,7 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 		})
 	} else {
 		costUSD, provider := p.estimateCost(s)
+		p.chargeUserCost(s, costUSD)
 		p.recordEvent(s.resolved(), analytics.Event{
 			Timestamp:      time.Now(),
 			Domain:         s.domain,
@@ -1448,12 +1460,15 @@ func (p *Proxy) finishResponse(s *requestScope) (endSession bool) {
 	writeErr := s.out.relay(s.resp)
 	if p.echoStreamDone(s) {
 		// The echo guard cut the stream and already recorded the deny: end the
-		// session (closing the conn) and record no allow.
+		// session (closing the conn) and record no allow. What was relayed
+		// before the cut is still charged to a cost cap.
+		p.chargeUserCostCut(s)
 		return true
 	}
 	if s.grpcGuard.Refused() {
 		// A gRPC frame was refused after the response began: its deny is the only
 		// event, and the client leg is finished with the refusal status.
+		p.chargeUserCostCut(s)
 		return true
 	}
 	p.recordAllowEvent(s)
@@ -1596,6 +1611,7 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 	// request/response Content-Length and the destination provider's pricing;
 	// zero when cost tracking is off or the domain is not a known provider.
 	costUSD, provider := p.estimateCost(s)
+	p.chargeUserCost(s, costUSD)
 	p.recordEvent(s.resolved(), analytics.Event{
 		Timestamp:      time.Now(),
 		Domain:         s.domain,

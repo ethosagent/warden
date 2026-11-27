@@ -51,18 +51,33 @@ func bytesToTokens(bytes int64) int64 {
 	return bytes / 4
 }
 
+// Tracks reports whether domain is a destination the estimator prices, and
+// which provider it is. Only a tracked destination is subject to a per-user
+// cost cap (W-P3-PUL-04): an untracked one always estimates $0, so a cap could
+// never be reached there and is never applied. It allocates nothing for a
+// lowercase domain.
+func (e *Estimator) Tracks(domain string) (provider string, ok bool) {
+	if p := e.match(domain); p != nil {
+		return p.Name, true
+	}
+	return "", false
+}
+
+func (e *Estimator) match(domain string) *Provider {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	for i := range e.providers {
+		if e.providers[i].DomainPattern == domain {
+			return &e.providers[i]
+		}
+	}
+	return nil
+}
+
 // Estimate returns the estimated cost for a request/response to the given
 // domain with the given request/response sizes in bytes.
 // Returns nil if the domain does not match any known provider.
 func (e *Estimator) Estimate(domain string, requestBytes, responseBytes int64) *CostEstimate {
-	domain = strings.ToLower(strings.TrimSpace(domain))
-	var matched *Provider
-	for i := range e.providers {
-		if e.providers[i].DomainPattern == domain {
-			matched = &e.providers[i]
-			break
-		}
-	}
+	matched := e.match(domain)
 	if matched == nil {
 		return nil
 	}

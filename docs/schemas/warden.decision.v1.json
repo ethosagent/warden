@@ -21,7 +21,7 @@
     "seq": { "type": "integer", "minimum": 0, "description": "Per-boot line counter; a gap means dropped lines." },
     "decision": { "type": "string", "description": "allow or deny." },
     "reason": {
-      "description": "Bounded decision reason: always set on deny, empty or absent on allow unless a monitor-mode finding rode one. Either a declared reason or an mcp_chain_<pattern> reason. user_rate_limited was added in schema_rev 6.",
+      "description": "Bounded decision reason: always set on deny, empty or absent on allow unless a monitor-mode finding rode one. Either a declared reason or an mcp_chain_<pattern> reason. user_rate_limited was added in schema_rev 6; user_cost_limited and user_cost_unmeasurable in schema_rev 7.",
       "type": "string",
       "anyOf": [
         {
@@ -85,6 +85,8 @@
           "unspecified",
           "unsupported_protocol",
           "user_blocked",
+          "user_cost_limited",
+          "user_cost_unmeasurable",
           "user_rate_limited"
           ]
         },
