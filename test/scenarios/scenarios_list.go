@@ -95,6 +95,12 @@ var All = slices.Concat(
 		// session, CSRF/Origin-checked logout, admin list and revoke, and a
 		// block that ends the portal session at once.
 		{Name: "portal_session", Opts: portalOpts(), Run: portalSession},
+		// OAuth broker start (W-P3-BRKR-03): POST /connect/start redirects to the
+		// provider with PKCE S256, a state, the capped scopes and a bound cookie;
+		// the state database holds only hashes and the verifier; a scope outside
+		// the cap, a missing CSRF token or session, a blocked user and an eleventh
+		// start in a minute write nothing.
+		{Name: "connect_start", Opts: connectOpts(), Run: connectStart},
 
 		// Break-glass login (W-P1-OPS1-08): a real argon2id login opens a Secure
 		// admin session with a signed row, an ERROR line and a Finding per

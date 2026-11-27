@@ -57,6 +57,7 @@ func (h *H) prepareConsole() {
 	}
 	h.issuer.RegisterClient(ConsoleClientID, consoleSecretValue)
 	h.prepareConsent()
+	h.prepareBroker()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		h.tb.Fatalf("harness: reserve the control-plane address: %v", err)

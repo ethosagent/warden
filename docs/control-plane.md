@@ -1029,6 +1029,44 @@ the portal session middleware (and `/connect/*` will):
   admin audit on a logout records `portal.logout` (target `portal_session`).
 - With consent disabled every `/portal/*` path is `404`.
 
+### OAuth broker: `POST /connect/start`
+
+Mounted only when `consent.providers` is non-empty, `--state-dir` is set and
+`consent.store` is persistent (aws). With providers and no store, or the echo
+store, the control plane refuses to start with `oauth broker requires a
+persistent consent.store`; with no providers every `/connect/*` path is `404`
+and no table, goroutine or wire field is added.
+
+- Auth: the portal session middleware. No session is `303` to `/portal/login`
+  (a relative `next` for a GET); the console cookie, the admin bearer, a worker
+  token or a `wak_` key never authenticate (a POST carrying one gets `401`).
+  CSRF and Origin are the portal rules above.
+- `POST` form fields `provider`, `scopes` (space or comma separated, empty means
+  the provider's `defaultScopes`) and optional `pending`. Checks in order: the
+  provider exists (`404 unknown_provider`), the user is not blocked (`403
+  user_blocked`, `503 block_list_unavailable` while the list is unreadable),
+  10 starts per minute per user (`429 rate_limited` with `Retry-After`), the
+  pending belongs to this user (`404 pending_not_found`, identical to an unknown
+  id) and is open (`409 pending_not_active`), then the scope cap: requested
+  scopes must be inside the provider's `allowedScopes` and the pending's scopes
+  (`400 scope_not_allowed` listing the names). A user with 20 open attempts gets
+  `429 too_many_attempts`. No row is written for any refusal.
+- Success is `303` to the provider with `response_type=code`, `client_id`,
+  `redirect_uri` (`consent.connect.redirectURL`), a 32-byte `state`, a PKCE
+  `code_challenge` (S256) and the scopes (the union with the active grant's
+  scopes; a `githubApp` sends none), plus the provider's `extraAuthParams`, which
+  can never replace those. The response sets `__Host-warden_connect` (Secure,
+  HttpOnly, SameSite=Lax, Path=/, Max-Age 600) and `Cache-Control: no-store`,
+  `Referrer-Policy: no-referrer`. The state database keeps only the state's
+  SHA-256, the verifier and the cookie's SHA-256 (`connect_attempts`); the handler
+  makes no outbound call.
+- `GET /connect/start[?pending=<id>]` changes nothing: `303` to
+  `/portal/connect/<id>` or `/portal`.
+- Logs `oauth_connect_start` (`provider`, `user_key`, `pending_id`,
+  `scopes_count`, `outcome`, `reason`); never a state, verifier, challenge or
+  cookie value. The in-memory counter `warden_cp_oauth_connect_total{provider,
+  stage, outcome}` is exposed by `Server.OAuthConnectCounts`.
+
 ## API keys (`console.apiKeys`)
 
 Scripts and CI can call the admin API with a scoped, expiring `wak_` key instead of

@@ -34,11 +34,14 @@
 //   - store.go: the types, the GrantStore port, limits and errors.
 //   - notify.go: Notifier, the in-memory Subscribe map stores embed.
 //   - sweeper.go: RunSweeper, the 1-minute loop over GrantStore.Sweep.
+//   - broker.go, start.go: Broker and Start, the POST /connect/start logic
+//     (checks, scope cap, PKCE attempt, authorization URL); the HTTP mapping is
+//     the transport package oauthbroker/http.
 //   - adapters/sqlite: the cpstate migrations oauthbroker/0001..0003 and the
 //     SQLite GrantStore.
 //   - oauthbrokertest: the conformance suite every GrantStore must pass (a
 //     Postgres store for p5-postgres-ha runs the same suite).
 //
-// This package is the domain: it does no I/O and reads no clock. Time, ids and
-// the database come from the adapter.
+// This package is the domain: it does no I/O and reads no clock. Time, entropy,
+// the user key, the block list and the database are injected.
 package oauthbroker
