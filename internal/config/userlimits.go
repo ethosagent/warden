@@ -31,8 +31,9 @@ const (
 )
 
 // UserLimit is one per-user limit rule: a rate limit and/or a daily
-// estimated-cost cap, applied to the requests its Match selects. Nothing
-// enforces it yet (see unenforcedUserLimits).
+// estimated-cost cap, applied to the requests its Match selects. The worker
+// enforces rateLimit on every request (W-P3-PUL-09); dailyCostUSD is not
+// enforced yet and is refused (see unenforcedUserLimits).
 type UserLimit struct {
 	// Name identifies the rule in buckets, the decision log and cost blocks.
 	// Required and unique in userLimits; empty on defaultUserLimit and
@@ -107,9 +108,9 @@ func copyUserLimits(in []UserLimit) []UserLimit {
 	return out
 }
 
-// allowUnenforcedUserLimits lifts the not-yet-enforced guard. It is false in
-// production; W-P3-PUL-09 (rateLimit) and W-P3-PUL-04 (dailyCostUSD) replace
-// the guard with the real enforcement. Tests set it to exercise the wire.
+// allowUnenforcedUserLimits lifts the not-yet-enforced guard on dailyCostUSD.
+// It is false in production; W-P3-PUL-04 replaces the guard with the real
+// enforcement. Tests set it to exercise the wire.
 var allowUnenforcedUserLimits = false
 
 // NormalizeUserLimits normalizes and validates the per-user limit rules in p:
@@ -276,20 +277,24 @@ func sortDedup(in []string) []string {
 	return out
 }
 
-// unenforcedUserLimits is the fail-closed guard: until W-P3-PUL-09 enforces
-// rate limits and W-P3-PUL-04 enforces cost caps, a config that carries a
-// rule would be silently ignored, so it is refused instead.
+// unenforcedUserLimits is the fail-closed guard for daily cost caps: rate
+// limits are enforced (W-P3-PUL-09), but until W-P3-PUL-04 enforces
+// dailyCostUSD a rule that sets one would be silently ignored, so it is
+// refused instead.
 func unenforcedUserLimits(p Policy) error {
 	if allowUnenforcedUserLimits {
 		return nil
 	}
+	for i, l := range p.UserLimits {
+		if l.DailyCostUSD != 0 {
+			return fmt.Errorf("config: policy.userLimits[%d].dailyCostUSD: not yet enforced; remove it until a release that enforces per-user cost caps", i)
+		}
+	}
 	switch {
-	case len(p.UserLimits) > 0:
-		return fmt.Errorf("config: policy.userLimits: not yet enforced; remove it until a release that enforces per-user limits")
-	case p.DefaultUserLimit != nil:
-		return fmt.Errorf("config: policy.defaultUserLimit: not yet enforced; remove it until a release that enforces per-user limits")
-	case p.AnonymousLimit != nil:
-		return fmt.Errorf("config: policy.anonymousLimit: not yet enforced; remove it until a release that enforces per-user limits")
+	case p.DefaultUserLimit != nil && p.DefaultUserLimit.DailyCostUSD != 0:
+		return fmt.Errorf("config: policy.defaultUserLimit.dailyCostUSD: not yet enforced; remove it until a release that enforces per-user cost caps")
+	case p.AnonymousLimit != nil && p.AnonymousLimit.DailyCostUSD != 0:
+		return fmt.Errorf("config: policy.anonymousLimit.dailyCostUSD: not yet enforced; remove it until a release that enforces per-user cost caps")
 	}
 	return nil
 }

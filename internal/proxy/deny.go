@@ -47,6 +47,10 @@ func (p *Proxy) emitDeny(s *requestScope, reason denyreason.Reason, extra ...den
 		URL:       s.eventURL(),
 		Decision:  "deny",
 		Reason:    string(reason),
+		// The per-user limit rule userLimitStage resolved for this request
+		// (empty before that stage or when no rule applies), so a later deny
+		// is attributed to the rule's budget too.
+		LimitRule: s.limitRule,
 	}
 	for _, x := range extra {
 		if x.Protocol != "" {
@@ -101,7 +105,7 @@ func (p *Proxy) emitDenyEventDetail(ci connIdentity, ev analytics.Event, detail 
 		Method: ev.Method, URL: ev.URL, Decision: "deny",
 		ResponseStatus: ev.ResponseStatus, SecretRef: ev.SecretRef,
 		JudgeReason: ev.JudgeReason, Reason: ev.Reason, Detail: detail,
-		AddrClass: ev.AddrClass, ID: ci,
+		AddrClass: ev.AddrClass, LimitRule: ev.LimitRule, ID: ci,
 	})
 }
 

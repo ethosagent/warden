@@ -40,6 +40,11 @@
 //	                              gauges, no labels (a kid is never a label)
 //	RecordSignInStarted(outcome): started, reused, rate_limited, issuer_unreachable
 //	RecordBlocklist*:             unlabelled (an entry count and a closed-session count)
+//	RecordUserLimitDenied(kind):  warden.user_limit.denied.total{kind}: rate, cost, unmeasurable;
+//	                              any other value is recorded as "other". Never a user, email,
+//	                              group or rule label.
+//	RegisterUserLimitBuckets:     warden.user_limit.buckets gauge and
+//	                              warden.user_limit.bucket_cap_denied.total counter, no labels
 //
 // Disabled mode is free: when Config.Enabled is false (or the *Metrics is nil)
 // New returns a nil *Metrics and a nil http.Handler, and every record method is
@@ -108,6 +113,7 @@ type Metrics struct {
 	scanFindings   metric.Int64Counter
 	judge          metric.Int64Counter
 	scoped         metric.Int64Counter
+	userLimitDeny  metric.Int64Counter
 	identityVerify metric.Int64Counter
 	signInStarted  metric.Int64Counter
 	auditLines     metric.Int64Counter
@@ -270,6 +276,12 @@ func newMetrics(provider *sdkmetric.MeterProvider, serviceVersion string) (*Metr
 		metric.WithDescription("Per-request decisions on identity-scoped allow entries by result (allow, not_member, no_identity)."),
 	); err != nil {
 		return nil, fmt.Errorf("observability: policy scoped counter: %w", err)
+	}
+	if m.userLimitDeny, err = meter.Int64Counter(
+		"warden.user_limit.denied.total",
+		metric.WithDescription("Requests refused by a per-user limit, by kind (rate, cost, unmeasurable)."),
+	); err != nil {
+		return nil, fmt.Errorf("observability: user limit denied counter: %w", err)
 	}
 	if m.auditLines, err = meter.Int64Counter(
 		"warden.auditlog.lines.total",
@@ -491,6 +503,53 @@ func (m *Metrics) RecordScoped(result string) {
 	m.scoped.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("result", result),
 	))
+}
+
+// userLimitKinds is the allowlist of warden.user_limit.denied.total kinds.
+var userLimitKinds = setOf("rate", "cost", "unmeasurable")
+
+// RecordUserLimitDenied increments warden.user_limit.denied.total{kind}. kind
+// is bounded (rate|cost|unmeasurable, anything else is "other"); there is
+// deliberately no user, email, group or rule label.
+func (m *Metrics) RecordUserLimitDenied(kind string) {
+	if m == nil {
+		return
+	}
+	m.userLimitDeny.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("kind", boundedLabel(userLimitKinds, kind)),
+	))
+}
+
+// RegisterUserLimitBuckets wires two unlabelled observables read on each
+// collection: warden.user_limit.buckets (open per-user rate buckets) and
+// warden.user_limit.bucket_cap_denied.total (charges refused because the
+// bucket table was full). Nil-safe no-op when metrics are disabled; call once
+// at assembly.
+func (m *Metrics) RegisterUserLimitBuckets(buckets func() int64, capDenied func() int64) error {
+	if m == nil {
+		return nil
+	}
+	if _, err := m.meter.Int64ObservableGauge(
+		"warden.user_limit.buckets",
+		metric.WithDescription("Open per-user rate-limit buckets on this worker."),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(buckets())
+			return nil
+		}),
+	); err != nil {
+		return fmt.Errorf("observability: user limit buckets gauge: %w", err)
+	}
+	if _, err := m.meter.Int64ObservableCounter(
+		"warden.user_limit.bucket_cap_denied.total",
+		metric.WithDescription("Per-user limit charges refused (fail closed) because the bucket table was full."),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(capDenied())
+			return nil
+		}),
+	); err != nil {
+		return fmt.Errorf("observability: user limit bucket cap counter: %w", err)
+	}
+	return nil
 }
 
 const identityOtherVal = "other"

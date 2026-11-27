@@ -86,7 +86,7 @@ One object per line. `ts` is the worker's wall clock at event time. "Required" m
 | `ts` | string | yes | UTC RFC 3339 with nanoseconds, the worker's wall clock at event time. Sort by this. |
 | `proxy_id` | string | yes | The worker that wrote the line (`central.proxyID`, else the hostname). |
 | `proxy_id_source` | string | yes | Where `proxy_id` came from: `config` or `hostname`. |
-| `agent_id` | string | yes | The wrapped agent this worker serves. |
+| `agent_id` | string | yes | The agent this worker serves (a verified Warden token is bound to it). |
 | `boot_id` | string | yes | Random per-process id; `seq` restarts at 1 for each `boot_id`. |
 | `seq` | integer | yes | Per-boot line counter; a gap means dropped lines. |
 | `decision` | string | yes | `allow` or `deny`. |
@@ -109,6 +109,7 @@ One object per line. `ts` is the worker's wall clock at event time. "Required" m
 | `swapped_refs` | array | no | Placeholder names that were swapped (at most 64); never real secret values. |
 | `compliance` | array | no | Framework control ids the event maps to, for example `mitre:T1048`. |
 | `judge_reason` | string | no | The LLM judge's rationale with control characters removed, cut to 512 bytes. |
+| `limit_rule` | string | no | Name of the per-user limit rule that applied to the request (`schema_rev` 5); absent when none did. |
 | `user` | object | no | Verified end-user attribution; absent when the event carries no identity status (every event of a worker with identity off). |
 | `user.status` | string | yes | `valid`, `invalid`, `expired`, `unverified`, `conflict` or `none`. An open string: a later status does not break readers. |
 | `user.sub` | string | no | Subject claim; only when `status` is `valid`. |
@@ -185,7 +186,7 @@ Alert on `unspecified`: it should never occur, and seeing it means a deny path s
 | `identity_groups_truncated` | denyreason | Like `group_not_allowed`, but the subject's group list was cut at the cap, so the miss may come from the cut; it fails closed under its own name. |
 | `user_blocked` | denyreason | The request's identity claims (verified or not) match an entry on the user block list. |
 | `agent_disabled` | denyreason | The agent this worker is bound to is disabled in the control plane's agent registry; every request is refused and open sessions are closed. |
-| `user_rate_limited` | denyreason | The per-user limit rule that applies to the request's user (or the anonymous bucket for a request with no verified identity) is out of rate budget for its window; also used, fail closed, when the worker's per-user bucket table is full. Checked only after an allow. |
+| `user_rate_limited` | denyreason | The per-user limit rule that applies to the request's user (or the anonymous bucket for a request with no verified identity) is out of rate budget for its window; also used, fail closed, when the worker's per-user bucket table is full. Checked only after an allow. Added in `schema_rev` 6. |
 | `h2_request_trailers_unsupported` | denyreason | An HTTP/2 stream declared request trailers, which the h2 forward path does not relay. |
 | `h2_extended_connect_unsupported` | denyreason | An RFC 8441 extended CONNECT (WebSocket over h2) the stream path cannot relay faithfully. |
 | `transform_needs_buffered_body` | denyreason | An auth transform needed the body but it could not be buffered (streaming or unknown length). |

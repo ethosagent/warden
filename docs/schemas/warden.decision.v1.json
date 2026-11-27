@@ -16,12 +16,12 @@
     "ts": { "type": "string", "format": "date-time", "description": "UTC RFC 3339 with nanoseconds; the worker's wall clock at event time. Sort by this." },
     "proxy_id": { "type": "string", "description": "The worker that wrote the line." },
     "proxy_id_source": { "type": "string", "description": "Where proxy_id came from (for example config or hostname)." },
-    "agent_id": { "type": "string", "description": "The wrapped agent this worker serves." },
+    "agent_id": { "type": "string", "description": "The agent this worker serves (a verified Warden token is bound to it)." },
     "boot_id": { "type": "string", "description": "Random per-process id; seq restarts at 1 for each boot_id." },
     "seq": { "type": "integer", "minimum": 0, "description": "Per-boot line counter; a gap means dropped lines." },
     "decision": { "type": "string", "description": "allow or deny." },
     "reason": {
-      "description": "Bounded decision reason: always set on deny, empty or absent on allow unless a monitor-mode finding rode one. Either a declared reason or an mcp_chain_<pattern> reason.",
+      "description": "Bounded decision reason: always set on deny, empty or absent on allow unless a monitor-mode finding rode one. Either a declared reason or an mcp_chain_<pattern> reason. user_rate_limited was added in schema_rev 6.",
       "type": "string",
       "anyOf": [
         {
@@ -109,6 +109,7 @@
     "swapped_refs": { "type": "array", "items": { "type": "string" }, "maxItems": 64, "description": "Placeholder names that were swapped; never real secret values." },
     "compliance": { "type": "array", "items": { "type": "string" }, "maxItems": 64, "description": "Framework control ids this event maps to, for example mitre:T1048." },
     "judge_reason": { "type": "string", "maxLength": 512, "description": "The LLM judge's rationale with control characters removed, cut to 512 bytes." },
+    "limit_rule": { "type": "string", "maxLength": 256, "description": "Name of the per-user limit rule that applied to the request (schema_rev 5); absent when none did." },
     "user": {
       "type": "object",
       "additionalProperties": false,

@@ -145,7 +145,9 @@ type H struct {
 	// scopedAllow (WithScopedAllow) extends the control plane's boot YAML;
 	// closers run at cleanup, before the leak check.
 	scopedAllow []scopedAllowSpec
-	closers     []func()
+	// userLimits (WithUserLimits) adds per-user limit rules to the boot YAML.
+	userLimits *userLimitsSpec
+	closers    []func()
 
 	// inflights is one quiescence tracker per worker (the assembly-only
 	// worker.Overrides.Inflight seam): every request scope enters at request-read
@@ -883,6 +885,7 @@ func (h *H) writeCPConfig() string {
 	for _, sc := range h.scopedAllow {
 		fmt.Fprintf(&b, "    - domain: %s\n      groups: [%s]\n", sc.domain, strings.Join(sc.groups, ", "))
 	}
+	b.WriteString(h.userLimitsYAML())
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
 	b.WriteString(h.keysYAML())

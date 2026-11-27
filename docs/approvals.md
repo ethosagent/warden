@@ -62,7 +62,7 @@ draft; head and the `/policy` ETag do not move.
 
 | Write | Held when | Direct (applies at once) |
 |---|---|---|
-| Policy save: `POST`/`PUT /dashboard/api/policy` | An allow entry is added or loosened (scope, rate limit, time window, methods or paths); an allow entry removed so its explicit deny falls to the judge; a deny entry removed or changed | Narrowing edits: a deny added, an allow tightened or removed |
+| Policy save: `POST`/`PUT /dashboard/api/policy` | An allow entry is added or loosened (scope, rate limit, time window, methods or paths); an allow entry removed so its explicit deny falls to the judge; a deny entry removed or changed; any change to `userLimits`, `defaultUserLimit` or `anonymousLimit` (a rule can move a user to a looser budget, so every change counts) | Narrowing edits: a deny added, an allow tightened or removed |
 | Settings save: `POST`/`PUT /dashboard/api/settings` | Any field outside the small neutral or narrowing set. Admin approver needed for admin-only fields | `logging.*`, `cacheTTLSeconds`, and switching `dlp`, `compliance` or `advisory` on |
 | `llmProviders` save: `POST`/`PUT /dashboard/api/llmproviders` | Always, and it needs an admin approver | Never |
 | Rollback: `POST /dashboard/api/policy/versions/{v}/rollback` | The target version widens relative to head | A rollback that only narrows |
@@ -180,8 +180,8 @@ results carry no `version`.
   `agent.enabled`, `agent.key_added` (a key the agent did not have, added or replaced),
   `agent.group_added` and `agent.scope_added`. Policy drafts use `allow.added`,
   `allow.scope_widened`, `allow.rate_relaxed`, `allow.time_relaxed`,
-  `allow.constraint_widened`, `allow.removed_to_judge`, `deny.removed` and
-  `settings.changed`.
+  `allow.constraint_widened`, `allow.removed_to_judge`, `deny.removed`,
+  `user_limits.changed` and `settings.changed`.
 - **The diff** of a non-policy draft is `{current, proposed}`: the entity as it is now
   and as the draft would leave it. `current` is `null` for something new.
 - **No replay.** Nothing is queued for these targets, so the approve request must carry

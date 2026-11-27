@@ -35,6 +35,7 @@ func (m *recordingMetrics) RecordSecretSwap(placeholderRef string)              
 func (m *recordingMetrics) RecordScanFinding(kind string)                         {}
 func (m *recordingMetrics) RecordJudge(outcome string)                            {}
 func (m *recordingMetrics) RecordScoped(result string)                            {}
+func (m *recordingMetrics) RecordUserLimitDenied(kind string)                     {}
 func (m *recordingMetrics) ObserveAddedLatency(stage string, d time.Duration)     {}
 func (m *recordingMetrics) RecordIdentityVerify(result, reason, tokenType string) {}
 func (m *recordingMetrics) RecordSignInStarted(outcome string)                    {}

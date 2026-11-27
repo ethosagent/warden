@@ -356,6 +356,18 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	}
 
 	if p.caCert != nil {
+		// Per-user limits on a terminated tunnel are charged per request; the
+		// CONNECT only peeks, so an exhausted user is refused before the 200
+		// without the tunnel costing a request of its own. Only a CONNECT with a
+		// verified identity peeks: every request on it is that user's (a header
+		// cannot override it). A token-less CONNECT may carry per-request
+		// identities of many users, so it is never refused on the anonymous
+		// bucket here; each of its requests is charged to its own subject.
+		if g.verdict.Decision == policy.Allow && ci.status() == identity.StatusValid {
+			if p.connectUserLimitPeek(conn, ci, domain, port) {
+				return
+			}
+		}
 		_, _ = fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
 		p.handleTLS(conn, br, domain, port, g.defers, ci)
 		return
@@ -385,6 +397,12 @@ func (p *Proxy) handleConn(conn net.Conn) {
 		return
 	}
 
+	// Every branch that reaches here is a policy Allow. A raw tunnel carries
+	// only the CONNECT identity, so an exhausted user (or anonymous bucket) is
+	// refused here, before the 200; tunnel charges it once it is dialed.
+	if p.connectUserLimitPeek(conn, ci, domain, port) {
+		return
+	}
 	_, _ = fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
 	p.tunnel(conn, br, domain, port, ci, tunnelUntil)
 }
@@ -473,16 +491,18 @@ func (p *Proxy) storeSSRFDeny(ci connIdentity, domain string, port int, protocol
 
 // storeAllow records the single allow decision for an admitted CONNECT
 // (event + metric + log line), the raw-tunnel counterpart of storeDeny.
-func (p *Proxy) storeAllow(ci connIdentity, domain string, port int, protocol string) {
+// limitRule is the per-user limit rule the tunnel was charged to ("" = none).
+func (p *Proxy) storeAllow(ci connIdentity, domain string, port int, protocol, limitRule string) {
 	p.recordEvent(ci, analytics.Event{
 		Timestamp: time.Now(),
 		Domain:    domain,
 		Port:      port,
 		Protocol:  protocol,
 		Decision:  "allow",
+		LimitRule: limitRule,
 	})
 	p.cfg.Metrics.RecordRequest("allow", protocol)
-	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: protocol, Decision: "allow", ID: ci})
+	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: protocol, Decision: "allow", LimitRule: limitRule, ID: ci})
 }
 
 // tunnel completes a raw (non-TLS-terminating) CONNECT: dial the destination
@@ -513,11 +533,18 @@ func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port in
 	remote, err := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 	if err != nil {
 		if !p.storeSSRFDeny(ci, domain, port, "tcp", err) {
-			p.storeAllow(ci, domain, port, "tcp")
+			p.storeAllow(ci, domain, port, "tcp", "")
 		}
 		return
 	}
-	p.storeAllow(ci, domain, port, "tcp")
+	// Charged once the tunnel is registered and dialed: a refused tunnel
+	// costs nothing.
+	limitRule, denied := p.tunnelUserLimitCharge(ci, domain, port)
+	if denied {
+		_ = remote.Close()
+		return
+	}
+	p.storeAllow(ci, domain, port, "tcp", limitRule)
 	sess.addCloser(remote)
 
 	// A tunnel admitted through a scoped entry cannot be re-checked per request,

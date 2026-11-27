@@ -172,7 +172,12 @@ func (a policyApplier) publishDraft(ctx context.Context, d approvals.Draft, clr 
 				return err
 			}
 		}
+		// Likewise a draft that introduces a per-user rate limit.
+		if err := a.s.userLimitsGuard(ctx, *w, docWire(doc)); err != nil {
+			return err
+		}
 		w.Allowlist, w.Denylist, w.Settings = doc.Allowlist, doc.Denylist, doc.Settings
+		w.UserLimits, w.DefaultUserLimit, w.AnonymousLimit = doc.UserLimits, doc.DefaultUserLimit, doc.AnonymousLimit
 		return nil
 	}
 	version, _, err := a.s.publish(ctx, clr, author, mutate, dashboard.WriteMeta{ExpectedHead: d.BaseVersion, Message: msg}, SourceApproval)
@@ -256,16 +261,31 @@ func (s *Server) findAgentApply(ctx context.Context, svc *approvals.Service, d a
 	return cur.Revision, cur.Revision > d.BaseVersion && actors[cur.UpdatedBy], nil
 }
 
-// draftDoc and policyWireDoc convert between the approvals doc and the policy
-// wire: the same three fields, in the same JSON shape.
+// draftDoc and docWire convert between the approvals doc and the policy wire:
+// the same versioned fields (allow/deny, the per-user limit rules, settings),
+// in the same JSON shape. The overlays (block list, agent registry, cost
+// blocks) are never part of a draft.
 func draftDoc(w policyWire) approvals.Doc {
-	return approvals.Doc{Allowlist: w.Allowlist, Denylist: w.Denylist, Settings: w.Settings}
+	return approvals.Doc{
+		Allowlist: w.Allowlist, Denylist: w.Denylist,
+		UserLimits: w.UserLimits, DefaultUserLimit: w.DefaultUserLimit, AnonymousLimit: w.AnonymousLimit,
+		Settings: w.Settings,
+	}
+}
+
+// docWire is the policy wire of an approvals doc.
+func docWire(d approvals.Doc) policyWire {
+	return policyWire{
+		Allowlist: d.Allowlist, Denylist: d.Denylist,
+		UserLimits: d.UserLimits, DefaultUserLimit: d.DefaultUserLimit, AnonymousLimit: d.AnonymousLimit,
+		Settings: d.Settings,
+	}
 }
 
 // redactDraftDoc is RedactCredentials over an approvals doc: the one redaction
 // helper policy versions use, injected into the approvals Service.
 func redactDraftDoc(d approvals.Doc) approvals.Doc {
-	return draftDoc(RedactCredentials(policyWire{Allowlist: d.Allowlist, Denylist: d.Denylist, Settings: d.Settings}))
+	return draftDoc(RedactCredentials(docWire(d)))
 }
 
 // initApprovals builds the approvals Service when console.approvals is enabled

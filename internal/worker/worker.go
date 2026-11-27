@@ -688,6 +688,14 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	} else {
 		evaluator = policy.NewEvaluator(pol)
 	}
+	// Per-user limit bucket gauge and bucket-table-full counter (W-P3-PUL-09):
+	// unlabelled, read live from the evaluator on each collection.
+	if ulErr := metrics.RegisterUserLimitBuckets(
+		func() int64 { return int64(evaluator.UserLimitBuckets()) },
+		func() int64 { return int64(evaluator.UserLimitCapDenials()) },
+	); ulErr != nil {
+		logger.Warn("user limit metrics not registered", "error", ulErr)
+	}
 
 	// Cost estimator: always on. It only attributes a heuristic dollar figure to
 	// traffic that matches a known provider domain; everything else is untouched.

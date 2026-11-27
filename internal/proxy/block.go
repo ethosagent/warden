@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,13 +85,23 @@ func (p *Proxy) connectBlocked(w io.Writer, ci connIdentity, domain string, port
 // writeJSONResponse writes an HTTP/1.1 response with a JSON body and
 // Connection: close.
 func writeJSONResponse(w io.Writer, status int, body string) {
+	writeJSONResponseRetry(w, status, body, 0)
+}
+
+// writeJSONResponseRetry is writeJSONResponse plus a Retry-After header of
+// retryAfter whole seconds when retryAfter is positive.
+func writeJSONResponseRetry(w io.Writer, status int, body string, retryAfter int) {
+	hdr := http.Header{"Content-Type": {"application/json"}}
+	if retryAfter > 0 {
+		hdr["Retry-After"] = []string{strconv.Itoa(retryAfter)}
+	}
 	resp := &http.Response{
 		StatusCode:    status,
 		Status:        fmt.Sprintf("%d %s", status, http.StatusText(status)),
 		Proto:         "HTTP/1.1",
 		ProtoMajor:    1,
 		ProtoMinor:    1,
-		Header:        http.Header{"Content-Type": {"application/json"}},
+		Header:        hdr,
 		Body:          io.NopCloser(strings.NewReader(body)),
 		ContentLength: int64(len(body)),
 		Close:         true,

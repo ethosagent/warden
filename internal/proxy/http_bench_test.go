@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
+
+	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/policy"
 )
 
 // BenchmarkHandleHTTP drives a plain GET end-to-end through a real warden proxy
@@ -140,6 +143,52 @@ func BenchmarkHandleHTTPInflightOn(b *testing.B) {
 		resp, err := http.ReadResponse(br, req)
 		if err != nil {
 			b.Fatalf("read response: %v", err)
+		}
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			b.Fatalf("drain body: %v", err)
+		}
+		_ = resp.Body.Close()
+	}
+}
+
+// BenchmarkHandleHTTPUserLimitOn is BenchmarkHandleHTTP with a per-user limit
+// configured (W-P3-PUL-09): every request is charged to the anonymous rule's
+// bucket in userLimitStage (one read lock, a rule match and one shard lock).
+// The rate is high enough that the run is never refused. Compare with
+// BenchmarkHandleHTTP for the stage's cost when on; with no limits configured
+// the stage is one read lock and a nil check.
+func BenchmarkHandleHTTPUserLimitOn(b *testing.B) {
+	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(b)
+	backendLn, _ := startBackend(b, caCert, caKey)
+
+	p, _ := startTestProxyWithSecrets(b, []string{"backend.test"}, caCertPEM, caKeyPEM, nil, nil)
+	ev := p.cfg.Policy.(*policy.Evaluator)
+	pol := ev.CurrentPolicy()
+	pol.AnonymousLimit = &config.UserLimit{RateLimit: "1000000000/hour"}
+	ev.Replace(pol)
+	p.dialTLS = func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
+		return tls.Dial("tcp", backendLn.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	}
+
+	tlsClient := dialProxyAndConnect(b, p.Addr().String(), "backend.test", caCertPEM)
+	br := bufio.NewReader(tlsClient)
+	req, err := http.NewRequest(http.MethodGet, "https://backend.test/v1/chat", nil)
+	if err != nil {
+		b.Fatalf("new request: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := req.Write(tlsClient); err != nil {
+			b.Fatalf("write request: %v", err)
+		}
+		resp, err := http.ReadResponse(br, req)
+		if err != nil {
+			b.Fatalf("read response: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			b.Fatalf("status = %d", resp.StatusCode)
 		}
 		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 			b.Fatalf("drain body: %v", err)

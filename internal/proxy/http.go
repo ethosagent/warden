@@ -137,13 +137,21 @@ type requestScope struct {
 	idHeaderClaims identity.Claims
 	subject        *identity.Subject
 
-	// Decision state threaded between stages.
-	judgeReason string
-	wasMCP      bool
-	mcpTool     string
-	mcpReason   string
-	mcpSessKey  string
-	closeAfter  bool
+	// Decision state threaded between stages. policyAllowed is set by
+	// constraintGate when the policy verdict for this request was Allow (not
+	// NoMatch). chargeLimit marks a request userLimitStage peeked (a policy
+	// Allow, or a NoMatch for the judge) whose limit forward charges just
+	// before sending. limitRule is the rule of that charge (or of a limit
+	// deny); it rides every later event of the request.
+	policyAllowed bool
+	chargeLimit   bool
+	limitRule     string
+	judgeReason   string
+	wasMCP        bool
+	mcpTool       string
+	mcpReason     string
+	mcpSessKey    string
+	closeAfter    bool
 
 	// sess is the connection's registry session (nil for none): blockStage binds
 	// the request's identities to it.
@@ -457,6 +465,9 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 	if p.constraintGate(s) {
 		return true
 	}
+	if p.userLimitStage(s) {
+		return true
+	}
 	if p.judgeGate(s) {
 		return true
 	}
@@ -542,9 +553,11 @@ func (p *Proxy) recordSSRFDeny(s *requestScope, err error) {
 // and never carries a real secret. The path matched is the RAW request target
 // component — req.URL.EscapedPath() — which is byte-for-byte the path req.Write
 // sends upstream (RequestURI renders EscapedPath); URL.Path (decoded) would not
-// be what the origin sees. A NoMatch falls through unchanged (judge-eligible
-// exactly as before); an explicit Deny is terminal — a constraint violation is
-// never judge-eligible, by construction of the evaluator.
+// be what the origin sees. A NoMatch falls through to the judge only on a
+// deferJudge connection; on any other connection (the entry that admitted it
+// was removed by a reload) it is the policy_no_match default-deny. An explicit
+// Deny is terminal — a constraint violation is never judge-eligible, by
+// construction of the evaluator.
 //
 // W-P1-GPOL-10: the same single evaluation carries the request's verified
 // subject (s.subject, nil unless identityStage found status valid), so an
@@ -558,8 +571,23 @@ func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
 	})
 	p.recordScoped(verdict)
 	switch verdict.Decision {
-	case policy.Allow, policy.NoMatch:
+	case policy.Allow:
+		s.policyAllowed = true
 		return false
+	case policy.NoMatch:
+		// A per-request NoMatch is judge-eligible ONLY on a connection the
+		// admission gate deferred to the judge. On a deferNone / deferIdentity
+		// connection the destination matched an entry at admission, so a
+		// NoMatch now means a hot policy reload removed that entry while the
+		// tunnel was open; judgeGate skips a non-deferJudge request, so passing
+		// it on would forward it with no decision at all. It is the
+		// default-deny, named here.
+		if s.deferred == deferJudge {
+			return false
+		}
+		p.emitDeny(s, denyreason.PolicyNoMatch, denyExtra{LatencyMs: s.latencyMs()})
+		s.out.errorResponse(403, "Forbidden")
+		return true
 	}
 	// Deny and Conditional are terminal, and anything else fails closed here.
 	// Every explicit Deny names itself from the declared set (#409): a
@@ -1100,13 +1128,27 @@ func (p *Proxy) forward(s *requestScope) (endSession bool) {
 		if err := p.dialUpstream(s); err != nil {
 			return p.badGateway(s)
 		}
+		// The per-user limit is charged here, after every refusal a request can
+		// meet before it is sent (judge, MCP, DLP, swap, SSRF dial).
+		if p.chargeUserLimitNow(s) {
+			return true
+		}
 		if err := s.req.Write(s.upstream); err != nil || !p.readUpstreamResponse(s) {
 			return p.badGateway(s)
 		}
 		return false
 	}
 
-	// Reused conn: serialize once so a stale redial can re-send identical bytes.
+	// Reused conn: charge the per-user limit once (a stale redial below re-sends
+	// the same request and is not charged again), then serialize once so a
+	// stale redial can re-send identical bytes. The charge is made before the
+	// first write because no dial is needed here; so, like an h2 stream (see
+	// forwardH2), a stale-conn redial that the SSRF dialer then refuses has
+	// already been charged. That needs a stale keep-alive conn and a
+	// destination that started resolving to a refused address: rare.
+	if p.chargeUserLimitNow(s) {
+		return true
+	}
 	var buf bytes.Buffer
 	if err := s.req.Write(&buf); err != nil {
 		return p.badGateway(s)
@@ -1365,13 +1407,14 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			LatencyMs:      s.latencyMs(),
 			SwappedRefs:    s.swappedNames,
 			Evidence:       s.evidence,
+			LimitRule:      s.limitRule,
 		})
 		p.cfg.Metrics.RecordRequest("allow", "mcp")
 		p.logDecision(decisionLog{
 			Domain: s.domain, Port: s.port, Protocol: "mcp",
 			Method: s.req.Method, URL: fullURL, Decision: "allow",
-			ResponseStatus: s.resp.StatusCode,
-			ID:             s.resolved(),
+			ResponseStatus: s.resp.StatusCode, LimitRule: s.limitRule,
+			ID: s.resolved(),
 		})
 	}
 
@@ -1548,6 +1591,7 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 		LatencyMs:   s.latencyMs(),
 		SwappedRefs: s.swappedNames,
 		Evidence:    s.evidence,
+		LimitRule:   s.limitRule,
 	})
 	p.cfg.Metrics.RecordRequest("allow", proto)
 	for _, name := range s.swappedNames {
@@ -1557,7 +1601,7 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 		Domain: s.domain, Port: s.port, Protocol: proto,
 		Method: s.req.Method, URL: fullURL, Decision: "allow",
 		ResponseStatus: s.resp.StatusCode, SecretRef: secretRef,
-		JudgeReason: s.judgeReason, ID: s.resolved(),
+		JudgeReason: s.judgeReason, LimitRule: s.limitRule, ID: s.resolved(),
 	})
 }
 
