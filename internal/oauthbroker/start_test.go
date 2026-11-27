@@ -148,7 +148,7 @@ func TestConnectStart(t *testing.T) {
 	for k, want := range map[string]string{
 		"response_type": "code", "client_id": "g-client", "redirect_uri": startRedir,
 		"code_challenge_method": "S256", "code_challenge": base64.RawURLEncoding.EncodeToString(sum[:]),
-		"scope": "drive.readonly openid", "access_type": "offline", "prompt": "consent",
+		"scope": "drive.readonly email openid", "access_type": "offline", "prompt": "consent",
 	} {
 		if got := q.Get(k); got != want {
 			t.Errorf("%s = %q, want %q", k, got, want)
@@ -181,7 +181,7 @@ func TestConnectStart(t *testing.T) {
 	if mustLocation(t, r2).Get("state") == state || r2.BrowserToken == res.BrowserToken {
 		t.Error("two starts reused a state or cookie value")
 	}
-	if got := mustLocation(t, r2).Get("scope"); got != "drive.readonly" {
+	if got := mustLocation(t, r2).Get("scope"); got != "drive.readonly email openid" {
 		t.Errorf("default scope = %q, want the provider default", got)
 	}
 }
@@ -226,13 +226,13 @@ func TestConnectStartScopeCap(t *testing.T) {
 	// Defaults narrow to the ceiling instead of failing when something is left.
 	c.Ceiling = []string{"drive.readonly", "calendar.readonly"}
 	res, err := e.b.Start(ctx, c)
-	if err != nil || mustLocation(t, res).Get("scope") != "drive.readonly" {
+	if err != nil || mustLocation(t, res).Get("scope") != "drive.readonly email openid" {
 		t.Fatalf("defaults under a ceiling: %v %v", res.RedirectURL, err)
 	}
 	// With a pending, none named means the pending's scopes.
 	r.Scopes = nil
 	res, err = e.b.Start(ctx, r)
-	if err != nil || mustLocation(t, res).Get("scope") != "drive.readonly" {
+	if err != nil || mustLocation(t, res).Get("scope") != "drive.readonly email openid" {
 		t.Fatalf("pending scopes: %v %v", res.RedirectURL, err)
 	}
 	// The provider cap still applies when a pending's ceiling is wider.
@@ -438,7 +438,7 @@ func TestConnectStartUnionsActiveGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	q := mustLocation(t, res)
-	if got := q.Get("scope"); got != "calendar.readonly drive.readonly" {
+	if got := q.Get("scope"); got != "calendar.readonly drive.readonly email openid" {
 		t.Fatalf("scope = %q, want the union without the removed scope", got)
 	}
 	att, err := e.store.ConsumeAttempt(ctx, oauthbroker.HashState(q.Get("state")))

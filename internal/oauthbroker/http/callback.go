@@ -61,7 +61,7 @@ func (h *Handler) Callback() http.Handler {
 			browser = c.Value
 		}
 		res, err := h.callbacker.Callback(r.Context(), oauthbroker.CallbackRequest{
-			Iss: p.Iss, Sub: p.Sub, Email: p.Email,
+			Iss: p.Iss, Sub: p.Sub, Email: p.Email, EmailVerified: p.EmailVerified,
 			State: state, Code: code, ProviderError: perr, BrowserToken: browser,
 		})
 		if err != nil {

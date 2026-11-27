@@ -46,6 +46,12 @@ func WithOAuthProviderFake() Option {
 	}
 }
 
+// WithOAuthAccountRules sets the google provider's allowedAccountDomains and
+// requireEmailMatch (W-P3-BRKR-08); use it with WithOAuthProviderFake.
+func WithOAuthAccountRules(domains []string, requireEmailMatch bool) Option {
+	return func(h *H) { h.oauthDomains, h.oauthEmailMatch = domains, requireEmailMatch }
+}
+
 // OAuthProvider is the fake behind WithOAuthProviderFake.
 func (h *H) OAuthProvider() *fakes.OAuthProvider {
 	h.tb.Helper()
@@ -97,7 +103,16 @@ func (h *H) brokerYAML() string {
 	clientID, endpoints := "harness-google-client", ""
 	if h.oauthFake != nil {
 		clientID = fakes.OAuthDefaultClientID
-		endpoints = "      authURL: " + h.oauthFake.AuthURL() + "\n      tokenURL: " + h.oauthFake.TokenURL() + "\n"
+		// Revoke and userinfo point at the fake too: the built-in Google
+		// revoke URL would leave the process.
+		endpoints = "      authURL: " + h.oauthFake.AuthURL() + "\n      tokenURL: " + h.oauthFake.TokenURL() + "\n" +
+			"      revokeURL: " + h.oauthFake.RevokeURL() + "\n      userinfoURL: " + h.oauthFake.UserinfoURL() + "\n"
+	}
+	if len(h.oauthDomains) > 0 {
+		endpoints += "      allowedAccountDomains: [" + strings.Join(h.oauthDomains, ", ") + "]\n"
+	}
+	if h.oauthEmailMatch {
+		endpoints += "      requireEmailMatch: true\n"
 	}
 	return `  providers:
     - id: ` + BrokerProviderID + `
@@ -183,6 +198,9 @@ func (h *H) openBrokerState() *cpstate.DB {
 type OAuthGrant struct {
 	UserKey, Provider, GrantID, State string
 	Scopes                            []string
+	// AccountID and AccountLogin are provider_account_id and
+	// provider_account_login ("" when none was recorded).
+	AccountID, AccountLogin string
 }
 
 // OAuthGrants reads the oauth_grants table of the control plane's state
@@ -191,7 +209,7 @@ func (h *H) OAuthGrants() []OAuthGrant {
 	h.tb.Helper()
 	db := h.openBrokerState()
 	defer func() { _ = db.Close() }()
-	rows, err := db.SQL().Query(`SELECT user_key, provider, grant_id, state, scopes_json FROM oauth_grants ORDER BY user_key, provider`)
+	rows, err := db.SQL().Query(`SELECT user_key, provider, grant_id, state, scopes_json, COALESCE(provider_account_id, ''), COALESCE(provider_account_login, '') FROM oauth_grants ORDER BY user_key, provider`)
 	if err != nil {
 		h.tb.Fatalf("harness: read oauth grants: %v", err)
 	}
@@ -200,7 +218,7 @@ func (h *H) OAuthGrants() []OAuthGrant {
 	for rows.Next() {
 		var g OAuthGrant
 		var scopes string
-		if err := rows.Scan(&g.UserKey, &g.Provider, &g.GrantID, &g.State, &scopes); err != nil {
+		if err := rows.Scan(&g.UserKey, &g.Provider, &g.GrantID, &g.State, &scopes, &g.AccountID, &g.AccountLogin); err != nil {
 			h.tb.Fatalf("harness: scan an oauth grant: %v", err)
 		}
 		if err := json.Unmarshal([]byte(scopes), &g.Scopes); err != nil {

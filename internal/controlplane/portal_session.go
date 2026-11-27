@@ -18,7 +18,12 @@ import (
 // portalSessionTable is the portal's session table. It has no auth_method
 // column: every portal session is an OIDC login with an idle timeout.
 func portalSessionTable() webauth.SessionTable {
-	return webauth.SessionTable{Name: "portal_sessions", MigrationID: "portal_sessions/0001"}
+	return webauth.SessionTable{
+		Name: "portal_sessions", MigrationID: "portal_sessions/0001",
+		// 0002 records the IdP's email_verified claim: requireEmailMatch on an
+		// OAuth provider (BRKR-08) trusts the session email only when it is set.
+		EmailVerifiedMigrationID: "portal_sessions/0002",
+	}
 }
 
 // PortalSessionMigrations are the cpstate migrations of portal_sessions. Run

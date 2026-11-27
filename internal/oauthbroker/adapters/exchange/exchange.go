@@ -18,27 +18,21 @@ package exchange
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
-	"io"
-	"net"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ethosagent/warden/internal/oauthbroker"
+	"github.com/ethosagent/warden/internal/oauthbroker/adapters/httpclient"
 	"github.com/ethosagent/warden/internal/proxy"
 )
 
-// DialTimeout bounds connect, TLS handshake and response headers.
-const DialTimeout = 5 * time.Second
-
 // Exchanger implements oauthbroker.TokenExchanger.
 type Exchanger struct {
-	rt  http.RoundTripper
-	now func() time.Time
+	post oauthbroker.FormPoster
+	now  func() time.Time
 }
 
 var _ oauthbroker.TokenExchanger = (*Exchanger)(nil)
@@ -55,9 +49,10 @@ type Options struct {
 	Now func() time.Time
 }
 
-// New builds the Exchanger.
+// New builds the Exchanger over the shared adapters/httpclient transport (SSRF
+// dialer, no proxy, no redirects, 64 KiB cap, hard timeout).
 func New(opts Options) (*Exchanger, error) {
-	sd, err := proxy.NewSafeDialerWithResolver(DialTimeout, opts.AllowPrivate, opts.Resolver)
+	post, err := httpclient.New(opts.AllowPrivate, opts.Resolver)
 	if err != nil {
 		return nil, err
 	}
@@ -65,20 +60,7 @@ func New(opts Options) (*Exchanger, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Exchanger{now: now, rt: &http.Transport{
-		Proxy: nil,
-		DialTLSContext: func(_ context.Context, network, addr string) (net.Conn, error) {
-			return sd.DialTLS(network, addr, &tls.Config{MinVersion: tls.VersionTLS12})
-		},
-		DialContext: func(_ context.Context, network, addr string) (net.Conn, error) {
-			return sd.Dial(network, addr)
-		},
-		TLSHandshakeTimeout:   DialTimeout,
-		ResponseHeaderTimeout: DialTimeout,
-		// An exchange happens once per consent, so a pooled connection would
-		// idle for nothing (and outlive the control plane's shutdown).
-		DisableKeepAlives: true,
-	}}, nil
+	return &Exchanger{now: now, post: post}, nil
 }
 
 func unavailable() error {
@@ -97,27 +79,19 @@ func (e *Exchanger) Exchange(ctx context.Context, r oauthbroker.ExchangeRequest)
 		"grant_type": {"authorization_code"}, "code": {r.Code}, "redirect_uri": {r.RedirectURL},
 		"client_id": {r.ClientID}, "client_secret": {r.ClientSecret.Reveal()}, "code_verifier": {r.Verifier},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.TokenURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return oauthbroker.TokenResponse{}, unavailable()
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	resp, err := e.rt.RoundTrip(req)
+	status, body, err := e.post.PostForm(ctx, oauthbroker.FormRequest{URL: r.TokenURL, Form: form.Encode()})
 	if err != nil {
 		// The error text can name hosts and addresses (an SSRF refusal does);
 		// it is dropped.
 		return oauthbroker.TokenResponse{}, unavailable()
 	}
-	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, oauthbroker.MaxProviderResponseBytes+1))
-	if err != nil || len(body) > oauthbroker.MaxProviderResponseBytes {
+	if len(body) > oauthbroker.MaxProviderResponseBytes {
 		return oauthbroker.TokenResponse{}, unavailable()
 	}
-	if resp.StatusCode >= 500 {
+	if status >= 500 {
 		return oauthbroker.TokenResponse{}, unavailable()
 	}
-	f, ok := parseBody(resp.Header.Get("Content-Type"), body)
+	f, ok := parseBody("", body)
 	// An error field is a failure whatever the status or the token fields say
 	// (GitHub answers failures with HTTP 200).
 	if ok && f.errCode != "" {
@@ -127,11 +101,11 @@ func (e *Exchanger) Exchange(ctx context.Context, r oauthbroker.ExchangeRequest)
 		}
 		return oauthbroker.TokenResponse{}, rejected(code)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 || !ok || f.accessToken == "" {
+	if status < 200 || status > 299 || !ok || f.accessToken == "" {
 		return oauthbroker.TokenResponse{}, rejected("invalid_response")
 	}
 	out := oauthbroker.TokenResponse{
-		AccessToken: f.accessToken, RefreshToken: f.refreshToken, TokenType: f.tokenType, Scope: f.scope,
+		AccessToken: f.accessToken, RefreshToken: f.refreshToken, IDToken: f.idToken, TokenType: f.tokenType, Scope: f.scope,
 	}
 	if out.TokenType == "" {
 		out.TokenType = "Bearer" // RFC 6749 requires it; x/oauth2 also defaults
@@ -148,8 +122,8 @@ func (e *Exchanger) Exchange(ctx context.Context, r oauthbroker.ExchangeRequest)
 
 // fields are the members of a token endpoint response the broker reads.
 type fields struct {
-	accessToken, refreshToken, tokenType, scope, errCode string
-	expiresIn, refreshExpiresIn                          int64
+	accessToken, refreshToken, idToken, tokenType, scope, errCode string
+	expiresIn, refreshExpiresIn                                   int64
 }
 
 // parseBody reads a JSON body (the normal case) or a form-encoded one (GitHub
@@ -162,7 +136,7 @@ func parseBody(contentType string, body []byte) (fields, bool) {
 			return fields{}, false
 		}
 		f := fields{
-			accessToken: str(m["access_token"]), refreshToken: str(m["refresh_token"]),
+			accessToken: str(m["access_token"]), refreshToken: str(m["refresh_token"]), idToken: str(m["id_token"]),
 			tokenType: str(m["token_type"]), scope: str(m["scope"]),
 			expiresIn: num(m["expires_in"]), refreshExpiresIn: num(m["refresh_token_expires_in"]),
 		}
@@ -181,7 +155,7 @@ func parseBody(contentType string, body []byte) (fields, bool) {
 	}
 	n := func(k string) int64 { i, _ := strconv.ParseInt(v.Get(k), 10, 64); return i }
 	return fields{
-		accessToken: v.Get("access_token"), refreshToken: v.Get("refresh_token"), tokenType: v.Get("token_type"),
+		accessToken: v.Get("access_token"), refreshToken: v.Get("refresh_token"), idToken: v.Get("id_token"), tokenType: v.Get("token_type"),
 		scope: v.Get("scope"), errCode: v.Get("error"), expiresIn: n("expires_in"), refreshExpiresIn: n("refresh_token_expires_in"),
 	}, true
 }

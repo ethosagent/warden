@@ -194,6 +194,10 @@ type H struct {
 	// stay.
 	wantOAuthFake bool
 	oauthFake     *fakes.OAuthProvider
+	// oauthDomains and oauthEmailMatch (WithOAuthAccountRules) are the google
+	// provider's allowedAccountDomains and requireEmailMatch.
+	oauthDomains    []string
+	oauthEmailMatch bool
 	// userStoreAWS is the AWS account behind consent.store (WithConsent): the
 	// CP-only user credential store the IdP link writes to.
 	userStoreAWS *fakes.FakeAWSSecretsClient

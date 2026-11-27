@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -64,6 +65,10 @@ type Options struct {
 	// does not read the wall clock). Nil disables the cache.
 	Now    func() time.Time
 	Logger *slog.Logger
+	// HTTPClient is the SSRF-safe provider client used by Refresh (built by
+	// adapters/httpclient at assembly). Nil makes Refresh return
+	// ErrRefreshUnconfigured.
+	HTTPClient FormPoster
 }
 
 // Provider is one configured OAuth provider with its endpoint defaults applied.
@@ -100,6 +105,19 @@ type Provider struct {
 	failAt  time.Time
 	failTTL time.Duration
 	now     func() time.Time
+	// clock is now with a time.Now default; the failure cache keys off now
+	// being nil, id_token expiry never may.
+	clock func() time.Time
+
+	httpc          FormPoster
+	logger         *slog.Logger
+	counters       *RefreshCounters
+	revokeCounters *RevokeCounters
+
+	// hinted and blockedLogged rate-limit the operator log lines to one per
+	// provider until a refresh succeeds.
+	hinted, blockedLogged atomic.Bool
+	revokeBlockedLogged   atomic.Bool
 }
 
 // RevokeEndpoint returns RevokeURL with {client_id} replaced by the
@@ -209,8 +227,10 @@ func (p *Provider) LogValue() slog.Value {
 // Registry holds the configured providers. It is fixed after NewRegistry; a
 // change needs a CP restart.
 type Registry struct {
-	byID map[string]*Provider
-	ids  []string
+	byID    map[string]*Provider
+	ids     []string
+	refresh RefreshCounters
+	revoke  RevokeCounters
 }
 
 // NewRegistry validates cfgs (the same rules as config load), applies the
@@ -229,7 +249,7 @@ func NewRegistry(cfgs []config.OAuthProviderConfig, opts Options) (*Registry, er
 	}
 	r := &Registry{byID: make(map[string]*Provider, len(cfgs))}
 	for _, c := range cfgs {
-		p, err := buildProvider(c, opts, logger)
+		p, err := buildProvider(c, opts, logger, &r.refresh, &r.revoke)
 		if err != nil {
 			return nil, err
 		}
@@ -243,7 +263,7 @@ func NewRegistry(cfgs []config.OAuthProviderConfig, opts Options) (*Registry, er
 	return r, nil
 }
 
-func buildProvider(c config.OAuthProviderConfig, opts Options, logger *slog.Logger) (*Provider, error) {
+func buildProvider(c config.OAuthProviderConfig, opts Options, logger *slog.Logger, counters *RefreshCounters, revoke *RevokeCounters) (*Provider, error) {
 	p := &Provider{
 		ID:                    c.ID,
 		Type:                  c.Type,
@@ -259,6 +279,11 @@ func buildProvider(c config.OAuthProviderConfig, opts Options, logger *slog.Logg
 		resolver:              opts.Resolver,
 		failTTL:               secretFailCache,
 		now:                   opts.Now,
+		clock:                 nowOrDefault(opts.Now),
+		httpc:                 opts.HTTPClient,
+		logger:                logger,
+		counters:              counters,
+		revokeCounters:        revoke,
 	}
 	switch c.Type {
 	case config.OAuthProviderGoogle:
@@ -300,11 +325,13 @@ func buildProvider(c config.OAuthProviderConfig, opts Options, logger *slog.Logg
 	return p, nil
 }
 
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
+func firstNonEmpty(vs ...string) string {
+	for _, v := range vs {
+		if v != "" {
+			return v
+		}
 	}
-	return b
+	return ""
 }
 
 // Get returns the provider id or ErrUnknownProvider.
@@ -329,3 +356,11 @@ func (r *Registry) Providers() []*Provider {
 
 // Len returns the number of providers.
 func (r *Registry) Len() int { return len(r.ids) }
+
+// nowOrDefault keeps a nil clock from disabling time checks (id_token exp).
+func nowOrDefault(f func() time.Time) func() time.Time {
+	if f == nil {
+		return time.Now
+	}
+	return f
+}

@@ -37,6 +37,9 @@ type AuditEvent struct {
 	GrantID    string
 	PendingID  string
 	Scopes     []string
+	// AccountID is the provider account id (Google sub, GitHub user id) when the
+	// callback identified one; never an email or a login.
+	AccountID string
 	// System marks a row written by the broker itself (the orphan sweep), not
 	// by a signed-in user: the actor is the system and Sub and Email are empty.
 	System bool
@@ -99,7 +102,10 @@ func (e *CallbackError) Status() int {
 // are the query parameters and BrowserToken is the connect cookie's value.
 type CallbackRequest struct {
 	Iss, Sub, Email string
-	State, Code     string
+	// EmailVerified is the portal session's email_verified (the IdP's claim at
+	// sign-in). requireEmailMatch compares Email only when it is true.
+	EmailVerified bool
+	State, Code   string
 	// ProviderError is the query's error parameter (error_description is never
 	// read).
 	ProviderError string
@@ -132,6 +138,10 @@ const (
 	ReasonScopeExceeded     = "scope_exceeded"
 	ReasonInsufficientScope = "insufficient_scope"
 	ReasonUserBlocked       = "user_blocked"
+	// ReasonAccountNotAllowed: the connected provider account fails
+	// allowedAccountDomains or requireEmailMatch, or could not be identified
+	// while one of them is set.
+	ReasonAccountNotAllowed = "account_not_allowed"
 )
 
 // identityScopes are granted on top of the cap: Google returns openid and email
@@ -184,6 +194,7 @@ type callbackState struct {
 	grantID   string
 	scopes    []string
 	reason    string
+	accountID string
 	// audited is set once the attempt was consumed: from then on the request
 	// is attributable to the session user, so its outcome is audited.
 	audited bool
@@ -298,6 +309,7 @@ func (b *Broker) callback(ctx context.Context, req CallbackRequest, st *callback
 	if _, outside := CapScopes(granted, UnionScopes(prov.AllowedScopes, identityAllowance(prov))); len(outside) > 0 {
 		b.logger.Warn("oauth_connect_scope_exceeded", "provider", prov.ID, "user_key", a.UserKey, "outside_count", len(outside))
 		b.completePending(ctx, a.PendingID, StatusDenied, ReasonScopeExceeded)
+		b.dropToken(ctx, a, prov, tok, nil)
 		return CallbackResult{}, cbErr(CodeScopeExceeded)
 	}
 	st.scopes = granted
@@ -306,12 +318,98 @@ func (b *Broker) callback(ctx context.Context, req CallbackRequest, st *callback
 		_, missing := CapScopes(canonIdentity(prov, requested), canonIdentity(prov, granted))
 		insufficient = len(missing) > 0
 	}
-	return b.writeGrant(ctx, req, a, prov, tok, granted, insufficient, st)
+
+	// Which provider account was connected, and may it be? With an account rule
+	// set, a failure to identify denies; without one the connect proceeds with
+	// no account recorded.
+	ident, ierr := prov.Identify(ctx, tok)
+	var acct Account
+	if ierr != nil {
+		if prov.HasAccountRules() {
+			return b.accountDenied(ctx, a, prov, tok, nil, st), nil
+		}
+		b.logger.Warn("oauth_connect_identify_failed", "provider", prov.ID, "user_key", a.UserKey)
+	} else {
+		st.accountID = ident.ID
+		if !prov.AccountRules(ident, req.Email, req.EmailVerified) {
+			return b.accountDenied(ctx, a, prov, tok, &ident, st), nil
+		}
+		acct = ident.Account()
+	}
+	return b.writeGrant(ctx, req, a, prov, tok, granted, insufficient, acct, st)
+}
+
+// accountDenied refuses a connect whose provider account is not allowed: the
+// pending ends denied account_not_allowed, the token is dropped and revoked at
+// the provider (see dropToken) and nothing is stored.
+func (b *Broker) accountDenied(ctx context.Context, a Attempt, prov *Provider, tok TokenResponse, ident *Identity, st *callbackState) CallbackResult {
+	b.logger.Warn("oauth_connect_account_not_allowed", "provider", prov.ID, "user_key", a.UserKey, "identified", ident != nil)
+	res := b.denied(ctx, a, prov, ReasonAccountNotAllowed, st)
+	b.dropToken(ctx, a, prov, tok, ident)
+	return res
+}
+
+// dropToken revokes a token the broker is about to forget (it was never
+// stored). Revoking ends a whole provider grant (Google) or every token of the
+// OAuth app for the user (GitHub), so it is skipped when that would end a
+// working connection: the user already has a grant for this provider that
+// could be the same provider account. It is run only when there is no grant,
+// the grant is revoked or needs re-consent, or both accounts are known and
+// differ (then the revoke only touches the other account). A failure is logged
+// by outcome and not retried: no secret holds the token.
+func (b *Broker) dropToken(ctx context.Context, a Attempt, prov *Provider, tok TokenResponse, ident *Identity) {
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
+	defer cancel()
+	unlock := b.locks.Lock(a.UserKey, prov.ID)
+	defer unlock()
+	g, err := b.store.GetGrant(wctx, a.UserKey, prov.ID)
+	switch {
+	case errors.Is(err, ErrNotFound):
+	case err != nil:
+		b.logger.Warn("oauth_connect_drop_revoke_skipped", "provider", prov.ID, "user_key", a.UserKey, "reason", "store_unavailable")
+		return
+	case g.State == GrantRevoked || g.State == GrantReconsentRequired:
+	case ident != nil && ident.ID != "" && g.Account.ID != "" && g.Account.ID != ident.ID:
+	default:
+		b.logger.Info("oauth_connect_drop_revoke_skipped", "provider", prov.ID, "user_key", a.UserKey, "reason", "active_grant")
+		return
+	}
+	b.revokeDropped(wctx, a.UserKey, prov, b.dropRecord(prov, tok))
+}
+
+// dropRecord shapes a token response as the record Revoke reads.
+func (b *Broker) dropRecord(prov *Provider, tok TokenResponse) TokenRecord {
+	rec := TokenRecord{
+		V: TokenRecordVersion, Provider: prov.ID, ClientID: prov.ClientID, TokenType: tok.TokenType,
+		AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken, Scope: tok.Scope,
+	}
+	if !tok.Expiry.IsZero() {
+		rec.Expiry = tok.Expiry.UTC().Unix()
+	}
+	if !tok.RefreshExpiry.IsZero() {
+		rec.RefreshExpiry = tok.RefreshExpiry.UTC().Unix()
+	}
+	return rec
+}
+
+// revokeDropped calls the provider revoke for a token the broker holds only in
+// memory. The caller holds GrantLocks.
+func (b *Broker) revokeDropped(ctx context.Context, userKey string, prov *Provider, rec TokenRecord) {
+	secret, err := prov.ClientSecret(ctx)
+	if err != nil {
+		b.logger.Warn("oauth_connect_drop_revoke_skipped", "provider", prov.ID, "user_key", userKey, "reason", "client_secret_unavailable")
+		return
+	}
+	if err := Revoke(ctx, prov, rec, secret, userKey); err != nil {
+		var re *RevokeError
+		retryable := errors.As(err, &re) && re.Retryable
+		b.logger.Warn("oauth_connect_drop_revoke_failed", "provider", prov.ID, "user_key", userKey, "retryable", retryable)
+	}
 }
 
 // writeGrant is the write phase, after the exchange succeeded and the scopes passed
 // the cap. Everything here runs detached from the request, under GrantLocks.
-func (b *Broker) writeGrant(ctx context.Context, req CallbackRequest, a Attempt, prov *Provider, tok TokenResponse, granted []string, insufficient bool, st *callbackState) (CallbackResult, error) {
+func (b *Broker) writeGrant(ctx context.Context, req CallbackRequest, a Attempt, prov *Provider, tok TokenResponse, granted []string, insufficient bool, acct Account, st *callbackState) (CallbackResult, error) {
 	key, err := b.grantKey(a.UserKey, prov.ID)
 	if err != nil {
 		return CallbackResult{}, cbErr(CodeInternal)
@@ -367,7 +465,7 @@ func (b *Broker) writeGrant(ctx context.Context, req CallbackRequest, a Attempt,
 		b.logger.Warn("oauth_connect_secret_store_failed", "provider", prov.ID, "user_key", a.UserKey, "op", "put")
 		return CallbackResult{}, cbErr(CodeSecretStoreDown)
 	}
-	if _, err := b.store.ActivateGrant(wctx, grant.GrantID, granted, Account{}); err != nil {
+	if _, err := b.store.ActivateGrant(wctx, grant.GrantID, granted, acct); err != nil {
 		b.logger.Warn("oauth_connect_activate_failed", "provider", prov.ID, "user_key", a.UserKey)
 		return CallbackResult{}, cbErr(CodeStoreUnavailable)
 	}
@@ -381,6 +479,9 @@ func (b *Broker) writeGrant(ctx context.Context, req CallbackRequest, a Attempt,
 		if _, rerr := b.store.RevokeGrant(wctx, a.UserKey, prov.ID, grant.GrantID); rerr != nil {
 			b.logger.Warn("oauth_connect_revoke_failed", "provider", prov.ID, "user_key", a.UserKey)
 		}
+		// The key is gone and the grant row is revoked: nothing working is left
+		// to protect, so the provider token goes too.
+		b.revokeDropped(wctx, a.UserKey, prov, rec)
 		b.completePending(wctx, a.PendingID, StatusDenied, ReasonUserBlocked)
 		return CallbackResult{}, err
 	}
@@ -512,7 +613,7 @@ func (b *Broker) recordCallback(ctx context.Context, req CallbackRequest, st cal
 	ev := AuditEvent{
 		Action: AuditActionDenied, Outcome: outcome, Reason: reason, Status: status,
 		Sub: req.Sub, Email: req.Email, Provider: st.provider, GrantID: st.grantID,
-		PendingID: st.pendingID, Scopes: st.scopes,
+		PendingID: st.pendingID, Scopes: st.scopes, AccountID: st.accountID,
 	}
 	if granted {
 		ev.Action = AuditActionGranted

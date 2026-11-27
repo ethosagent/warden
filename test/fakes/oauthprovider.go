@@ -6,12 +6,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // OAuthProvider is an httptest OAuth 2.0 provider for the OAuth broker
@@ -41,6 +44,27 @@ type OAuthProvider struct {
 	tokenCalls  int
 	lastForm    url.Values
 	forms       []url.Values
+
+	acct    OAuthAccount
+	revokes []OAuthRevoke
+}
+
+// OAuthAccount is the provider account the fake's tokens belong to
+// (W-P3-BRKR-08). Google responses carry it in an id_token (when openid was
+// requested); GitHub style tokens read it back from the /user endpoint.
+type OAuthAccount struct {
+	// Sub is the Google id_token sub or the GitHub user id.
+	Sub, Login, Email string
+	EmailVerified     bool
+	// HD is Google's hosted-domain claim ("" for a consumer account).
+	HD string
+}
+
+// OAuthRevoke is one request the revoke endpoint received.
+type OAuthRevoke struct {
+	Method string
+	// Token is the token the request named (form token or JSON access_token).
+	Token string
 }
 
 // OAuthStyle is the wire dialect of an OAuthProvider's token endpoint.
@@ -72,14 +96,23 @@ const (
 // OAuthDefaultClientID with OAuthDefaultSecret in the Google style.
 func NewOAuthProvider(t testing.TB) *OAuthProvider {
 	t.Helper()
-	p := &OAuthProvider{clientID: OAuthDefaultClientID, secret: OAuthDefaultSecret, codes: map[string]oauthCode{}}
+	p := &OAuthProvider{clientID: OAuthDefaultClientID, secret: OAuthDefaultSecret, codes: map[string]oauthCode{},
+		acct: OAuthAccount{Sub: "4242", Login: "octo-alice", Email: "alice@example.com", EmailVerified: true, HD: "example.com"}}
 	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/authorize":
 			p.authorize(w, r)
 		case "/token":
 			p.token(w, r)
+		case "/user":
+			p.user(w, r)
+		case "/revoke":
+			p.revoke(w, r)
 		default:
+			if strings.HasPrefix(r.URL.Path, "/applications/") && strings.HasSuffix(r.URL.Path, "/grant") {
+				p.revoke(w, r)
+				return
+			}
 			http.NotFound(w, r)
 		}
 	}))
@@ -90,6 +123,26 @@ func NewOAuthProvider(t testing.TB) *OAuthProvider {
 // AuthURL and TokenURL are the endpoints a provider config points at.
 func (p *OAuthProvider) AuthURL() string  { return p.srv.URL + "/authorize" }
 func (p *OAuthProvider) TokenURL() string { return p.srv.URL + "/token" }
+
+// UserinfoURL and RevokeURL are the account and revoke endpoints.
+func (p *OAuthProvider) UserinfoURL() string { return p.srv.URL + "/user" }
+func (p *OAuthProvider) RevokeURL() string   { return p.srv.URL + "/revoke" }
+
+// GitHubRevokeURL is the revoke URL of a github provider (the config requires
+// the {client_id} template).
+func (p *OAuthProvider) GitHubRevokeURL() string {
+	return p.srv.URL + "/applications/{client_id}/grant"
+}
+
+// SetAccount chooses the provider account later tokens belong to.
+func (p *OAuthProvider) SetAccount(a OAuthAccount) { p.locked(func() { p.acct = a }) }
+
+// RevokeRequests is every request the revoke endpoint received, oldest first.
+func (p *OAuthProvider) RevokeRequests() []OAuthRevoke {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]OAuthRevoke(nil), p.revokes...)
+}
 
 // SetStyle chooses the wire dialect.
 func (p *OAuthProvider) SetStyle(s OAuthStyle) { p.locked(func() { p.style = s }) }
@@ -280,6 +333,11 @@ func (p *OAuthProvider) token(w http.ResponseWriter, r *http.Request) {
 		if !p.omitRefresh {
 			body["refresh_token"] = p.RefreshToken(p.issued)
 		}
+		for _, s := range strings.Fields(scope) {
+			if s == "openid" {
+				body["id_token"] = p.idToken()
+			}
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(body)
@@ -294,4 +352,74 @@ func (p *OAuthProvider) fail(w http.ResponseWriter, code string, status int) {
 	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": code, "error_description": "fake provider text that must never reach a user"})
+}
+
+// idToken is an unsigned JWT: the broker reads a token endpoint's id_token
+// directly over TLS and does not verify a signature. Caller holds p.mu.
+func (p *OAuthProvider) idToken() string {
+	enc := func(v any) string {
+		b, _ := json.Marshal(v)
+		return base64.RawURLEncoding.EncodeToString(b)
+	}
+	claims := map[string]any{
+		"iss": "https://accounts.google.com", "aud": p.clientID, "sub": p.acct.Sub,
+		"email": p.acct.Email, "email_verified": p.acct.EmailVerified,
+		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(),
+	}
+	if p.acct.HD != "" {
+		claims["hd"] = p.acct.HD
+	}
+	return enc(map[string]string{"alg": "none", "typ": "JWT"}) + "." + enc(claims) + ".sig"
+}
+
+// user answers GET /user for a token the fake issued (the GitHub account
+// endpoint).
+func (p *OAuthProvider) user(w http.ResponseWriter, r *http.Request) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	valid := false
+	for i := 1; i <= p.issued; i++ {
+		if ok && tok == p.AccessToken(i) {
+			valid = true
+		}
+	}
+	if !valid {
+		http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+		return
+	}
+	id := any(p.acct.Sub)
+	if n, err := strconv.ParseInt(p.acct.Sub, 10, 64); err == nil {
+		id = n
+	}
+	body := map[string]any{"id": id, "login": p.acct.Login}
+	if p.acct.Email != "" {
+		body["email"] = p.acct.Email
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// revoke records a revoke request (Google form POST or GitHub JSON DELETE).
+func (p *OAuthProvider) revoke(w http.ResponseWriter, r *http.Request) {
+	raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	rv := OAuthRevoke{Method: r.Method}
+	if v, err := url.ParseQuery(string(raw)); err == nil {
+		rv.Token = v.Get("token")
+	}
+	var j struct {
+		AccessToken string `json:"access_token"`
+	}
+	if json.Unmarshal(raw, &j) == nil && j.AccessToken != "" {
+		rv.Token = j.AccessToken
+	}
+	p.mu.Lock()
+	p.revokes = append(p.revokes, rv)
+	style := p.style
+	p.mu.Unlock()
+	if style == OAuthGitHub {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }

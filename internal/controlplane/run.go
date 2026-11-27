@@ -36,6 +36,7 @@ import (
 	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/oauthbroker"
 	oauthexchange "github.com/ethosagent/warden/internal/oauthbroker/adapters/exchange"
+	oauthhttpclient "github.com/ethosagent/warden/internal/oauthbroker/adapters/httpclient"
 	oauthbrokersqlite "github.com/ethosagent/warden/internal/oauthbroker/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/observability"
 	"github.com/ethosagent/warden/internal/secrets"
@@ -692,8 +693,15 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if state == nil {
 			logger.Warn("control plane: consent.providers is set but --state-dir is not; the OAuth broker is off (no /connect routes)")
 		} else {
+			// One SSRF-safe provider client serves refresh and revoke; only an
+			// explicit allow-list reaches a private address. (Options.Resolver
+			// for clientSecretKey is wired when the client-secret store lands.)
+			providerHTTP, herr := oauthhttpclient.New(p.OAuthAllowPrivateCIDRs, nil)
+			if herr != nil {
+				return fail(fmt.Errorf("control-plane: oauth provider client: %w", herr))
+			}
 			oauthRegistry, err = oauthbroker.NewRegistry(consentCfg.Providers, oauthbroker.Options{
-				LookupEnv: os.LookupEnv, Now: clk.Now, Logger: logger,
+				LookupEnv: os.LookupEnv, Now: clk.Now, Logger: logger, HTTPClient: providerHTTP,
 			})
 			if err != nil {
 				return fail(fmt.Errorf("control-plane: oauth providers: %w", err))

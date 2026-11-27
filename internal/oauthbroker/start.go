@@ -285,6 +285,15 @@ func (b *Broker) authURL(p *Provider, scopes []string, state, verifier string) (
 	q.Set("state", state)
 	q.Set("code_challenge", base64.RawURLEncoding.EncodeToString(sum[:]))
 	q.Set("code_challenge_method", "S256")
+	if p.Type == config.OAuthProviderGoogle {
+		// The id_token that names the account needs openid and email; they sit
+		// outside the cap (identityScopes) and carry no API access.
+		scopes = UnionScopes(scopes, identityScopes)
+		if len(p.AllowedAccountDomains) == 1 && q.Get("hd") == "" {
+			// A hint for the account chooser only; the hd claim is what is enforced.
+			q.Set("hd", p.AllowedAccountDomains[0])
+		}
+	}
 	if p.Type != config.OAuthProviderGitHubApp && len(scopes) > 0 {
 		q.Set("scope", JoinScopes(scopes))
 	}

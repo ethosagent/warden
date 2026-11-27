@@ -89,7 +89,7 @@ func connectStart(t *testing.T, h *harness.H) {
 	sum := sha256.Sum256([]byte(a.Verifier))
 	hashOf := func(s string) string { x := sha256.Sum256([]byte(s)); return hexOf(x[:]) }
 	for k, want := range map[string]string{
-		"response_type": "code", "client_id": "harness-google-client", "scope": "drive.readonly",
+		"response_type": "code", "client_id": "harness-google-client", "scope": "drive.readonly email openid",
 		"redirect_uri":          h.ConsoleURL() + "/connect/callback",
 		"code_challenge_method": "S256", "code_challenge": base64.RawURLEncoding.EncodeToString(sum[:]),
 	} {

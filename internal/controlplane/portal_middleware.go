@@ -214,7 +214,7 @@ func (p *portalService) requireSessionWith(next http.Handler, so signedOutPolicy
 			return
 		}
 		ctx := portal.WithPrincipal(r.Context(), portal.Principal{
-			Iss: sc.sess.Iss, Sub: sc.sess.Sub, Email: sc.sess.Email,
+			Iss: sc.sess.Iss, Sub: sc.sess.Sub, Email: sc.sess.Email, EmailVerified: sc.sess.EmailVerified,
 			Groups: sc.sess.Groups, SessionHash: sc.sess.IDHash,
 		})
 		ctx = context.WithValue(ctx, portalSessionKey{}, sc)

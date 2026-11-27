@@ -284,7 +284,7 @@ func (p *portalService) finishLogin(w http.ResponseWriter, r *http.Request, logi
 		}
 	}
 	rawID, sess, err := p.sessions.Create(ctx, webauth.SessionInput{
-		Iss: claims.Issuer, Sub: claims.Sub, Email: claims.Email, Groups: groups,
+		Iss: claims.Issuer, Sub: claims.Sub, Email: claims.Email, EmailVerified: claims.EmailVerified && claims.Email != "", Groups: groups,
 	})
 	if err != nil {
 		// The IdP link, when one was written above, stays: it is the same
