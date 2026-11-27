@@ -369,7 +369,7 @@ func (a changeDraftAPI) Diff(ctx context.Context, id string) (dashboard.ChangeDi
 		}
 		base = RedactCredentials(v.Doc)
 	}
-	diff, err := DiffDocs(base, RedactCredentials(policyWire{Allowlist: doc.Allowlist, Denylist: doc.Denylist, Settings: doc.Settings}))
+	diff, err := DiffDocs(base, RedactCredentials(docWire(doc)))
 	if err != nil {
 		return dashboard.ChangeDiff{}, a.changeErr(ctx, err)
 	}
@@ -857,7 +857,7 @@ func (a changeDraftAPI) decodeAndValidate(ctx context.Context, raw json.RawMessa
 	if err != nil {
 		return doc, err
 	}
-	if err := a.s.validateDoc(policyWire{Allowlist: doc.Allowlist, Denylist: doc.Denylist, Settings: doc.Settings}); err != nil {
+	if err := a.s.validateDoc(docWire(doc)); err != nil {
 		return doc, a.changeErr(ctx, &dashboard.InvalidPolicyError{Err: err})
 	}
 	return doc, nil

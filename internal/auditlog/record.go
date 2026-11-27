@@ -28,8 +28,8 @@ const (
 	// SchemaRev 2 adds the user_blocked reason (W-P1-BLOCK-02); 3 adds
 	// agent_disabled (W-P2-AREG-05); 4 adds user.act and user.token_type
 	// (W-P2-WBND-02); 5 adds limit_rule and lets agent_id come from the event
-	// (W-P3-PUL-02).
-	SchemaRev = 5
+	// (W-P3-PUL-02); 6 adds the user_rate_limited reason (W-P3-PUL-03).
+	SchemaRev = 6
 )
 
 // QueryMode says what FromEvent may record of the request query.

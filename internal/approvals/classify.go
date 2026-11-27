@@ -5,6 +5,7 @@
 package approvals
 
 import (
+	"encoding/json"
 	"slices"
 	"sort"
 	"strconv"
@@ -24,6 +25,12 @@ const (
 	CodeAllowRemovedToJudge = "allow.removed_to_judge"   // a constrained entry removed: its explicit deny becomes a judge-eligible no-match
 	CodeDenyRemoved         = "deny.removed"             // a deny entry removed or changed
 	CodeSettingsChanged     = "settings.changed"
+	// CodeUserLimitsChanged is any change to a per-user limit key
+	// (userLimits, defaultUserLimit, anonymousLimit). A limit change can move a
+	// user to a looser rule through precedence, so every change is widening
+	// (no containment analysis); Path is the key, never a rule's users,
+	// groups or values.
+	CodeUserLimitsChanged = "user_limits.changed"
 )
 
 // Reason says why a change counts as widening. Path and Detail hold only a
@@ -61,6 +68,7 @@ func Classify(base, draft Doc) Classification {
 	var reasons []Reason
 	reasons = append(reasons, classifyAllow(base.Allowlist, draft.Allowlist)...)
 	reasons = append(reasons, classifyDeny(base.Denylist, draft.Denylist)...)
+	reasons = append(reasons, classifyUserLimits(base, draft)...)
 
 	role := config.RoleEditor
 	bm, errB := settingsMap(base.Settings)
@@ -94,6 +102,43 @@ func Classify(base, draft Doc) Classification {
 		reasons = []Reason{} // marshal as [], never null
 	}
 	return Classification{Widening: len(reasons) > 0, Reasons: reasons, RequiredRole: role}
+}
+
+// classifyUserLimits reports each per-user limit key that differs between
+// base and draft (JSON equality of the normalized rules). An unencodable value
+// fails closed as changed.
+func classifyUserLimits(base, draft Doc) []Reason {
+	var out []Reason
+	for _, k := range []struct {
+		path string
+		a, b any
+	}{
+		{"userLimits", base.UserLimits, draft.UserLimits},
+		{"defaultUserLimit", base.DefaultUserLimit, draft.DefaultUserLimit},
+		{"anonymousLimit", base.AnonymousLimit, draft.AnonymousLimit},
+	} {
+		if !jsonEqual(k.a, k.b) {
+			out = append(out, Reason{Code: CodeUserLimitsChanged, Path: k.path, Detail: k.path + " changed"})
+		}
+	}
+	return out
+}
+
+// jsonEqual reports whether a and b have the same JSON encoding, treating an
+// empty list as absent. An encoding error is never equal.
+func jsonEqual(a, b any) bool {
+	ea, errA := json.Marshal(a)
+	eb, errB := json.Marshal(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	norm := func(b []byte) string {
+		if s := string(b); s != "[]" {
+			return s
+		}
+		return "null"
+	}
+	return norm(ea) == norm(eb)
 }
 
 func destPath(list, domain string, port int) string {

@@ -186,6 +186,7 @@ Alert on `unspecified`: it should never occur, and seeing it means a deny path s
 | `identity_groups_truncated` | denyreason | Like `group_not_allowed`, but the subject's group list was cut at the cap, so the miss may come from the cut; it fails closed under its own name. |
 | `user_blocked` | denyreason | The request's identity claims (verified or not) match an entry on the user block list. |
 | `agent_disabled` | denyreason | The agent this worker is bound to is disabled in the control plane's agent registry; every request is refused and open sessions are closed. |
+| `user_rate_limited` | denyreason | The per-user limit rule that applies to the request's user (or the anonymous bucket for a request with no verified identity) is out of rate budget for its window; also used, fail closed, when the worker's per-user bucket table is full. Checked only after an allow. Added in `schema_rev` 6. |
 | `h2_request_trailers_unsupported` | denyreason | An HTTP/2 stream declared request trailers, which the h2 forward path does not relay. |
 | `h2_extended_connect_unsupported` | denyreason | An RFC 8441 extended CONNECT (WebSocket over h2) the stream path cannot relay faithfully. |
 | `transform_needs_buffered_body` | denyreason | An auth transform needed the body but it could not be buffered (streaming or unknown length). |

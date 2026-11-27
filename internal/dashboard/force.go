@@ -36,8 +36,9 @@ func ForceFrom(ctx context.Context) bool {
 type WorkersLackCapabilityError struct {
 	// Workers are the proxy ids of the connected workers lacking the capability.
 	Workers []string
-	// Capability names the missing capability in the 409 body. Empty for the
-	// identity require guard, whose body predates the field and stays as it was.
+	// Capability names the missing capability. Empty for the identity
+	// require-mode guard, whose 409 body predates the field and stays as it
+	// was; set (e.g. userlimits/v1) by later guards, and then on the body.
 	Capability string
 }
 

@@ -207,13 +207,14 @@ func (p *Proxy) handleWSUpgrade(s *requestScope) {
 		Decision:       "allow",
 		Reason:         s.echoMonitorReason,
 		ResponseStatus: resp.StatusCode,
+		LimitRule:      s.limitRule,
 	})
 	p.cfg.Metrics.RecordRequest("allow", proto)
 	p.logDecision(decisionLog{
 		Domain: s.domain, Port: s.port, Protocol: proto,
 		Method: req.Method, URL: fullURL, Decision: "allow",
-		ResponseStatus: resp.StatusCode,
-		ID:             s.resolved(),
+		ResponseStatus: resp.StatusCode, LimitRule: s.limitRule,
+		ID: s.resolved(),
 	})
 }
 

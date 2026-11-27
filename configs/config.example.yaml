@@ -107,8 +107,12 @@ policy:
   #   - sub: "CgUxMjM0NRIFbG9jYWw"
   #   - email: former.employee@corp.example
 
-  # Per-user limits (phase 3, NOT YET ENFORCED: a non-empty userLimits,
-  # defaultUserLimit or anonymousLimit fails to load until enforcement ships).
+  # Per-user limits (phase 3). rateLimit is enforced on every request, h2
+  # stream and WebSocket upgrade (a raw tunnel without a CA is charged once at
+  # CONNECT): over it the agent gets 429 {"error":"user_rate_limited"} with
+  # Retry-After. dailyCostUSD is NOT YET ENFORCED: a rule that sets it fails to
+  # load until cost caps ship. Rate buckets live in worker memory and start
+  # empty after a restart.
   # Off when absent; /policy and its ETag are then unchanged. Exactly one rule
   # applies per request: rules matching by users, then groups, then agents-only
   # rules (first in list order wins within a tier), then defaultUserLimit. A
@@ -122,7 +126,7 @@ policy:
   #     match: {groups: [eng], domains: [api.openai.com]}
   #     perAgent: false
   #     rateLimit: 60/minute
-  #     dailyCostUSD: 5
+  #     # dailyCostUSD: 5   # not yet enforced (refused at load)
   # defaultUserLimit: {rateLimit: 600/hour}
   # anonymousLimit: {rateLimit: 5/minute}
 

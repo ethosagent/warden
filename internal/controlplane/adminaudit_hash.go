@@ -64,7 +64,7 @@ func (s *Server) stateHashJSON(target string, v any) (string, error) {
 func (s *Server) registerBuiltinStateHashers() {
 	s.RegisterStateHasher("policy", func(context.Context) (string, error) {
 		w, _, _, _ := s.policy.snapshot()
-		return s.stateHashJSON("policy", config.Policy{Allowlist: w.Allowlist, Denylist: w.Denylist})
+		return s.stateHashJSON("policy", policyStateOf(w))
 	})
 	s.RegisterStateHasher("settings", func(context.Context) (string, error) {
 		w, _, _, _ := s.policy.snapshot()
@@ -88,6 +88,26 @@ func (s *Server) registerBuiltinStateHashers() {
 		}
 		return s.stateHashJSON("integrations", block)
 	})
+}
+
+// policyState is the "policy" target's hashed state: allow/deny plus the
+// per-user limit rules. The limit keys are omitempty, so a policy without them
+// hashes exactly as before they existed ({"allowlist":..,"denylist":..}, the
+// encoding of config.Policy), and an audit chain spanning the upgrade does not
+// show a phantom change.
+type policyState struct {
+	Allowlist        []config.AllowlistEntry `json:"allowlist"`
+	Denylist         []config.DenylistEntry  `json:"denylist"`
+	UserLimits       []config.UserLimit      `json:"userLimits,omitempty"`
+	DefaultUserLimit *config.UserLimit       `json:"defaultUserLimit,omitempty"`
+	AnonymousLimit   *config.UserLimit       `json:"anonymousLimit,omitempty"`
+}
+
+func policyStateOf(w policyWire) policyState {
+	return policyState{
+		Allowlist: w.Allowlist, Denylist: w.Denylist,
+		UserLimits: w.UserLimits, DefaultUserLimit: w.DefaultUserLimit, AnonymousLimit: w.AnonymousLimit,
+	}
 }
 
 // configBlock returns the named top-level block of the served config file as

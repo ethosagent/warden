@@ -277,6 +277,11 @@ func (s *Server) writeVersioned(ctx context.Context, w versionedWrite) (int64, b
 	if err := s.costCapGuard(ctx, headCaps, wireCostCaps(doc)); err != nil {
 		return 0, false, err
 	}
+	// The per-user rate-limit rollout guard covers the same writers (policy
+	// save, settings, rollback): the new doc's rules against head's.
+	if err := s.userLimitsGuard(ctx, docWire(baseDoc), doc); err != nil {
+		return 0, false, err
+	}
 	if doc.Settings != nil {
 		if err := s.checkIssuerCollision(doc.Settings.Identity); err != nil {
 			return 0, false, err

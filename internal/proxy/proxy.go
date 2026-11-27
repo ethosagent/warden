@@ -27,6 +27,7 @@ import (
 	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cost"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
 	"github.com/ethosagent/warden/internal/observability"
 	"github.com/ethosagent/warden/internal/policy"
@@ -262,6 +263,22 @@ type PolicyEvaluator interface {
 	// match the admin block list. It is read from the same snapshot Replace
 	// swaps, allocates nothing and takes one read lock.
 	IsBlocked(sub, email string) bool
+	// ChargeUserLimit applies the one per-user limit rule that matches the
+	// request's subject, agentID and domain, consuming one request from its
+	// rate budget (W-P3-PUL-09). It is called only after the policy allowed
+	// the request, and its result can only deny: an Allow from it never
+	// overrides the policy verdict. agentID is the worker's bound agent, never
+	// a value read from the request or the token. With no limits configured it
+	// takes one read lock and allocates nothing.
+	ChargeUserLimit(rc policy.RequestContext, agentID string) policy.RequestVerdict
+	// PeekUserLimit is ChargeUserLimit without consuming budget (the
+	// TLS-terminated CONNECT, where the per-request charge is authoritative).
+	PeekUserLimit(rc policy.RequestContext, agentID string) policy.RequestVerdict
+	// MatchUserLimit reports the rule that applies without touching any
+	// bucket; IsCostBlocked reports a fleet cost block for sub under rule on
+	// now's UTC day. Both back the worker cost cap (W-P3-PUL-04).
+	MatchUserLimit(subj *identity.Subject, agentID, domain string) (policy.UserLimitRule, bool)
+	IsCostBlocked(sub, rule string, now time.Time) bool
 }
 
 // MetricsRecorder is the consumer-side seam for the nil-safe OTel metric emitter.
@@ -285,6 +302,9 @@ type MetricsRecorder interface {
 	// RecordScoped counts a decision that depended on the request subject
 	// (result: allow|not_member|no_identity). No user or group label.
 	RecordScoped(result string)
+	// RecordUserLimitDenied counts a request refused by a per-user limit, by
+	// kind (rate|cost|unmeasurable). No user, email, group or rule label.
+	RecordUserLimitDenied(kind string)
 }
 
 // CostEstimator is the consumer-side seam for the optional LLM cost estimator.
@@ -310,6 +330,7 @@ func (nopMetrics) RecordSignInStarted(outcome string)                    {}
 func (nopMetrics) RecordBlocklistEntries(n int)                          {}
 func (nopMetrics) RecordBlocklistSessionsClosed(n int)                   {}
 func (nopMetrics) RecordScoped(result string)                            {}
+func (nopMetrics) RecordUserLimitDenied(kind string)                     {}
 
 // Judge renders an allow/deny verdict for a request that matched no static
 // rule. It is defined here (consumer-side) so the proxy does not depend on the

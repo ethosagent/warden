@@ -191,6 +191,11 @@ var All = slices.Concat(
 		// scoped rules are served.
 		{Name: "scoped_policy_fleet_flag", Opts: []harness.Option{harness.Fleet(1)}, Run: scopedPolicyFleetFlag},
 		{Name: "scoped_policy_replay_affected_users", Opts: identityOpts(), Run: scopedPolicyReplayAffectedUsers},
+		// Per-user rate limits (W-P3-PUL-09): every request is charged with its
+		// own verified subject, so two users on one client have two budgets, a
+		// token-less request uses the anonymous rule, and only the user over the
+		// limit gets 429 user_rate_limited; events carry agent_id and limit_rule.
+		{Name: "user_rate_limit", Opts: userRateLimitOpts(), Run: userRateLimit},
 		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
 		// gateway through RequestMeta without changing any verdict.
 		{Name: "mcp_subject_seam_unchanged", Opts: mcpSubjectOpts(), Run: mcpSubjectSeamUnchanged},

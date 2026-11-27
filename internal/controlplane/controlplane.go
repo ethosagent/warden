@@ -1147,6 +1147,16 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 	}
 
 	prev := policyYAMLFromRoot(root)
+	// The per-user rate-limit rollout guard: an edit that carries limit keys
+	// replaces the file's (one without them keeps the file's, so it changes
+	// nothing).
+	if py := policyYAMLOfPolicy(p); py.hasUserLimits() {
+		cur := policyYAMLFromRoot(root)
+		live := policyWire{UserLimits: cur.UserLimits, DefaultUserLimit: cur.DefaultUserLimit, AnonymousLimit: cur.AnonymousLimit}
+		if err := s.userLimitsGuard(ctx, live, policyWireOfPolicy(p)); err != nil {
+			return err
+		}
+	}
 	if err := renderPolicyEdit(root, p); err != nil {
 		return err
 	}

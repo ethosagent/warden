@@ -60,14 +60,53 @@ func (s *Server) requireGuard(ctx context.Context, live *config.SettingsWire, in
 	if len(lacking) == 0 {
 		return nil
 	}
+	// The require 409 body names no capability (it predates the field).
+	return s.forceOrRefuse(ctx, "", lacking, total, "require_mode_forced")
+}
+
+// userLimitsGuard is the rollout guard of per-user rate limits (W-P3-PUL-09).
+// A worker without userlimits/v1 refuses a whole policy wire that carries a
+// limit rule and freezes on its last-known-good policy (no further allow,
+// deny or block-list updates), so a write that introduces a rule with a
+// rateLimit (live has none) is refused with 409 workers_lack_capability,
+// capability userlimits/v1, while any connected worker lacks the cap, unless
+// an admin forces it (audited). live and next are the docs before and after.
+func (s *Server) userLimitsGuard(ctx context.Context, live, next policyWire) error {
+	if !hasRateLimitRule(next) || hasRateLimitRule(live) {
+		return nil
+	}
+	lacking, total := s.registry.WorkersLackingCap(config.CapUserLimitsV1, func(string) bool { return true })
+	if len(lacking) == 0 {
+		return nil
+	}
+	return s.forceOrRefuse(ctx, config.CapUserLimitsV1, lacking, total, "user_limits_forced")
+}
+
+// hasRateLimitRule reports whether w carries a per-user limit rule with a
+// rateLimit.
+func hasRateLimitRule(w policyWire) bool {
+	for _, l := range w.UserLimits {
+		if l.RateLimit != "" {
+			return true
+		}
+	}
+	return (w.DefaultUserLimit != nil && w.DefaultUserLimit.RateLimit != "") ||
+		(w.AnonymousLimit != nil && w.AnonymousLimit.RateLimit != "")
+}
+
+// forceOrRefuse is the shared end of a capability rollout guard with lacking
+// workers: without force=true a *dashboard.WorkersLackCapabilityError (naming
+// capability, "" for the require guard); with it, an admin's write goes
+// through and the admin audit row records force and the worker ids.
+func (s *Server) forceOrRefuse(ctx context.Context, capability string, lacking []string, total int, logMsg string) error {
 	if !dashboard.ForceFrom(ctx) {
-		return &dashboard.WorkersLackCapabilityError{Workers: lacking}
+		return &dashboard.WorkersLackCapabilityError{Workers: lacking, Capability: capability}
 	}
 	if err := s.forceByAdmin(ctx); err != nil {
 		return err
 	}
-	annotateForced(ctx, "", lacking, total)
-	s.cfg.Logger.Warn("require_mode_forced", "workers", lacking)
+	annotateForced(ctx, capability, lacking, total)
+	s.cfg.Logger.Warn(logMsg, "workers", lacking)
 	return nil
 }
 

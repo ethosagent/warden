@@ -179,6 +179,13 @@ const (
 	// open sessions are closed (W-P2-AREG-05).
 	AgentDisabled Reason = "agent_disabled"
 
+	// UserRateLimited: the per-user limit rule that applies to the request's
+	// user (or the anonymous bucket) has no rate budget left in its window, or
+	// the evaluator's bucket table is full and the key is new (fail closed;
+	// W-P3-PUL-03). It is checked only after an allow, so it never turns a deny
+	// into an allow.
+	UserRateLimited Reason = "user_rate_limited"
+
 	// Unspecified: the never-in-practice fallback the proxy's emitDeny
 	// substitutes when a deny reaches it without a reason. The deny path is one
 	// chokepoint (internal/proxy emitDeny/emitDenyEvent), so this label on a
@@ -207,7 +214,7 @@ var declared = []Reason{
 	DLPBlock, DLPRedact,
 	MCPWS, MCPWSUnscannable, MCPSSEEventTooLarge, MCPGatewayDeny,
 	HTTPResponseLeak, HTTPResponseInjection,
-	UserBlocked, AgentDisabled,
+	UserBlocked, AgentDisabled, UserRateLimited,
 	Unspecified,
 }
 

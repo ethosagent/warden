@@ -98,7 +98,13 @@ func (d Decision) Valid() bool {
 type Doc struct {
 	Allowlist []config.AllowlistEntry `json:"allowlist"`
 	Denylist  []config.DenylistEntry  `json:"denylist"`
-	Settings  *config.SettingsWire    `json:"settings,omitempty"`
+	// UserLimits, DefaultUserLimit and AnonymousLimit are the per-user limit
+	// rules (W-P3-PUL-01), versioned with the policy. Omitempty, in the
+	// version doc's field order, so a doc without them keeps its doc_sha256.
+	UserLimits       []config.UserLimit   `json:"userLimits,omitempty"`
+	DefaultUserLimit *config.UserLimit    `json:"defaultUserLimit,omitempty"`
+	AnonymousLimit   *config.UserLimit    `json:"anonymousLimit,omitempty"`
+	Settings         *config.SettingsWire `json:"settings,omitempty"`
 }
 
 // AuthorKindBreakglass is the Kind of a break-glass session: it can author a

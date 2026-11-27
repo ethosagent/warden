@@ -111,6 +111,14 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			p.storeSSRFDeny(ci, domain, port, "tcp", dialErr)
 			return
 		}
+		// An opaque passthrough shows no requests: charge the per-user limit
+		// once, now that it is registered and dialed (d is deferNone here, a
+		// policy Allow), so a refused passthrough costs nothing.
+		limitRule, denied := p.tunnelUserLimitCharge(ci, domain, port)
+		if denied {
+			_ = remote.Close()
+			return
+		}
 		sess.addCloser(remote)
 		p.recordEvent(ci, analytics.Event{
 			Timestamp: time.Now(),
@@ -118,9 +126,10 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			Port:      port,
 			Protocol:  "tcp",
 			Decision:  "allow",
+			LimitRule: limitRule,
 		})
 		p.cfg.Metrics.RecordRequest("allow", "tcp")
-		p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: "tcp", Decision: "allow", ID: ci})
+		p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: "tcp", Decision: "allow", LimitRule: limitRule, ID: ci})
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
@@ -251,6 +260,12 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 		return
 	}
 	defer remote.Close()
+	// Non-HTTP inside TLS shows no requests either: charge the per-user limit
+	// once, now that it is registered and dialed (d is deferNone here).
+	limitRule, denied := p.tunnelUserLimitCharge(ci, domain, port)
+	if denied {
+		return
+	}
 	sess.addCloser(remote)
 	p.recordEvent(ci, analytics.Event{
 		Timestamp: time.Now(),
@@ -258,9 +273,10 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 		Port:      port,
 		Protocol:  proto,
 		Decision:  "allow",
+		LimitRule: limitRule,
 	})
 	p.cfg.Metrics.RecordRequest("allow", proto)
-	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: proto, Decision: "allow", ID: ci})
+	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: proto, Decision: "allow", LimitRule: limitRule, ID: ci})
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {

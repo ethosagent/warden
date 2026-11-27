@@ -34,6 +34,9 @@ type decisionLog struct {
 	// SSRFError). Empty unless Reason is one of the ssrf_* enums; it never
 	// carries a resolved address.
 	AddrClass string
+	// LimitRule is the name of the per-user limit rule that applied to the
+	// request (W-P3-PUL-09): an operator-chosen rule name, never a user.
+	LimitRule string
 	// ID is the caller's identity. While identity is on, logDecision logs its
 	// status (none included) and reason, and the sub and group count only for
 	// status valid. The email and the group list are logged at debug level only;
@@ -74,6 +77,9 @@ func (p *Proxy) logDecision(d decisionLog) {
 	}
 	if d.AddrClass != "" {
 		attrs = append(attrs, slog.String("addr_class", d.AddrClass))
+	}
+	if d.LimitRule != "" {
+		attrs = append(attrs, slog.String("limit_rule", d.LimitRule))
 	}
 	// Identity off logs nothing identity-related, like the event. Identity on
 	// always logs the status, none included.

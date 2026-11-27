@@ -95,6 +95,13 @@ type RequestVerdict struct {
 	// Scoped is true when at least one identity-scoped (groups/users) entry
 	// matched the destination, so the decision depends on who is asking.
 	Scoped bool
+	// LimitRule names the per-user limit rule ChargeUserLimit or PeekUserLimit
+	// applied (W-P3-PUL-03); empty when no rule applies and on every
+	// EvaluateFor/PeekFor verdict.
+	LimitRule string
+	// RetryAfter is how long until the applied rule's rate window ends, set on
+	// a user_rate_limited deny only.
+	RetryAfter time.Duration
 }
 
 // RequestContext is everything the evaluator needs to decide one request for
@@ -161,6 +168,15 @@ type Evaluator struct {
 	principals []*identity.Principals
 	hasScoped  bool
 
+	// Per-user limits (W-P3-PUL-03): the compiled rules and the cost block
+	// set are policy-derived and swapped under swapMu like the allowlist (nil
+	// when the policy has none). ub, the rate buckets, is created once and
+	// never re-made by load, so a Replace keeps every window whose rule did
+	// not change.
+	userLimits  *userLimitSet
+	costBlocked map[costBlockKey]struct{}
+	ub          *userBuckets
+
 	// For testability.
 	now func() time.Time
 }
@@ -194,7 +210,7 @@ func (tw parsedTimeWindow) admits(hour int) bool {
 
 // NewEvaluator builds an Evaluator from a policy.
 func NewEvaluator(p config.Policy) *Evaluator {
-	e := &Evaluator{now: time.Now}
+	e := &Evaluator{now: time.Now, ub: newUserBuckets(maxUserLimitBuckets)}
 	e.load(p)
 	return e
 }
@@ -204,11 +220,19 @@ func NewEvaluator(p config.Policy) *Evaluator {
 // In-flight Evaluate calls either see the old policy fully or the new policy
 // fully — never a mix. This preserves the default-deny invariant: p is a
 // validated policy and a swap only exchanges one allow/deny set for another.
-// Rate-limit counters are reset, so a policy change starts fresh windows.
+// Allowlist rate-limit counters are reset, so a policy change starts fresh
+// windows for them. Per-user limit buckets are kept, except those of rules that
+// were removed or whose definition changed (W-P3-PUL-03), so a block-list or
+// cost-block change never resets a user's window.
 func (e *Evaluator) Replace(p config.Policy) {
 	e.swapMu.Lock()
-	defer e.swapMu.Unlock()
+	old := e.userLimits
 	e.load(p)
+	changed := changedUserLimits(old, e.userLimits)
+	e.swapMu.Unlock()
+	if changed != nil {
+		e.dropUserBuckets(changed)
+	}
 }
 
 // CurrentPolicy returns a snapshot of the evaluator's live allow/deny lists.
@@ -317,6 +341,8 @@ func (e *Evaluator) load(p config.Policy) {
 	e.timeWindows = timeWindows
 	e.principals = principals
 	e.hasScoped = hasScoped
+	e.userLimits = compileUserLimits(p)
+	e.costBlocked = compileCostBlocked(p.CostBlockedUsers)
 	// Reset rate-limit counters: a policy swap starts fresh fixed windows.
 	e.mu.Lock()
 	e.counters = make(map[string]*rateState)
@@ -328,8 +354,8 @@ func (e *Evaluator) load(p config.Policy) {
 // when identity is resolved). It takes one read lock and does at most two map
 // lookups, allocating nothing. It reads the same snapshot Replace swaps, so a
 // block or unblock lands atomically with the allow/deny set. Empty claims never
-// match. Every Replace also resets the rate-limit windows, so a block change
-// resets them fleet-wide (documented, left to a follow-up).
+// match. Every Replace also resets the allowlist rate-limit windows, so a block
+// change resets those fleet-wide; per-user limit windows survive it.
 func (e *Evaluator) IsBlocked(sub, email string) bool {
 	e.swapMu.RLock()
 	defer e.swapMu.RUnlock()

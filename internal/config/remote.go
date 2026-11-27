@@ -98,7 +98,7 @@ const CapIdentityChallengeV1 = "identity/challenge-v1"
 // WorkerCaps returns the sorted capabilities this binary implements. Later
 // features append their own constant here.
 func WorkerCaps() []string {
-	caps := []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1, CapIdentityRequireV1}
+	caps := []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1, CapIdentityRequireV1, CapUserLimitsV1}
 	sort.Strings(caps)
 	return caps
 }
@@ -113,9 +113,11 @@ func WorkerCaps() []string {
 const CapAgentRegV1 = "agentreg/v1"
 
 // CapUserLimitsV1 is the capability a worker advertises when it enforces
-// per-user rate limits (W-P3-PUL-09 adds it to WorkerCaps). The dashboard
-// warns about connected workers that lack it while user limits are served
-// (W-P3-PUL-05).
+// per-user rate limits (policy.userLimits, defaultUserLimit, anonymousLimit
+// rateLimit) on every request (W-P3-PUL-09). An older worker refuses the whole
+// wire while it carries a rule, and keeps its last-known-good policy, so the
+// control plane uses the cap to tell which workers enforce them. Cost caps
+// (dailyCostUSD) have their own cap, usercost/v1 (W-P3-PUL-04).
 const CapUserLimitsV1 = "userlimits/v1"
 
 // CapUserCostV1 is the capability a worker advertises when it enforces

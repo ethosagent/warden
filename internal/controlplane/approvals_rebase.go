@@ -40,11 +40,69 @@ func mergeDocs(base, draft, head approvals.Doc) (approvals.Doc, []string, error)
 		return approvals.Doc{}, nil, err
 	}
 	conflicts = append(conflicts, c...)
+	// The per-user limit keys merge whole: a key only one side changed takes
+	// that side's value; a key both changed differently is a conflict. Rule
+	// order is precedence, so a per-rule merge could build an order neither
+	// author wrote.
+	userLimits, c, err := mergeWhole(base.UserLimits, draft.UserLimits, head.UserLimits, "userLimits")
+	if err != nil {
+		return approvals.Doc{}, nil, err
+	}
+	conflicts = append(conflicts, c...)
+	defLimit, c, err := mergeWhole(base.DefaultUserLimit, draft.DefaultUserLimit, head.DefaultUserLimit, "defaultUserLimit")
+	if err != nil {
+		return approvals.Doc{}, nil, err
+	}
+	conflicts = append(conflicts, c...)
+	anonLimit, c, err := mergeWhole(base.AnonymousLimit, draft.AnonymousLimit, head.AnonymousLimit, "anonymousLimit")
+	if err != nil {
+		return approvals.Doc{}, nil, err
+	}
+	conflicts = append(conflicts, c...)
 	if len(conflicts) > 0 {
 		sort.Strings(conflicts)
 		return approvals.Doc{}, slices.Compact(conflicts), nil
 	}
-	return approvals.Doc{Allowlist: allow, Denylist: deny, Settings: settings}, nil, nil
+	return approvals.Doc{
+		Allowlist: allow, Denylist: deny,
+		UserLimits: userLimits, DefaultUserLimit: defLimit, AnonymousLimit: anonLimit,
+		Settings: settings,
+	}, nil, nil
+}
+
+// mergeWhole is a three-way merge of one value compared whole by its JSON
+// encoding (an empty list equals an absent one).
+func mergeWhole[T any](base, draft, head T, path string) (T, []string, error) {
+	enc := func(v T) (string, error) {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return "", fmt.Errorf("rebase: encode %s: %w", path, err)
+		}
+		if string(b) == "[]" {
+			return "null", nil
+		}
+		return string(b), nil
+	}
+	var zero T
+	b, err := enc(base)
+	if err != nil {
+		return zero, nil, err
+	}
+	d, err := enc(draft)
+	if err != nil {
+		return zero, nil, err
+	}
+	h, err := enc(head)
+	if err != nil {
+		return zero, nil, err
+	}
+	switch {
+	case b == d:
+		return head, nil, nil
+	case b == h, d == h:
+		return draft, nil, nil
+	}
+	return zero, []string{path}, nil
 }
 
 // entryGroup is the entries of one DiffKey in the three docs, as sorted

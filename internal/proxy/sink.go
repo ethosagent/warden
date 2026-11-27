@@ -19,6 +19,9 @@ type responseSink interface {
 	// errorJSON writes a terminal status with a JSON body (Content-Type
 	// application/json, Content-Length set).
 	errorJSON(status int, body string)
+	// errorJSONRetry is errorJSON plus a Retry-After header of retryAfter
+	// whole seconds (the per-user rate limit's 429).
+	errorJSONRetry(status int, body string, retryAfter int)
 	// relay writes the whole upstream response (status, headers, body, and any
 	// trailers) to the client. A non-nil error means the client leg is broken.
 	relay(resp *http.Response) error
@@ -33,6 +36,10 @@ type connSink struct{ w io.Writer }
 func (c connSink) errorResponse(status int, text string) { writeErrorResponse(c.w, status, text) }
 
 func (c connSink) errorJSON(status int, body string) { writeJSONResponse(c.w, status, body) }
+
+func (c connSink) errorJSONRetry(status int, body string, retryAfter int) {
+	writeJSONResponseRetry(c.w, status, body, retryAfter)
+}
 
 func (c connSink) relay(resp *http.Response) error { return resp.Write(c.w) }
 
@@ -67,6 +74,11 @@ func (h h2Sink) errorJSON(status int, body string) {
 	hdr.Set("Content-Length", strconv.Itoa(len(body)))
 	h.w.WriteHeader(status)
 	_, _ = io.WriteString(h.w, body)
+}
+
+func (h h2Sink) errorJSONRetry(status int, body string, retryAfter int) {
+	h.w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	h.errorJSON(status, body)
 }
 
 // grpcStatus answers with a trailers-only gRPC response (HTTP 200, the status in
