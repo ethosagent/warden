@@ -664,6 +664,9 @@ func prepareRestoredState(ctx context.Context, staged string, revokeKeys bool, c
 		return 0, fmt.Errorf("prepare restored warden-cp.db: %w", err)
 	}
 	defer func() { _ = db.Close() }()
+	// user_cost_blocks (the persisted fleet cost block list) is kept: a row
+	// for an earlier UTC day is never served, and a row for today is the
+	// list as of the backup, which the first live recompute replaces.
 	for _, tbl := range []string{"sessions", "oidc_pending"} {
 		if !tableExists(ctx, db.SQL(), tbl) {
 			continue

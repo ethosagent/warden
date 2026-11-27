@@ -3640,12 +3640,20 @@ bundle).
 - **Failures.** A rollup query error keeps the previous list and ETag, logs
   `user_cost_recompute_failed` at ERROR and counts the error; the list is never
   emptied because of a failure. Logs carry counts only, never a sub or email.
-- **Restart.** The control plane rebuilds the list before its first policy load
-  (a few quick retries). While a `dailyCostUSD` rule is served and no rebuild has
-  succeeded since start, the policy is held: no new `/policy` is served (a
-  versioned control plane refuses to start, a file-mode one answers 500 until the
-  rebuild succeeds; it retries every 5 s), so workers keep their cached list
-  rather than receiving a policy that unblocks everyone.
+- **Restart.** Every change of the list is also written to the state DB
+  (`warden-cp.db`, table `user_cost_blocks`; never the fleet analytics DB and
+  never a policy version). At startup the control plane serves that last good
+  list when it is for today (a row from an earlier day starts empty), then a live
+  recompute replaces it. So a restart with a failing rollup still serves the list
+  with 200, and every other policy change (deny entries, the block list,
+  settings) keeps reaching workers. A failed write logs `user_cost_persist_failed`
+  at ERROR and is counted; the in-memory list is still served. A backup restore
+  keeps the row.
+- **No `--state-dir`.** Without a state DB there is no persisted list. The
+  control plane retries the rebuild a few times before its first load; while a
+  `dailyCostUSD` rule is served and no rebuild has succeeded since start, the
+  policy is held (no new `/policy` is served; it retries every 5 s), so workers
+  keep their cached list rather than receiving a policy that unblocks everyone.
 - **Truncation.** Over-cap users left out by the 5000 cap or the size cut are
   counted in an in-memory gauge and logged once per list.
 - **Off by default.** With no `dailyCostUSD` rule nothing is queried and

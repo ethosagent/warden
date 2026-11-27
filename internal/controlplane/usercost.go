@@ -52,16 +52,22 @@ const (
 	userCostRetry = 5 * time.Second
 )
 
-// userCostStartupBackoff are the waits between the startup attempts New makes
-// before the first policy load. A var so tests can shorten it.
-var userCostStartupBackoff = []time.Duration{100 * time.Millisecond, 300 * time.Millisecond, time.Second}
+// defaultUserCostStartupBackoff are the waits between the startup attempts
+// New makes before the first policy load when there is no persisted list (no
+// --state-dir). Read only; Config.userCostStartupBackoff overrides it.
+var defaultUserCostStartupBackoff = []time.Duration{100 * time.Millisecond, 300 * time.Millisecond, time.Second}
+
+// userCostPersistFailedMsg is the ERROR logged when the last good list cannot
+// be written to the state DB; the in-memory list is still served.
+const userCostPersistFailedMsg = "user_cost_persist_failed"
 
 // errUserCostPending fails the user_cost overlay, and so the whole policy
-// load, while a cost cap is served and no recompute has succeeded since this
-// process started. The policy server then keeps its last-known-good wire (or,
-// before the first load, answers /policy with an error), so workers keep their
-// cached list instead of receiving a cost-capped policy without it: a restart
-// with a failing rollup must never unblock the fleet's over-cap users.
+// load, while a cost cap is served and the list is unknown: no recompute has
+// succeeded since start and there is no persisted last good list. That
+// happens only without a state DB (no --state-dir); with one, the persisted
+// list is the start state. The policy server then keeps its last-known-good
+// wire (or answers /policy with an error before the first load), so workers
+// keep their cached list instead of a cost-capped policy without it.
 var errUserCostPending = errors.New("fleet cost blocks not computed yet since start")
 
 // costBlock is one served entry plus what the aggregator needs to rank and
@@ -88,6 +94,10 @@ type userCostAggregator struct {
 	served func() (policyWire, bool)
 	base   func(ctx context.Context) (policyWire, error)
 	retry  time.Duration
+	// startupBackoff are the waits between prime's attempts.
+	startupBackoff []time.Duration
+	// persist is the last good list in the state DB; nil without one.
+	persist *userCostStore
 	// refresh is the policy server's Refresh: it re-runs the overlays, appends
 	// the publish-log row and wakes long-poll waiters.
 	refresh func()
@@ -119,6 +129,8 @@ type userCostAggregator struct {
 	// their sum (in memory, for W-P5-RETN-06 to export).
 	countCut atomic.Int64
 	sizeCut  atomic.Int64
+	// persistErrors counts failed writes of the persisted list.
+	persistErrors atomic.Int64
 }
 
 // newUserCostAggregator builds the aggregator over q. served and refresh are
@@ -126,7 +138,8 @@ type userCostAggregator struct {
 func newUserCostAggregator(q analytics.UserUsageQuerier, clk clock.Clock, logger *slog.Logger) *userCostAggregator {
 	return &userCostAggregator{
 		q: q, clock: clk, logger: logger, debounce: userCostDebounce, retry: userCostRetry,
-		kick: make(chan struct{}, 1),
+		startupBackoff: defaultUserCostStartupBackoff,
+		kick:           make(chan struct{}, 1),
 	}
 }
 
@@ -141,6 +154,9 @@ func (a *userCostAggregator) BlockedUsers() int64 { return a.blocked.Load() }
 // over-cap users left out of the served list by the entry cap or the policy
 // size limit.
 func (a *userCostAggregator) Truncated() int64 { return a.countCut.Load() + a.sizeCut.Load() }
+
+// PersistErrors counts failed writes of the persisted last good list.
+func (a *userCostAggregator) PersistErrors() int64 { return a.persistErrors.Load() }
 
 // isComputed reports whether a recompute has succeeded since start.
 func (a *userCostAggregator) isComputed() bool {
@@ -209,7 +225,8 @@ func (a *userCostAggregator) run(ctx context.Context) {
 // up to len(backoff)+1 attempts with the given waits between them. It
 // reports whether one succeeded; if none did, the overlay fails the load
 // (errUserCostPending) and the loop keeps retrying once started.
-func (a *userCostAggregator) prime(ctx context.Context, backoff []time.Duration) bool {
+func (a *userCostAggregator) prime(ctx context.Context) bool {
+	backoff := a.startupBackoff
 	for i := 0; ; i++ {
 		a.recomputeOnce(ctx, false)
 		if a.isComputed() {
@@ -309,6 +326,14 @@ func (a *userCostAggregator) recomputeOnce(ctx context.Context, refresh bool) {
 	if cut > 0 {
 		a.logger.Warn("user cost blocks: list cut to the limit", "dropped", cut, "limit", config.MaxCostBlockedUsers)
 	}
+	// Persist before the refresh serves it, so a restart starts from the list
+	// workers last saw. A failed write is counted; the list is still served.
+	if a.persist != nil {
+		if err := a.persist.save(ctx, day, next); err != nil {
+			a.persistErrors.Add(1)
+			a.logger.Error(userCostPersistFailedMsg, "error", boundedErr(err))
+		}
+	}
 	a.logger.Info("user cost blocks updated", "blocked", len(next), "day", day)
 	if refresh {
 		a.refresh()
@@ -381,14 +406,12 @@ func (a *userCostAggregator) apply(_ context.Context, w *policyWire) (string, er
 		a.notify()
 	}
 	if len(caps) == 0 {
-		a.sizeCut.Store(0)
 		return "", nil
 	}
 	if !computed {
 		return "", errUserCostPending
 	}
 	if len(blocks) == 0 {
-		a.sizeCut.Store(0)
 		return "", nil
 	}
 	today := analytics.UsageDay(a.clock.Now())
@@ -399,10 +422,9 @@ func (a *userCostAggregator) apply(_ context.Context, w *policyWire) (string, er
 		}
 	}
 	if len(keep) == 0 {
-		a.sizeCut.Store(0)
 		return "", nil
 	}
-	keep, err := a.fitBody(*w, keep)
+	keep, err := fitBody(*w, keep)
 	if err != nil {
 		return "", err
 	}
@@ -420,8 +442,9 @@ func (a *userCostAggregator) apply(_ context.Context, w *policyWire) (string, er
 
 // fitBody returns the longest prefix of keep whose entries fit next to the
 // rest of w in config.MaxPolicyBytes less the margin. An encoding error fails
-// the load (never an empty list).
-func (a *userCostAggregator) fitBody(w policyWire, keep []costBlock) ([]costBlock, error) {
+// the load (never an empty list). It has no side effects: it also runs for
+// candidate docs (servedETag) that are never served.
+func fitBody(w policyWire, keep []costBlock) ([]costBlock, error) {
 	total := 0
 	for _, b := range keep {
 		total += b.size
@@ -433,7 +456,6 @@ func (a *userCostAggregator) fitBody(w policyWire, keep []costBlock) ([]costBloc
 	// The key, its quotes, the brackets and the comma before it.
 	budget := config.MaxPolicyBytes - userCostWireMargin - len(b) - len(`,"costBlockedUsers":[]`)
 	if total <= budget {
-		a.sizeCut.Store(0)
 		return keep, nil
 	}
 	n, used := 0, 0
@@ -441,15 +463,56 @@ func (a *userCostAggregator) fitBody(w policyWire, keep []costBlock) ([]costBloc
 		used += keep[n].size
 		n++
 	}
-	a.sizeCut.Store(int64(len(keep) - n))
-	a.mu.Lock()
-	warn := !a.trimWarned
-	a.trimWarned = true
-	a.mu.Unlock()
-	if warn {
-		a.logger.Warn("user cost blocks: list cut to fit the policy size limit", "blocked", len(keep), "served", n)
-	}
 	return keep[:n], nil
+}
+
+// observeServed runs after every load the policy server actually serves
+// (never for a candidate doc): it sets the size-cut gauge from what reached
+// the wire and logs the size cut once per list.
+func (a *userCostAggregator) observeServed(w policyWire) {
+	caps := costCapsOf(w)
+	today := analytics.UsageDay(a.clock.Now())
+	a.mu.Lock()
+	eligible := 0
+	if len(caps) > 0 {
+		for _, b := range a.blocks {
+			if b.entry.Day == today && caps[b.entry.Rule] > 0 {
+				eligible++
+			}
+		}
+	}
+	cut := max(eligible-len(w.CostBlockedUsers), 0)
+	warn := cut > 0 && !a.trimWarned
+	if warn {
+		a.trimWarned = true
+	}
+	a.mu.Unlock()
+	a.sizeCut.Store(int64(cut))
+	if warn {
+		a.logger.Warn("user cost blocks: list cut to fit the policy size limit", "blocked", eligible, "served", len(w.CostBlockedUsers))
+	}
+}
+
+// seed installs the persisted last good list as the start state, before the
+// first load: entries for today are served until a live recompute replaces
+// them; a row from an earlier day (or no row) starts empty. Either way the
+// list counts as known, so no load waits on the rollup. A read error is
+// logged and starts empty as well.
+func (a *userCostAggregator) seed(ctx context.Context) {
+	day, list, ok, err := a.persist.load(ctx)
+	today := analytics.UsageDay(a.clock.Now())
+	switch {
+	case err != nil:
+		a.logger.Error("user_cost_load_failed", "error", boundedErr(err))
+		list = nil
+	case !ok || day != today:
+		list = nil
+	}
+	a.mu.Lock()
+	a.blocks, a.computed = list, true
+	a.mu.Unlock()
+	a.blocked.Store(int64(len(list)))
+	a.logger.Info("user cost blocks loaded", "source", "persisted", "blocked", len(list))
 }
 
 // costCapsOf maps each served rule with a dailyCostUSD to its cap: userLimits
@@ -575,11 +638,26 @@ func (s *Server) initUserCost() {
 		s.cfg.Logger.Error("control plane: user_cost overlay not registered", "error", err)
 		return
 	}
+	s.policy.onLoaded = a.observeServed
 	s.userCost = a
-	// Rebuild the list before the first load, so a restart serves it from the
-	// first /policy; with a failing rollup the load fails closed instead.
-	if !a.prime(context.Background(), userCostStartupBackoff) {
-		s.cfg.Logger.Error("control plane: fleet cost blocks could not be rebuilt at startup; /policy is held at last-known-good while a dailyCostUSD rule is served, retrying")
+	ctx := context.Background()
+	if s.cfg.State != nil {
+		// The persisted last good list is the start state; one live attempt
+		// then refreshes it, and the loop keeps it current.
+		a.persist = &userCostStore{db: s.cfg.State.SQL(), now: s.cfg.Clock.Now}
+		a.seed(ctx)
+		a.startupBackoff = nil
+		a.prime(ctx)
+		return
+	}
+	if b := s.cfg.userCostStartupBackoff; b != nil {
+		a.startupBackoff = b
+	}
+	// No state DB: rebuild the list before the first load, so a restart
+	// serves it from the first /policy; with a failing rollup the load fails
+	// closed (errUserCostPending) until a retry succeeds.
+	if !a.prime(ctx) {
+		s.cfg.Logger.Error("control plane: fleet cost blocks could not be rebuilt at startup and no --state-dir holds the last list; /policy is held at last-known-good while a dailyCostUSD rule is served, retrying")
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -399,15 +400,29 @@ func (f *failingFleet) TodayCostByRule(ctx context.Context, day string) ([]analy
 	return f.FleetSQLiteStore.TodayCostByRule(ctx, day)
 }
 
-// TestUserCostAggregator_RestartWithFailingRollupFailsClosed: a restart whose
-// rollup query fails never serves the cost-capped policy without the list
-// (workers keep their cached one); once the query recovers, the loop's retry
-// serves it.
-func TestUserCostAggregator_RestartWithFailingRollupFailsClosed(t *testing.T) {
-	prev := userCostStartupBackoff
-	userCostStartupBackoff = []time.Duration{time.Millisecond}
-	t.Cleanup(func() { userCostStartupBackoff = prev })
+// failingEnv restarts e's control plane over the same state and fleet DB with
+// a rollup query that fails until the returned store's fail is cleared.
+func failingEnv(t *testing.T, e *ucEnv, o ucOpts) (*ucEnv, *failingFleet) {
+	t.Helper()
+	var ff *failingFleet
+	o.db, o.fleetPath = e.db, e.fleetPath
+	if o.clk == nil {
+		o.clk = e.clk
+	}
+	o.wrap = func(s *analytics.FleetSQLiteStore) analytics.FleetStore {
+		ff = &failingFleet{FleetSQLiteStore: s}
+		ff.fail.Store(true)
+		return ff
+	}
+	return newUserCostEnv(t, o), ff
+}
 
+// TestUserCostAggregator_RestartWithFailingRollupServesPersisted: a restart
+// whose rollup query fails starts (snapshot loaded, as Run requires in
+// versioned mode) and serves the persisted last good list with 200; policy
+// changes keep reaching workers meanwhile; once the query recovers the live
+// list replaces the seed.
+func TestUserCostAggregator_RestartWithFailingRollupServesPersisted(t *testing.T) {
 	e := newUserCostEnv(t, ucOpts{})
 	e.setRules(t, []config.UserLimit{engLLM(0.01)}, nil)
 	e.spend(t, "worker-a", "alice", "eng-llm", 0.02)
@@ -416,41 +431,122 @@ func TestUserCostAggregator_RestartWithFailingRollupFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var ff *failingFleet
-	e2 := newUserCostEnv(t, ucOpts{db: e.db, fleetPath: e.fleetPath, clk: e.clk, wrap: func(s *analytics.FleetSQLiteStore) analytics.FleetStore {
-		ff = &failingFleet{FleetSQLiteStore: s}
-		ff.fail.Store(true)
-		return ff
-	}})
-	served := func() (int, string) {
-		rec := httptest.NewRecorder()
-		e2.s.policy.ServePolicy(rec, httptest.NewRequest(http.MethodGet, "/policy", nil))
-		return rec.Code, rec.Body.String()
+	e2, ff := failingEnv(t, e, ucOpts{})
+	if _, _, ok, _ := e2.s.policy.snapshot(); !ok {
+		t.Fatal("the restarted versioned CP has no loaded policy: Run would refuse to start")
 	}
-	check := func(when string) {
-		t.Helper()
-		if code, body := served(); code == http.StatusOK && !strings.Contains(body, `"sub":"alice"`) {
-			t.Fatalf("%s: served a cost-capped policy without the list: %s", when, body)
-		}
+	list, _, _ := e2.served(t)
+	if len(list) != 1 || list[0].Sub != "alice" {
+		t.Fatalf("after a restart with a failing rollup = %v, want the persisted alice", list)
 	}
-	check("after New")
-	if code, _ := served(); code == http.StatusOK {
-		t.Fatal("with no good load /policy answered 200")
+	if e2.s.userCost.RecomputeErrors() == 0 {
+		t.Error("the failing startup attempt was not counted")
 	}
+
+	// A deny entry saved while the rollup fails is delivered, list intact.
+	head := mustHead(t, e2.s.versions)
+	doc := baseDoc(t, e2.s)
+	doc.Denylist = append(doc.Denylist, config.DenylistEntry{Domain: "new-deny.example.com"})
+	if _, _, err := e2.s.versions.Create(context.Background(), doc, testAuthor, "deny", SourcePolicy, head); err != nil {
+		t.Fatalf("Create while the rollup fails = %v", err)
+	}
+	list, _, body := e2.served(t)
+	if !strings.Contains(string(body), "new-deny.example.com") || len(list) != 1 {
+		t.Fatalf("after a deny save = %s, want the new entry and alice", body)
+	}
+
+	// Recovery: a live run replaces the seed (bob is now over too).
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	e2.s.Start(ctx)
-	e2.s.policy.Refresh() // the reload ticker
-	check("after Start and a reload")
-	if e2.s.userCost.RecomputeErrors() < 2 {
-		t.Errorf("recompute errors = %d, want the startup attempts counted", e2.s.userCost.RecomputeErrors())
+	e2.spend(t, "worker-b", "bob", "eng-llm", 0.02)
+	ff.fail.Store(false)
+	e2.recompute()
+	if list, _, _ := e2.served(t); len(list) != 2 {
+		t.Fatalf("after recovery = %v, want alice and bob", list)
 	}
+}
 
+// TestUserCostAggregator_PersistedYesterdayServesNothing: a persisted list
+// from an earlier UTC day is not served after a restart, even while the
+// rollup fails.
+func TestUserCostAggregator_PersistedYesterdayServesNothing(t *testing.T) {
+	e := newUserCostEnv(t, ucOpts{})
+	e.setRules(t, []config.UserLimit{engLLM(0.01)}, nil)
+	e.spend(t, "worker-a", "alice", "eng-llm", 0.02)
+	e.recompute()
+	if err := e.fleet.Close(); err != nil {
+		t.Fatal(err)
+	}
+	clk := clocktest.NewFake(e.clk.Now().Add(untilNextUTCDay(e.clk.Now()) + time.Hour))
+	e2, _ := failingEnv(t, e, ucOpts{clk: clk})
+	if list, _, body := e2.served(t); list != nil || strings.Contains(string(body), "costBlockedUsers") {
+		t.Fatalf("a day later = %s, want no costBlockedUsers", body)
+	}
+}
+
+// TestUserCostAggregator_PersistWriteFailure: a failed write of the
+// persisted list is counted and logged; the new list is still served.
+func TestUserCostAggregator_PersistWriteFailure(t *testing.T) {
+	e := newUserCostEnv(t, ucOpts{})
+	e.setRules(t, []config.UserLimit{engLLM(0.01)}, nil)
+	if _, err := e.db.SQL().Exec("DROP TABLE user_cost_blocks"); err != nil {
+		t.Fatal(err)
+	}
+	e.spend(t, "worker-a", "alice", "eng-llm", 0.02)
+	e.recompute()
+	if list, _, _ := e.served(t); len(list) != 1 {
+		t.Fatalf("served %v, want alice despite the write failure", list)
+	}
+	if n := e.s.userCost.PersistErrors(); n != 1 {
+		t.Errorf("persist errors = %d, want 1", n)
+	}
+	if !strings.Contains(e.logs.String(), userCostPersistFailedMsg) || strings.Contains(e.logs.String(), "alice") {
+		t.Errorf("want %s logged without subs:\n%s", userCostPersistFailedMsg, e.logs.String())
+	}
+}
+
+// TestUserCostAggregator_NoStateFailsClosed: without a state DB there is no
+// persisted list, so a failing rollup at startup holds /policy (never a
+// cost-capped wire without the list) until the loop's retry succeeds.
+func TestUserCostAggregator_NoStateFailsClosed(t *testing.T) {
+	config.LiftUserLimitsGuardForTesting(t)
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	body := "policy:\n  allowlist:\n    - domain: api.openai.com\n  userLimits:\n    - name: eng-llm\n      match: {groups: [eng]}\n      dailyCostUSD: 0.01\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fleet, err := analytics.NewFleetSQLiteStore(filepath.Join(t.TempDir(), "fleet.db"), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fleet.Close() })
+	clk := clocktest.NewFake(time.Now().UTC())
+	ev := analytics.Event{UID: "ns-1", Timestamp: clk.Now(), Domain: "api.openai.com", Decision: "allow", UserSub: "alice", LimitRule: "eng-llm", CostUSD: 0.02}
+	if err := fleet.StoreAggregatedEvent(analytics.AggregatedEvent{Event: ev, ProxyID: "w"}); err != nil {
+		t.Fatal(err)
+	}
+	ff := &failingFleet{FleetSQLiteStore: fleet}
+	ff.fail.Store(true)
+	s := New(Config{PolicyPath: path, Store: ff, Clock: clk, Logger: testJSONLogger(nil), userCostStartupBackoff: []time.Duration{time.Millisecond}})
+	serve := func() (int, string) {
+		rec := httptest.NewRecorder()
+		s.policy.ServePolicy(rec, httptest.NewRequest(http.MethodGet, "/policy", nil))
+		return rec.Code, rec.Body.String()
+	}
+	if code, body := serve(); code == http.StatusOK {
+		t.Fatalf("without state and a failing rollup /policy = 200 %s, want it held", body)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	s.Start(ctx)
 	ff.fail.Store(false)
 	btEventually(t, "the retry serves the list", func() bool {
-		check("while recovering")
-		e2.clk.Advance(time.Second)
-		code, body := served()
+		if code, body := serve(); code == http.StatusOK && !strings.Contains(body, `"sub":"alice"`) {
+			t.Fatalf("served a cost-capped policy without the list: %s", body)
+		}
+		clk.Advance(time.Second)
+		code, body := serve()
 		return code == http.StatusOK && strings.Contains(body, `"sub":"alice"`)
 	})
 }
@@ -585,6 +681,11 @@ func TestUserCostAggregator_Limits(t *testing.T) {
 	if err != nil || fp == "" {
 		t.Fatalf("apply = %q, %v", fp, err)
 	}
+	// A candidate evaluation (servedETag) moves no gauge; a served load does.
+	if a.Truncated() != 0 {
+		t.Fatalf("apply alone set the truncated gauge to %d", a.Truncated())
+	}
+	a.observeServed(w)
 	b, _ := json.Marshal(projectScoped(w))
 	if len(b) > config.MaxPolicyBytes || len(w.CostBlockedUsers) == 0 || len(w.CostBlockedUsers) >= config.MaxCostBlockedUsers {
 		t.Fatalf("served %d entries in %d bytes; want a cut list under %d bytes", len(w.CostBlockedUsers), len(b), config.MaxPolicyBytes)

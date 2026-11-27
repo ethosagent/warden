@@ -43,6 +43,7 @@ func StateMigrations() []cpstate.Migration {
 	migs = append(migs, BundleMigrations()...)
 	migs = append(migs, adminaudit.Migrations()...)
 	migs = append(migs, BlockMigrations()...)
+	migs = append(migs, UserCostMigrations()...)
 	migs = append(migs, WorkerTokenMigrations()...)
 	migs = append(migs, agentregsqlite.Migrations()...)
 	migs = append(migs, EnrollmentMigrations()...)

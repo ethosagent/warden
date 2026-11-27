@@ -85,6 +85,10 @@ type Config struct {
 	Bundles BundlesConfig
 	// bundleKeys replaces Keys' KeySet as the publisher's key source (tests).
 	bundleKeys bundleKeys
+	// userCostStartupBackoff replaces the waits between the fleet cost
+	// aggregator's startup attempts without a state DB (tests); nil uses
+	// defaultUserCostStartupBackoff.
+	userCostStartupBackoff []time.Duration
 	// WorkerCA is the worker intermediate CA (workerCA.enabled). Nil with
 	// WorkerCAEnabled false is the disabled default; nil with WorkerCAEnabled
 	// true is the degraded state (the key backend was unreachable at start): the
