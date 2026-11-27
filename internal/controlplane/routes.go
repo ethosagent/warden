@@ -117,9 +117,14 @@ func (s *Server) registerAuthRoutes(mux *http.ServeMux) {
 //	GET /portal/login    no session (it is how one is obtained)
 //	GET /portal/callback no session; guards itself (state, purpose, browser cookie, PKCE, nonce)
 //	GET /portal          the minimal portal page; reads only the portal cookie
+//	GET /portal/api/me   requireSession (W-P3-CSIG-04)
+//	POST /portal/logout  requireSession, CSRF-checked
+//	/portal/             every other path: requireSession, then 404, so a
+//	                     signed-out browser is sent to sign in first and a
+//	                     later route (W-P3-PORT-*) slots in behind the same gate
 //
-// With admin audit on, the callback gets a request id and records its own
-// portal.login / portal.login_failed row.
+// With admin audit on, the callback and logout get a request id and record
+// their own portal.login / portal.login_failed / portal.logout row.
 func (s *Server) registerPortalRoutes(mux *http.ServeMux) {
 	if s.portal == nil {
 		return
@@ -127,6 +132,9 @@ func (s *Server) registerPortalRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(portalLoginPath, s.portal.handleLogin)
 	mux.Handle(portalCallbackPath, s.requestIDWrap(http.HandlerFunc(s.portal.handleCallback)))
 	mux.HandleFunc(portalHomePath, s.portal.handleHome)
+	mux.Handle(portalMePath, s.portalWrap(http.HandlerFunc(s.portal.handleMe)))
+	mux.Handle(portalLogoutPath, s.requestIDWrap(s.portalWrap(http.HandlerFunc(s.portal.handleLogout))))
+	mux.Handle(portalSubtree, s.portalWrap(http.NotFoundHandler()))
 }
 
 // The portal's mux patterns, as literals so the route-coverage walk can read
@@ -135,6 +143,9 @@ const (
 	portalLoginPath    = "/portal/login"
 	portalCallbackPath = "/portal/callback"
 	portalHomePath     = "/portal"
+	portalMePath       = "/portal/api/me"
+	portalLogoutPath   = "/portal/logout"
+	portalSubtree      = "/portal/"
 )
 
 // authMode is the console sign-in mode the dashboard reports as authMode:
