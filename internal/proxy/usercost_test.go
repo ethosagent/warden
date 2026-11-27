@@ -579,3 +579,98 @@ func TestUserCostCap_LedgerFullFailsClosed(t *testing.T) {
 		t.Errorf("ledger-full WARN logged %d times, want 1", n)
 	}
 }
+
+// reloadJudge allows every request and, on its first call, hot-reloads the
+// evaluator: the reload lands between the userLimitStage peek and the charge.
+type reloadJudge struct {
+	ev   *policy.Evaluator
+	next config.Policy
+	done atomic.Bool
+}
+
+func (j *reloadJudge) Evaluate(_, _, _, _, _ string, _ bool) Verdict {
+	if !j.done.Swap(true) {
+		j.ev.Replace(j.next)
+	}
+	return Verdict{Decision: "allow"}
+}
+
+// A reload between the peek and the charge that puts the request under a
+// newly cost-capped rule is enforced on that same request.
+func TestUserCostCap_ReloadBetweenPeekAndCharge(t *testing.T) {
+	allow := []config.AllowlistEntry{{Domain: idHost, Port: 443}} // costHost goes to the judge
+	before := config.Policy{Allowlist: allow, UserLimits: []config.UserLimit{
+		{Name: "old", Match: config.UserLimitMatch{Groups: []string{"eng"}}, RateLimit: "100/hour"},
+	}}
+	after := config.Policy{Allowlist: allow,
+		UserLimits:       []config.UserLimit{costEngRule(5)},
+		CostBlockedUsers: []config.CostBlockedUser{{Sub: "alice", Rule: "eng-llm", Day: "2026-11-27"}},
+	}
+	j := &reloadJudge{next: after}
+	e := newCostEnv(t, before, func(c *Config) {
+		c.Judge = j
+		j.ev = c.Policy.(*policy.Evaluator)
+	})
+	resp, body := e.h1To(costHost, "").get(aliceHdr)
+	assertCostLimited(t, e, resp, body)
+	if !j.done.Load() {
+		t.Fatal("the judge never ran: the reload did not land between peek and charge")
+	}
+	if n := e.reqs.Load(); n != 0 {
+		t.Errorf("upstream saw %d requests, want 0", n)
+	}
+	d := limitDenies(e.store)
+	if len(d) != 1 || d[0].LimitRule != "eng-llm" || d[0].Reason != string(denyreason.UserCostLimited) {
+		t.Errorf("denies = %+v, want one user_cost_limited under eng-llm", d)
+	}
+}
+
+// An MCP SSE response the gateway blocks mid-stream (enforce, a poisoned
+// event after a benign one that reached the agent) charges the capped user the
+// exact estimate of what was read, and the gateway deny event carries it.
+func TestUserCostCap_SSEGatewayDenyCharged(t *testing.T) {
+	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
+	benign := sseEvent(`{"jsonrpc":"2.0","id":"0","result":{}}`)
+	body := benign + sseEvent(mcpPoisonedList)
+	rb := &mcpBackend{respStatus: 200, respCT: "text/event-stream", respBody: body, chunked: true}
+	backendLn := startMCPBackend(t, caCert, caKey, rb)
+	p, ss := startTestProxyWithMCP(t, []string{costHost}, caCertPEM, caKeyPEM, enforceMCPConfig(), nil)
+	ledger := cost.NewLedger(func() time.Time { return costNoon })
+	p.cfg.Cost = cost.NewEstimator()
+	p.cfg.UserCost = ledger
+	ev := p.cfg.Policy.(*policy.Evaluator)
+	pol := ev.CurrentPolicy()
+	pol.AnonymousLimit = &config.UserLimit{DailyCostUSD: 5}
+	ev.Replace(pol)
+	p.dialTLS = dialBackend(backendLn)
+
+	tlsClient := dialProxyAndConnect(t, p.Addr().String(), costHost, caCertPEM)
+	req, _ := http.NewRequest("POST", "https://"+costHost+"/mcp", strings.NewReader(mcpToolsList))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = int64(len(mcpToolsList))
+	if err := req.Write(tlsClient); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(tlsClient), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	want := cost.NewEstimator().Estimate(costHost, int64(len(mcpToolsList)), int64(len(body))).TotalCost
+	var deny *analytics.Event
+	waitFor(t, "the gateway deny", func() bool {
+		deny = findEvent(ss.snapshot(), "mcp", "deny")
+		return deny != nil
+	})
+	if deny.Reason != "mcp_poisoning" || deny.LimitRule != config.UserLimitNameAnonymous {
+		t.Fatalf("deny = %+v, want mcp_poisoning under the anonymous rule", deny)
+	}
+	if math.Abs(deny.CostUSD-want) > 1e-12 || deny.Provider != "openai" {
+		t.Errorf("gateway deny cost = %v by %q, want exactly %v by openai", deny.CostUSD, deny.Provider, want)
+	}
+	if got, _ := ledger.Spent(cost.UserKey("", p.cfg.AgentID, config.UserLimitNameAnonymous)); math.Abs(got-want) > 1e-12 {
+		t.Errorf("ledger = %v, want %v", got, want)
+	}
+}

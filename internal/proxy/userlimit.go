@@ -234,8 +234,9 @@ func (p *Proxy) cutCost(s *requestScope) (usd float64, provider string) {
 // chargeUserCostCut charges a cut request whose deny event was recorded
 // elsewhere: a gRPC frame refused after the headers, whose deny the body guard
 // records on the transport goroutine while the response may still be
-// relaying, so its event carries no cost. A no-op when the deny already
-// charged (cutCost).
+// relaying, so its event carries no cost. Known gap: that deny event (and so
+// the local reseed and the fleet rollup) misses the charge; the live ledger
+// still has it. A no-op when the deny already charged (cutCost).
 func (p *Proxy) chargeUserCostCut(s *requestScope) {
 	_, _ = p.cutCost(s)
 }
@@ -292,20 +293,27 @@ func (p *Proxy) chargeUserLimitNow(s *requestScope) (denied bool) {
 	// Set before any event of this request is recorded (the deny below and the
 	// allow at the end both read it).
 	s.limitRule = v.LimitRule
-	if v.Decision != policy.Deny {
-		// The charged rule's cost cap names the ledger key the estimate is
-		// added to (the charged rule, should a reload have changed it since
-		// the peek).
-		if v.DailyCostUSD > 0 && p.costTracked(s.domain) {
-			var sub string
-			if s.subject != nil {
-				sub = s.subject.Sub
-			}
-			s.costCapped, s.costKey = true, cost.UserKey(sub, p.cfg.AgentID, v.LimitRule)
-		}
-		return false
+	if v.Decision == policy.Deny {
+		return p.denyUserLimit(s, v)
 	}
-	return p.denyUserLimit(s, v)
+	// A hot reload between the peek and the charge can change the rule that
+	// applies: the charged rule's cost cap is then checked on this request too
+	// (its rate budget is already consumed; the reload window is tiny).
+	c := userCostCheck{}
+	if v.LimitRule != s.peekRule || v.DailyCostUSD != s.peekCostUSD {
+		if c = p.userCostRule(s.subject, s.domain, v.LimitRule, v.DailyCostUSD, s.req); c.denied {
+			return p.denyUserLimit(s, c.v)
+		}
+	} else if v.DailyCostUSD > 0 && p.costTracked(s.domain) {
+		var sub string
+		if s.subject != nil {
+			sub = s.subject.Sub
+		}
+		c.capped, c.key = true, cost.UserKey(sub, p.cfg.AgentID, v.LimitRule)
+	}
+	// The charged rule names the ledger key the estimate is added to.
+	s.costCapped, s.costKey = c.capped, c.key
+	return false
 }
 
 func (p *Proxy) userLimitRC(s *requestScope) policy.RequestContext {
