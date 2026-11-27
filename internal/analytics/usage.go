@@ -3,9 +3,12 @@ package analytics
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"math"
+	"regexp"
 	"sort"
 	"time"
+	"unicode/utf8"
 )
 
 // The per-user daily usage rollup (W-P3-PUL-07). Each row is keyed by
@@ -40,7 +43,23 @@ const (
 	// denyReasonUnspecified counts deny events from workers that set no reason.
 	denyReasonUnspecified = "unspecified"
 	denyReasonOther       = "other"
+
+	// Caps on the identifier columns of a rollup row (see truncateUTF8).
+	maxUsageSubLen   = 255
+	maxUsageEmailLen = 320
+	maxUsageAgentLen = 128
+	// usageRuleInvalid is the rollup key for a limit rule name outside the
+	// rule-name charset or over 64 bytes (see usageRule).
+	usageRuleInvalid = "!invalid"
+	// maxUsageRows caps the in-memory rollup's rows; past it new keys are
+	// refused and counted (CentralStore.UsageRowsRefused), existing rows keep
+	// counting.
+	maxUsageRows = 200000
 )
+
+// usageRuleRE is the rule-name charset: the agent-id charset W-P3-PUL-01
+// uses for userLimits names.
+var usageRuleRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // UserUsageQuerier is the read side of the rollup. FleetSQLiteStore answers it
 // with parameterized SQL over user_usage_daily and CentralStore in Go; a later
@@ -137,13 +156,21 @@ func usageDeltaFor(e Event, now time.Time) (usageDelta, bool) {
 	if e.UserSub == "" && e.LimitRule != AnonymousLimitRule {
 		return usageDelta{}, false
 	}
-	day := UsageDay(e.Timestamp)
+	// The day is the worker's event time in UTC, clamped to the CP's today:
+	// a future-dated event (worker clock skew, or a sender trying to park
+	// spend on a day that has not started) counts toward today.
+	day := min(UsageDay(e.Timestamp), UsageDay(now))
 	if day < usageCutoffDay(now) {
 		return usageDelta{}, false
 	}
 	d := usageDelta{
-		key:   usageKey{day: day, sub: e.UserSub, agent: e.AgentID, rule: e.LimitRule},
-		email: e.UserEmail,
+		key: usageKey{
+			day:   day,
+			sub:   truncateUTF8(e.UserSub, maxUsageSubLen),
+			agent: truncateUTF8(e.AgentID, maxUsageAgentLen),
+			rule:  usageRule(e.LimitRule),
+		},
+		email: truncateUTF8(e.UserEmail, maxUsageEmailLen),
 		cost:  e.CostUSD,
 	}
 	if e.UserSub == "" {
@@ -161,6 +188,32 @@ func usageDeltaFor(e Event, now time.Time) (usageDelta, bool) {
 		}
 	}
 	return d, true
+}
+
+// usageRule maps a limit rule name to its rollup key: "" and names in the
+// rule-name charset (the agent-id charset, at most 64 bytes) are
+// kept, anything else becomes usageRuleInvalid. That value is outside the
+// charset, so it never equals a configured rule and W-P3-PUL-08 never charges
+// it to a real rule's cap.
+func usageRule(rule string) string {
+	if rule == "" || usageRuleRE.MatchString(rule) {
+		return rule
+	}
+	return usageRuleInvalid
+}
+
+// truncateUTF8 cuts s to at most n bytes without splitting a rune. Caps are
+// well above real values (OIDC limits sub to 255 ASCII characters); cutting
+// can only merge two pathological values, which over-counts rather than lets
+// spend escape a cap.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // addDeny counts one deny under reason in m, bounded by maxDenyReasons and
@@ -207,13 +260,18 @@ type usageRow struct {
 // usageRollup is the in-memory rollup behind CentralStore. The caller holds
 // the store's lock.
 type usageRollup struct {
-	rows map[usageKey]*usageRow
+	rows    map[usageKey]*usageRow
+	maxRows int
+	// refused counts events whose new row was refused at maxRows.
+	refused uint64
 	// prunedFor is the cutoff day of the last prune, so the O(rows) sweep runs
 	// once per UTC day rather than on every event.
 	prunedFor string
 }
 
-func newUsageRollup() *usageRollup { return &usageRollup{rows: map[usageKey]*usageRow{}} }
+func newUsageRollup() *usageRollup {
+	return &usageRollup{rows: map[usageKey]*usageRow{}, maxRows: maxUsageRows}
+}
 
 func (u *usageRollup) add(e Event, now time.Time) {
 	d, ok := usageDeltaFor(e, now)
@@ -222,6 +280,10 @@ func (u *usageRollup) add(e Event, now time.Time) {
 	}
 	r := u.rows[d.key]
 	if r == nil {
+		if len(u.rows) >= u.maxRows {
+			u.refused++
+			return
+		}
 		r = &usageRow{denies: map[string]int64{}}
 		u.rows[d.key] = r
 	}
@@ -371,16 +433,22 @@ func (c *CentralStore) UsageByUser(ctx context.Context, from, to time.Time, limi
 		return nil, err
 	}
 	fromDay, toDay := UsageDay(from), UsageDay(to)
-	acc := newUsageAccumulator()
+	// Copy the window's rows under the read lock (deny maps cloned, since
+	// ingest mutates them under the write lock), then aggregate and sort
+	// without holding it.
+	var recs []usageRecord
 	c.mu.RLock()
 	for k, r := range c.usage.rows {
 		if k.day < fromDay || k.day > toDay {
 			continue
 		}
-		rec := usageRecord{key: k, usageRow: usageRow{email: r.email, requests: r.requests, cost: r.cost, denies: r.denies}}
-		acc.add(rec)
+		recs = append(recs, usageRecord{key: k, usageRow: usageRow{email: r.email, requests: r.requests, cost: r.cost, denies: maps.Clone(r.denies)}})
 	}
 	c.mu.RUnlock()
+	acc := newUsageAccumulator()
+	for _, rec := range recs {
+		acc.add(rec)
+	}
 	return acc.result(usageLimit(limit)), nil
 }
 
@@ -405,6 +473,14 @@ func (c *CentralStore) TodayCostByRule(ctx context.Context, day string) ([]UserR
 	}
 	sortUserRuleCosts(out)
 	return out, nil
+}
+
+// UsageRowsRefused reports how many events the in-memory rollup did not count
+// because it was at its row cap.
+func (c *CentralStore) UsageRowsRefused() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.usage.refused
 }
 
 func sortUserRuleCosts(out []UserRuleCost) {

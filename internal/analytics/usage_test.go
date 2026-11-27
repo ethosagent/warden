@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"reflect"
@@ -368,29 +369,67 @@ func TestUserUsageDaily_DenyReasonsBounded(t *testing.T) {
 	}
 }
 
-// The rollup holds identifiers and counters only: no URL, secret reference,
-// judge reason or header text from the event reaches it.
+// The rollup holds identifiers and counters only: its columns are exactly the
+// allowlisted ones, and no column of any row carries URL, secret reference,
+// judge reason, tool or header text from the event.
 func TestUserUsageDaily_NoSecretMaterial(t *testing.T) {
 	s := newFleetStore(t, 0, 0)
 	s.now = func() time.Time { return usageDayT }
 	e := usageEvent("1", "alice", "a", "r", usageDayT, 1)
 	e.URL = "https://api.openai.com/v1?key=sk-live-SECRETVALUE"
 	e.SecretRef, e.JudgeReason, e.Tool = "{{SECRETREF}}", "judged-SECRETJUDGE", "tool-SECRETTOOL"
+	e.SwappedRefs, e.Evidence = []string{"{{SECRETSWAP}}"}, []string{"SECRETEVIDENCE"}
 	e.Decision, e.Reason = "deny", "rate_limited"
 	if err := s.StoreAggregatedEvent(AggregatedEvent{Event: e}); err != nil {
 		t.Fatal(err)
 	}
-	var dump string
-	err := s.db.QueryRow(`SELECT group_concat(day||'|'||sub||'|'||agent_id||'|'||limit_rule||'|'||email||'|'||requests||'|'||denies_json||'|'||cost_usd, ';') FROM user_usage_daily`).Scan(&dump)
+	var cols []string
+	crows, err := s.db.Query(`SELECT name FROM pragma_table_info('user_usage_daily') ORDER BY cid`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(dump, "alice") {
-		t.Fatalf("rollup row missing: %q", dump)
+	for crows.Next() {
+		var c string
+		if err := crows.Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		cols = append(cols, c)
 	}
-	for _, bad := range []string{"SECRET", "sk-live", "http"} {
-		if strings.Contains(dump, bad) {
-			t.Errorf("rollup carries %q: %q", bad, dump)
+	_ = crows.Close()
+	allow := []string{"day", "sub", "agent_id", "limit_rule", "email", "requests", "denies_json", "cost_usd"}
+	if !reflect.DeepEqual(cols, allow) {
+		t.Fatalf("user_usage_daily columns = %v, want exactly %v", cols, allow)
+	}
+	rows, err := s.db.Query(`SELECT * FROM user_usage_daily`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var dump strings.Builder
+	n := 0
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatal(err)
+		}
+		for i, v := range vals {
+			if b, ok := v.([]byte); ok {
+				v = string(b)
+			}
+			dump.WriteString(cols[i] + "=" + fmt.Sprint(v) + ";")
+		}
+		n++
+	}
+	if n != 1 || !strings.Contains(dump.String(), "sub=alice;") {
+		t.Fatalf("rollup rows: %d %q", n, dump.String())
+	}
+	for _, bad := range []string{"SECRET", "sk-live", "http", "{{"} {
+		if strings.Contains(dump.String(), bad) {
+			t.Errorf("rollup carries %q: %q", bad, dump.String())
 		}
 	}
 }

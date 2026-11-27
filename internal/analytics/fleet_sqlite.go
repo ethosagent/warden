@@ -2,7 +2,9 @@ package analytics
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -261,12 +263,27 @@ func (s *FleetSQLiteStore) StoreAggregatedEvent(e AggregatedEvent) error {
 	return s.prune()
 }
 
-// EventUID is the dedup key for an aggregated event: the worker-assigned
-// Event.UID (a hash of proxy id + local rowid, stamped by the SyncWorker before
-// first send, so it is identical on every retry of the same event). Empty when
-// the sender predates UIDs or has no proxy id configured; empty keys fall
-// outside the partial unique index and are always stored.
-func (e AggregatedEvent) EventUID() string { return e.UID }
+// EventUID is the dedup key for an aggregated event: a truncated SHA-256 over
+// the AUTHORIZED proxy id (AggregatedEvent.ProxyID, which ingest takes from the
+// ingest authorizer, never from the body) and the worker-assigned Event.UID.
+// The worker UID is stable across retries of one event, so a re-sent batch maps
+// to the same key and is dropped; scoping it to the authorized proxy means a
+// worker authenticated as A can never collide with, and so suppress, B's
+// events (W-P3-PUL-07). Empty when the sender sent no UID (pre-UID workers,
+// workers with no proxy id); empty keys fall outside the partial unique index
+// and are always stored.
+//
+// Fleet rows stored before this change hold the raw worker UID, which never
+// equals a scoped key, so an upgraded DB keeps its rows and dedups correctly
+// for every batch sent after the upgrade; only a batch whose ack was lost
+// across the upgrade itself can be stored twice, once.
+func (e AggregatedEvent) EventUID() string {
+	if e.UID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("fleet-uid-v2\x00" + e.ProxyID + "\x00" + e.UID))
+	return hex.EncodeToString(sum[:16])
+}
 
 // nullIfEmpty maps "" to a SQL NULL so empty event_uids stay outside the partial
 // unique index (which excludes NULL and ”).

@@ -9,7 +9,9 @@ package analytics
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -361,6 +363,9 @@ type SQLiteStore struct {
 	// sharedRO is true when ro aliases db (in-memory DSNs, where a separate ro
 	// handle cannot see the same in-memory database). Close then closes db once.
 	sharedRO bool
+	// uidEpoch is this database's random sync epoch (see ensureUIDEpoch),
+	// mixed into every event UID so a recreated database never reuses one.
+	uidEpoch string
 }
 
 var (
@@ -511,6 +516,31 @@ CREATE TABLE IF NOT EXISTS events (
 	// lookups (user_sub, lower(user_email)) instead of a scan.
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_email_lower ON events (lower(user_email))`); err != nil {
 		return fmt.Errorf("analytics: migrate user email index: %w", err)
+	}
+	return s.ensureUIDEpoch()
+}
+
+// ensureUIDEpoch loads this database's sync epoch, creating it on first open
+// (including the first open of a database that predates it). The epoch is 16
+// bytes from crypto/rand, persisted in store_meta, and never changes for the
+// life of the file. eventUID mixes it in so a worker whose local database is
+// recreated (rowids restart at 1) or a replica sharing a proxy id never sends
+// a UID another database already used, which the control plane would drop as
+// a duplicate (W-P3-PUL-07). INSERT OR IGNORE makes concurrent first opens
+// agree on one epoch.
+func (s *SQLiteStore) ensureUIDEpoch() error {
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`); err != nil {
+		return fmt.Errorf("analytics: migrate store_meta: %w", err)
+	}
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Errorf("analytics: uid epoch: %w", err)
+	}
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO store_meta (key, value) VALUES ('uid_epoch', ?)`, hex.EncodeToString(b[:])); err != nil {
+		return fmt.Errorf("analytics: uid epoch: %w", err)
+	}
+	if err := s.db.QueryRow(`SELECT value FROM store_meta WHERE key = 'uid_epoch'`).Scan(&s.uidEpoch); err != nil {
+		return fmt.Errorf("analytics: uid epoch: %w", err)
 	}
 	return nil
 }

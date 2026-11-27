@@ -206,14 +206,17 @@ func TestSyncOnce_NoProxyID_LeavesUIDsEmpty(t *testing.T) {
 }
 
 func TestEventUID_Deterministic(t *testing.T) {
-	if got, again := eventUID("p1", 42), eventUID("p1", 42); got != again {
+	if got, again := eventUID("e1", "p1", 42), eventUID("e1", "p1", 42); got != again {
 		t.Errorf("eventUID not deterministic: %q vs %q", got, again)
 	}
-	if eventUID("p1", 42) == eventUID("p1", 43) {
+	if eventUID("e1", "p1", 42) == eventUID("e1", "p1", 43) {
 		t.Error("different rowids produced the same UID")
 	}
-	if eventUID("p1", 42) == eventUID("p2", 42) {
+	if eventUID("e1", "p1", 42) == eventUID("e1", "p2", 42) {
 		t.Error("different proxy ids produced the same UID")
+	}
+	if eventUID("e1", "p1", 42) == eventUID("e2", "p1", 42) {
+		t.Error("different database epochs produced the same UID")
 	}
 }
 

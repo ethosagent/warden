@@ -636,9 +636,19 @@ The control plane also keeps a per-user daily usage rollup in the fleet
 database (table `user_usage_daily`, sqlite provider). Each row is keyed by
 UTC day, `user_sub`, `agent_id` and `limit_rule`, and holds the email, request
 count, deny count per reason and summed estimated cost. Only events with a
-`user_sub`, or under the `anonymous` limit rule, are counted. Rows are added in
-the same transaction as the event, and only when the event was newly stored,
-so a worker retrying a batch never counts twice. The rollup keeps 35 UTC days,
+`user_sub`, or under the `anonymous` limit rule, are counted. The day is the
+worker's event time in UTC; a future-dated event counts toward the control
+plane's current UTC day. Rows are added in the same transaction as the event,
+and only when the event was newly stored, so a worker retrying a batch never
+counts twice. Duplicates are recognised by the event's sync id, which each
+worker derives from a random id kept in its local database. The control plane
+scopes it to the proxy id the worker authenticated as. A recreated local
+database, or two replicas sharing a proxy id, therefore never has its events
+dropped as duplicates, and one worker cannot suppress another's events.
+Identifier values are bounded: `sub` is cut to 255 bytes, email to 320 and
+`agent_id` to 128. A `limit_rule` that is not 1 to 64 characters of
+`A-Z a-z 0-9 . _ -` is stored as `!invalid`, which never matches a configured
+rule. The rollup keeps 35 UTC days,
 whatever the events retention or `maxEvents`, so pruning events never changes
 usage totals. It holds no URL, header, body or secret reference. It starts
 empty when an older fleet database is upgraded: events stored before the
