@@ -173,12 +173,11 @@ func TestConnectStartRouteAuth(t *testing.T) {
 		t.Errorf("console cookie = %d, want 401", rec.Code)
 	}
 	// A bearer next to a portal session is ignored (stripped), not authority.
-	before := r.attemptRows()
 	if rec := r.connectPost(c, tok, form, map[string]string{"Authorization": "Bearer admin-token"}); rec.Code != http.StatusSeeOther {
 		t.Fatalf("portal session + stray bearer = %d", rec.Code)
 	}
 	// GET changes nothing and redirects to the landing page or the portal.
-	before = r.attemptRows()
+	before := r.attemptRows()
 	rec = r.serve(http.MethodGet, "/connect/start?pending=abc", c)
 	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/portal/connect/abc" {
 		t.Fatalf("GET = %d %q", rec.Code, rec.Header().Get("Location"))
