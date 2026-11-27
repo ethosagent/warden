@@ -534,6 +534,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		return fail(err)
 	}
 	logPerUserSecrets(logger, pol.PerUserSecrets)
+	// The signed-bundle sections re-read the block from the served config on
+	// every build and re-run the same startup check before serving it
+	// (W-P3-PUS-08), so an edit made while running never bypasses it.
+	perUserLoad := func() (config.PerUserSecretsConfig, error) { return loadPerUserSecrets(servedPath) }
+	perUserCheck := func(c config.PerUserSecretsConfig) error {
+		return checkPerUserSecretsStartup(c, consentCfg, userStore, tokenCfg.Enabled, bundlesCfg)
+	}
 
 	// clk is the CP's resolved time port (nil = clock.Real(), the production
 	// default). Console sessions, pending logins and ID-token checks read it.
@@ -694,6 +701,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		Console:             consoleCfg,
 		Consent:             consentCfg,
 		UserStore:           userStore,
+		PerUserLoad:         perUserLoad,
+		PerUserCheck:        perUserCheck,
 		ClientSecret:        clientSecret,
 		Now:                 clk.Now,
 

@@ -130,3 +130,24 @@ func (c *CPClient) TryStart() error {
 	c.h.tb.Helper()
 	return c.h.target.StartControlPlane(context.Background())
 }
+
+// BumpUserGrant revokes userKey (a secrets.UserKey value) the way the consent
+// portal's revoke and offboarding will: it appends a user_grant row to the
+// publish log and signs a bundle whose userGrantEpochs section carries the new
+// epoch (W-P3-PUS-08). It returns the epoch, 0 when per-user secrets are off.
+func (c *CPClient) BumpUserGrant(userKey string) int64 {
+	c.h.tb.Helper()
+	s := c.h.cpSrv.Load()
+	if s == nil {
+		c.h.tb.Fatal("harness: BumpUserGrant needs the in-process control plane")
+	}
+	e := s.GrantEpochs()
+	if e == nil {
+		c.h.tb.Fatal("harness: BumpUserGrant needs signed bundles")
+	}
+	epoch, err := e.Bump(context.Background(), userKey)
+	if err != nil {
+		c.h.tb.Fatalf("harness: BumpUserGrant: %v", err)
+	}
+	return epoch
+}

@@ -282,6 +282,12 @@ var All = slices.Concat(
 		// POST and DELETE with 403 reserved_key.
 		{Name: "reserved_user_secret_namespaces", Opts: strictAuthOpts(), Run: reservedUserSecretNamespaces},
 		{Name: "consent_store_vault", Opts: consentStoreVaultOpts(), Run: consentStoreVault},
+		// Per-user bundle sections (W-P3-PUS-08): perUserSecrets and
+		// userGrantEpochs are signed-bundle sections, value-free, absent from the
+		// legacy wire and from a control plane with the feature off; a revoke
+		// bump wakes a held long poll with a larger epoch. In-process only.
+		{Name: "peruser_bundle_sections", Opts: consentStoreVaultOpts(), Run: perUserBundleSections},
+		{Name: "peruser_bundle_sections_off", Opts: bundlesOfferOpts(), Run: perUserBundleSectionsOff},
 		// Held long-poll (W-P1-WTOK-09): a revoke out of process returns that
 		// token's held /policy with 401 while another token's stays parked.
 		{Name: "worker_token_longpoll_revoke", Opts: workerTokenOpts(), Run: workerTokenLongPollRevoke},

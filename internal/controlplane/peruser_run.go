@@ -68,3 +68,18 @@ func logPerUserSecrets(logger *slog.Logger, pus config.PerUserSecretsConfig) {
 	logger.Info("control plane per-user secrets enabled",
 		"mappings", len(pus.Mappings), "workerCacheTTL", pus.WorkerCacheTTL.String())
 }
+
+// loadPerUserSecrets reads the perUserSecrets block from the config file at
+// path through the full loader, so an enabled block is validated (including its
+// placeholders against the static secrets) exactly as at startup.
+func loadPerUserSecrets(path string) (config.PerUserSecretsConfig, error) {
+	prov, err := config.NewLocalYAMLProvider(path)
+	if err != nil {
+		return config.PerUserSecretsConfig{}, err
+	}
+	pol, err := prov.GetPolicy()
+	if err != nil {
+		return config.PerUserSecretsConfig{}, err
+	}
+	return pol.PerUserSecrets, nil
+}

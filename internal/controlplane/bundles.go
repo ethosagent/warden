@@ -73,6 +73,9 @@ const (
 	stateCPID      = "cp_id"
 	stateJWKSSHA   = "jwks_sha256"
 	stateIssuerSHA = "token_issuer_sha256"
+	// statePerUserSHA is the hash of the perUserSecrets section the publish log
+	// last covered.
+	statePerUserSHA = "per_user_secrets_sha256"
 	// stateSigned is "<seq>:<content fingerprint>" of the newest envelope
 	// signed. It outlives a restart, so a seq can never be signed twice with
 	// different content, whatever changed while the control plane was down.
@@ -188,10 +191,10 @@ func logBundlesMode(logger *slog.Logger, c BundlesConfig) {
 // covered. Registered in every mode, like the policy store's, so switching
 // --bundles never trips the downgrade guard.
 func BundleMigrations() []cpstate.Migration {
-	return []cpstate.Migration{{
+	return append([]cpstate.Migration{{
 		ID:  "bundles/0001",
 		SQL: `CREATE TABLE bundle_state (name TEXT PRIMARY KEY, value TEXT NOT NULL);`,
-	}}
+	}}, GrantEpochMigrations()...)
 }
 
 // bundleState reads and writes the bundle_state table.
@@ -283,6 +286,21 @@ type bundlePublisher struct {
 	// tracked so a change appends a row of its own before signing.
 	jwks   trackedInput
 	issuer trackedInput
+	// perUser tracks the signed perUserSecrets section (reason per_user_secrets),
+	// whose change also moves no policy ETag. perUserSrc is where the block is
+	// read from (nil = the feature does not exist on this control plane) and pu
+	// the state last served. Both are guarded by refreshMu.
+	perUser    trackedInput
+	perUserSrc *perUserSource
+	pu         perUserState
+	// puPairs are the (agent, placeholder) pairs pu serves; pustale is set while
+	// the block in the config is not being served (see resolvePerUser).
+	puPairs map[string]map[string]bool
+	pustale atomic.Bool
+	// frozenSeq and frozenEpochs are the userGrantEpochs bytes signed for that
+	// seq (see epochsFor).
+	frozenSeq    int64
+	frozenEpochs json.RawMessage
 	// tokenIssuer is tokenService.issuer, signed as the payload's tokenIssuer
 	// ("" = the control plane mints no tokens). Guarded by refreshMu.
 	tokenIssuer string
@@ -303,6 +321,9 @@ func newBundlePublisher(cfg BundlesConfig, k bundleKeys, db *sql.DB, now func() 
 		cfg: cfg, keys: k, state: bundleState{db: db}, now: now, logger: logger,
 		jwks:   trackedInput{stateKey: stateJWKSSHA, reason: publishReasonTokenJWKS},
 		issuer: trackedInput{stateKey: stateIssuerSHA, reason: publishReasonTokenIssuer, zeroBaseline: true},
+		// zeroBaseline: the first sight of an enabled block counts as a change,
+		// and a control plane that never enables it stores "" and appends nothing.
+		perUser: trackedInput{stateKey: statePerUserSHA, reason: publishReasonPerUserSecrets, zeroBaseline: true},
 	}
 }
 
@@ -413,10 +434,13 @@ func (ps *policyServer) startBundles(ctx context.Context) error {
 		return fmt.Errorf("control-plane: %w", err)
 	}
 	b.cpID = id
-	for _, in := range []*trackedInput{&b.jwks, &b.issuer} {
+	for _, in := range []*trackedInput{&b.jwks, &b.issuer, &b.perUser} {
 		if err := in.load(ctx, b.state); err != nil {
 			return fmt.Errorf("control-plane: %w", err)
 		}
+	}
+	if err := b.loadFrozenEpochs(ctx); err != nil {
+		return fmt.Errorf("control-plane: %w", err)
 	}
 	if v, ok, err := b.state.get(ctx, stateSigned); err != nil {
 		return fmt.Errorf("control-plane: %w", err)
@@ -535,6 +559,14 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		b.fail(ctx, 0, kid, err)
 		return
 	}
+	// The per-user block is read and checked on every build, so a block edited
+	// in the served config is served only after it passed the startup checks.
+	ps.resolvePerUser()
+	perUser := b.pu.raw
+	if err := ps.cover(ctx, &b.perUser, hashOf(string(perUser)), head, etag); err != nil {
+		b.fail(ctx, 0, kid, err)
+		return
+	}
 	last, ok, err := ps.versions.LatestPublish(ctx)
 	if err != nil {
 		b.fail(ctx, 0, kid, err)
@@ -553,6 +585,14 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		return
 	}
 	fp := contentFingerprint(policy, creds, jwks, b.tokenIssuer)
+	var epochs json.RawMessage
+	if perUser != nil {
+		if epochs, err = ps.epochsFor(ctx, last.Seq); err != nil {
+			b.fail(ctx, last.Seq, kid, err)
+			return
+		}
+		fp = perUserFingerprint(fp, perUser, epochs)
+	}
 	cur := b.cur
 	switch {
 	case b.signedSeq > last.Seq:
@@ -582,11 +622,19 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		Policy:        policy,
 		TokenIssuer:   b.tokenIssuer,
 	}
-	// One section today. The ticket that adds a second one (for example the
-	// registry section, W-P4-MREG-05) should turn jwks into a section list, so
-	// each section is fingerprinted and each owns a publish-log reason.
+	// Each section is fingerprinted and owns a publish-log reason: tokenJWKS
+	// (token_jwks), perUserSecrets (per_user_secrets) and userGrantEpochs
+	// (user_grant, appended by EpochStore.Bump). The last two exist only with
+	// perUserSecrets enabled.
 	if jwks != nil {
 		bd.Sections = map[string]json.RawMessage{sectionTokenJWKS: jwks}
+	}
+	if perUser != nil {
+		if bd.Sections == nil {
+			bd.Sections = map[string]json.RawMessage{}
+		}
+		bd.Sections[bundle.SectionPerUserSecrets] = perUser
+		bd.Sections[bundle.SectionUserGrantEpochs] = epochs
 	}
 	env, err := bundle.Sign(ctx, bd, creds, signers...)
 	if err != nil {
@@ -604,7 +652,13 @@ func (ps *policyServer) publishBundle(ctx context.Context, wire policyWire, etag
 		issuedAt: now, expiresAt: bd.ExpiresAt, fp: fp, tokenKIDs: tokenKIDs,
 	}
 	// Persist before publishing: an envelope nobody can prove was recorded is
-	// never served.
+	// never served. The epochs bytes are frozen for the seq first.
+	if epochs != nil {
+		if err := ps.freezeEpochs(ctx, sb.seq, epochs); err != nil {
+			b.fail(ctx, last.Seq, kid, err)
+			return
+		}
+	}
 	if err := b.state.put(ctx, stateSigned, strconv.FormatInt(sb.seq, 10)+":"+fp); err != nil {
 		b.fail(ctx, last.Seq, kid, err)
 		return
@@ -782,4 +836,7 @@ func (s *Server) initBundles() {
 		return
 	}
 	s.policy.bundles = newBundlePublisher(s.cfg.Bundles, k, s.cfg.State.SQL(), s.cfg.Clock.Now, s.cfg.Logger)
+	if s.cfg.PerUserLoad != nil {
+		s.policy.bundles.perUserSrc = &perUserSource{load: s.cfg.PerUserLoad, check: s.cfg.PerUserCheck}
+	}
 }

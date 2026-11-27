@@ -423,6 +423,7 @@ var notVersionedWriteRoutes = map[routeKey]string{
 	{http.MethodPost, "/dashboard/api/detection"}:            "CP-local detection block",
 	{http.MethodPut, "/dashboard/api/detection"}:             "CP-local detection block",
 	{http.MethodPost, "/dashboard/api/backup"}:               "writes a backup, not a version",
+	{http.MethodPut, "/dashboard/api/per-user-secrets"}:      "CP-local perUserSecrets block, served as signed-bundle sections, not a version",
 	{http.MethodPost, "/dashboard/api/worker-tokens"}:        "worker token store",
 	{http.MethodDelete, "/dashboard/api/worker-tokens/{id}"}: "worker token store",
 	{http.MethodPost, "/dashboard/api/blocked-users"}:        "adding a block narrows access: the immediate kill switch, never held (W-P2-APPR-08)",
