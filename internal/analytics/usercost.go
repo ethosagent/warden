@@ -18,10 +18,10 @@ type UserCost struct {
 // costByUserSinceSQL sums cost_usd by user_sub and limit_rule over events at
 // or after a timestamp. Only events charged to a rule and priced above zero
 // count. It names the idx_events_ts_user_rule_cost covering index: left to
-// itself the planner walks the whole (user_sub, limit_rule, ts) index to get
-// the GROUP BY order for free, a full scan of every retained event at boot,
-// with or without statistics. INDEXED BY makes the ts range the only plan
-// (TestCostByUserSince_Plan); the index is created by migrate.
+// itself the planner may walk a user_sub-leading index to get the GROUP BY
+// order for free, a full scan of every retained event at boot. INDEXED BY
+// makes the ts range the only plan (TestCostByUserSince_Plan); the index is
+// created by migrate.
 const costByUserSinceSQL = `SELECT user_sub, limit_rule, SUM(cost_usd) FROM events INDEXED BY idx_events_ts_user_rule_cost
 WHERE ts >= ? AND limit_rule != '' AND cost_usd > 0
 GROUP BY user_sub, limit_rule`

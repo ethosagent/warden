@@ -114,3 +114,34 @@ func TestCostByUserSince_Plan(t *testing.T) {
 	}
 	check("after ANALYZE")
 }
+
+// A database migrated by W-P3-PUL-02 holds (user_sub, limit_rule, ts); the
+// next open drops it, keeps the rows, and a further open is a no-op.
+func TestMigrate_DropsUserRuleIndex(t *testing.T) {
+	dsn := "file:" + filepath.Join(t.TempDir(), "warden.db")
+	s, err := NewSQLiteStore(dsn, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX idx_events_user_rule_ts ON events (user_sub, limit_rule, ts)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StoreEvent(Event{Timestamp: time.Now(), Domain: "a", Decision: "allow", UserSub: "u", LimitRule: "r", CostUSD: 1}); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	for i := 0; i < 2; i++ {
+		s, err = NewSQLiteStore(dsn, 0)
+		if err != nil {
+			t.Fatalf("open %d: %v", i, err)
+		}
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_events_user_rule_ts'`).Scan(&n); err != nil || n != 0 {
+			t.Errorf("open %d: old index count %d, err %v", i, n, err)
+		}
+		if got, err := s.CostByUserSince(context.Background(), time.Unix(0, 0)); err != nil || len(got) != 1 {
+			t.Errorf("open %d: rows = %+v, %v", i, got, err)
+		}
+		_ = s.Close()
+	}
+}
