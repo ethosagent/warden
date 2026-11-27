@@ -15,13 +15,16 @@ import (
 	"github.com/ethosagent/warden/internal/secrets"
 )
 
+// testKeyID is the access key id the stores under test accept.
+const testKeyID = "warden-e2e-fake-access-key-id"
+
 // realClientAgainst points warden's own Secrets Manager client (the one the
 // CP's consent.store uses) at srv: every dial goes to srv, and srv's
 // certificate is trusted, the way the compose stack's network alias and
 // SSL_CERT_FILE do it. The client is built exactly as production builds it.
-func realClientAgainst(t *testing.T, srv *httptest.Server) secrets.AWSSecretsClient {
+func realClientAgainst(t *testing.T, srv *httptest.Server, keyID string) secrets.AWSSecretsClient {
 	t.Helper()
-	t.Setenv("AWS_ACCESS_KEY_ID", "warden-e2e-fake-access-key-id")
+	t.Setenv("AWS_ACCESS_KEY_ID", keyID)
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "fake-secret-access-key")
 	t.Setenv("AWS_SESSION_TOKEN", "")
 	prev := http.DefaultTransport
@@ -44,10 +47,10 @@ func realClientAgainst(t *testing.T, srv *httptest.Server) secrets.AWSSecretsCli
 // through the same SecretStore the CP's consent.store builds: create, update,
 // read, list by prefix, delete, and not-found mapping.
 func TestFakeAWSWithWardenClient(t *testing.T) {
-	s := newStore(func() time.Time { return time.Unix(1_800_000_000, 0) })
+	s := newStore(testKeyID, func() time.Time { return time.Unix(1_800_000_000, 0) })
 	srv := httptest.NewTLSServer(s.apiHandler())
 	defer srv.Close()
-	st := secrets.NewAWSSecretStore(realClientAgainst(t, srv), "us-east-1", "warden-cp/")
+	st := secrets.NewAWSSecretStore(realClientAgainst(t, srv, testKeyID), "us-east-1", "warden-cp/")
 	ctx := context.Background()
 
 	if _, err := st.Get(ctx, "idp/abc"); !errors.Is(err, secrets.ErrSecretNotFound) {
@@ -80,11 +83,11 @@ func TestFakeAWSWithWardenClient(t *testing.T) {
 // TestFakeAWSRejectsUnsigned: a request without a SigV4 Authorization header
 // or a secretsmanager target is refused, and the store is untouched.
 func TestFakeAWSRejectsUnsigned(t *testing.T) {
-	s := newStore(time.Now)
+	s := newStore(testKeyID, time.Now)
 	h := s.apiHandler()
 	for name, hdr := range map[string]map[string]string{
 		"unsigned":  {"X-Amz-Target": "secretsmanager.CreateSecret"},
-		"no target": {"Authorization": "AWS4-HMAC-SHA256 Credential=x"},
+		"no target": {"Authorization": "AWS4-HMAC-SHA256 Credential=" + testKeyID + "/20261127/us-east-1/secretsmanager/aws4_request"},
 	} {
 		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"Name":"n","SecretString":"v","ClientRequestToken":"t"}`))
 		for k, v := range hdr {
@@ -104,7 +107,7 @@ func TestFakeAWSRejectsUnsigned(t *testing.T) {
 // TestFakeAWSControl: the control listener reports health, names and one
 // value, and 404s a missing name.
 func TestFakeAWSControl(t *testing.T) {
-	s := newStore(time.Now)
+	s := newStore(testKeyID, time.Now)
 	s.secrets["warden-cp/idp/k"] = secret{value: "rt-value"}
 	srv := httptest.NewServer(s.controlHandler())
 	defer srv.Close()
@@ -128,5 +131,41 @@ func TestFakeAWSControl(t *testing.T) {
 	}
 	if code, _ := get("/_secret?name=missing"); code != http.StatusNotFound {
 		t.Errorf("/_secret missing = %d, want 404", code)
+	}
+}
+
+// TestFakeAWSAccessKeyID: a request signed with any access key id but the one
+// the store accepts (a worker's, say) is 403 and stores nothing, through
+// warden's real client too; an empty configured id accepts no key.
+func TestFakeAWSAccessKeyID(t *testing.T) {
+	s := newStore(testKeyID, time.Now)
+	srv := httptest.NewTLSServer(s.apiHandler())
+	defer srv.Close()
+	st := secrets.NewAWSSecretStore(realClientAgainst(t, srv, "some-other-access-key-id"), "us-east-1", "warden-cp/")
+	err := st.Put(context.Background(), "idp/abc", "rt-one")
+	if err == nil || !strings.Contains(err.Error(), "UnrecognizedClientException") {
+		t.Fatalf("Put with a foreign access key id = %v, want UnrecognizedClientException", err)
+	}
+	if len(s.secrets) != 0 {
+		t.Fatal("a refused request stored a secret")
+	}
+
+	open := newStore("", time.Now)
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"SecretId":"n"}`))
+	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=/20261127/us-east-1/secretsmanager/aws4_request, SignedHeaders=host, Signature=x")
+	req.Header.Set("X-Amz-Target", "secretsmanager.GetSecretValue")
+	rec := httptest.NewRecorder()
+	open.apiHandler().ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatal("a store with no configured access key id accepted a request")
+	}
+	for authz, want := range map[string]string{
+		"AWS4-HMAC-SHA256 Credential=AK1/20261127/us-east-1/secretsmanager/aws4_request, SignedHeaders=host, Signature=x": "AK1",
+		"AWS4-HMAC-SHA256 SignedHeaders=host, Credential=AK2/x":                                                           "AK2",
+		"Bearer AK3": "",
+	} {
+		if got := credentialKeyID(authz); got != want {
+			t.Errorf("credentialKeyID(%q) = %q, want %q", authz, got, want)
+		}
 	}
 }

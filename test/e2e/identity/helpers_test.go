@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -319,12 +320,19 @@ var passwordFormAction = regexp.MustCompile(`(?is)<form[^>]*\bmethod="post"[^>]*
 const maxHops = 6
 
 // loginTrace is what one browser login saw on its way: where the CP first
-// sent the browser (query dropped) and the authorization codes Dex handed back
-// to the CP callback. The codes are secret; they are kept only so a test can
-// sweep logs for them and must never be printed.
+// sent the browser (query dropped), the state and nonce the CP put on that
+// redirect, and the authorization codes Dex handed back to the CP callback.
+// All but LoginRedirect are secret; they are kept only so a test can sweep
+// logs for them and must never be printed.
 type loginTrace struct {
 	LoginRedirect string
+	flowParams    []string // the CP-generated state and nonce
 	codes         []string
+}
+
+// secrets returns every secret value the login handled: state, nonce and codes.
+func (tr loginTrace) secrets() []string {
+	return append(slices.Clone(tr.flowParams), tr.codes...)
 }
 
 // browserLogin drives b through the CP's OIDC browser flow: GET loginPath on
@@ -350,6 +358,11 @@ func browserLogin(b *http.Client, user, loginPath, landingPath string) (loginTra
 	}
 	if next == nil {
 		return tr, fmt.Errorf("GET %s: status %d, want a redirect to Dex", loginPath, status)
+	}
+	for _, k := range []string{"state", "nonce"} {
+		if v := next.Query().Get(k); v != "" {
+			tr.flowParams = append(tr.flowParams, v)
+		}
 	}
 	tr.LoginRedirect = noQuery(next)
 

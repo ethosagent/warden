@@ -12,8 +12,12 @@
 // over an in-memory map that lives as long as the container: persistent across
 // control-plane restarts, which is what the portal IdP link needs
 // (Persists() is true for the aws backend). It checks that each request is
-// SigV4-shaped (an AWS4-HMAC-SHA256 Authorization header) but does not verify
-// the signature.
+// SigV4-shaped (an AWS4-HMAC-SHA256 Authorization header) and that the access
+// key id in its Credential= scope equals FAKEAWS_ACCESS_KEY_ID (the CP's fake
+// key; any other key is 403), but does not verify the signature. Only the CP
+// is given that key, so a request from anything else is refused.
+//
+// The access key id is not a secret; it is still never logged.
 //
 // A second, plain-HTTP control listener (loopback inside the container by
 // default) lets the e2e test read what the CP stored:
@@ -46,6 +50,9 @@ const maxBody = 1 << 20
 
 // store is the in-memory secret map.
 type store struct {
+	// accessKeyID is the only access key id the API accepts.
+	accessKeyID string
+
 	mu      sync.Mutex
 	secrets map[string]secret
 	version int
@@ -58,8 +65,25 @@ type secret struct {
 	changed time.Time
 }
 
-func newStore(now func() time.Time) *store {
-	return &store{secrets: map[string]secret{}, now: now}
+func newStore(accessKeyID string, now func() time.Time) *store {
+	return &store{accessKeyID: accessKeyID, secrets: map[string]secret{}, now: now}
+}
+
+// credentialKeyID returns the access key id of a SigV4 Authorization header
+// ("AWS4-HMAC-SHA256 Credential=<id>/<date>/<region>/<service>/aws4_request, ..."),
+// or "" when the header is not SigV4-shaped.
+func credentialKeyID(authz string) string {
+	rest, ok := strings.CutPrefix(authz, "AWS4-HMAC-SHA256 ")
+	if !ok {
+		return ""
+	}
+	for _, part := range strings.Split(rest, ",") {
+		if scope, ok := strings.CutPrefix(strings.TrimSpace(part), "Credential="); ok {
+			id, _, _ := strings.Cut(scope, "/")
+			return id
+		}
+	}
+	return ""
 }
 
 // awsErr writes an AWS JSON 1.1 error: the client maps the __type.
@@ -88,8 +112,13 @@ func (s *store) apiHandler() http.Handler {
 			awsErr(w, http.StatusNotFound, "UnknownOperationException", "POST / only")
 			return
 		}
-		if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
+		id := credentialKeyID(r.Header.Get("Authorization"))
+		if id == "" {
 			awsErr(w, http.StatusBadRequest, "MissingAuthenticationTokenException", "request is not SigV4-signed")
+			return
+		}
+		if s.accessKeyID == "" || id != s.accessKeyID {
+			awsErr(w, http.StatusForbidden, "UnrecognizedClientException", "the access key id is not the one this store accepts")
 			return
 		}
 		action, ok := strings.CutPrefix(r.Header.Get("X-Amz-Target"), "secretsmanager.")
@@ -248,14 +277,15 @@ func main() {
 
 func run() error {
 	certFile, keyFile := os.Getenv("FAKEAWS_CERT"), os.Getenv("FAKEAWS_KEY")
-	if certFile == "" || keyFile == "" {
-		return errors.New("FAKEAWS_CERT and FAKEAWS_KEY are required")
+	accessKeyID := os.Getenv("FAKEAWS_ACCESS_KEY_ID")
+	if certFile == "" || keyFile == "" || accessKeyID == "" {
+		return errors.New("FAKEAWS_CERT, FAKEAWS_KEY and FAKEAWS_ACCESS_KEY_ID are required")
 	}
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return err
 	}
-	s := newStore(time.Now)
+	s := newStore(accessKeyID, time.Now)
 	addr, ctl := env("FAKEAWS_ADDR", ":443"), env("FAKEAWS_CONTROL", "127.0.0.1:8082")
 	api := &http.Server{
 		Addr: addr, Handler: s.apiHandler(), ReadHeaderTimeout: 10 * time.Second,

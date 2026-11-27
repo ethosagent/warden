@@ -385,9 +385,12 @@ func TestPortalSignIn(t *testing.T) {
 	t.Run("alice signs in at /portal with a portal session", func(t *testing.T) {
 		alice = portalLoginAs(t, portalUser)
 		leaks.add(alice.cookie, alice.csrf)
-		leaks.add(alice.trace.codes...)
+		leaks.add(alice.trace.secrets()...)
 		if len(alice.trace.codes) == 0 {
 			t.Errorf("the login never passed an authorization code to /portal/callback")
+		}
+		if len(alice.trace.flowParams) != 2 {
+			t.Errorf("the /portal/login redirect carried %d of state and nonce, want both", len(alice.trace.flowParams))
 		}
 		if !strings.HasPrefix(alice.trace.LoginRedirect, dexURL+"/") {
 			t.Errorf("/portal/login redirected to %q, want Dex's public issuer %s", alice.trace.LoginRedirect, dexURL)
@@ -511,7 +514,7 @@ func TestPortalSignIn(t *testing.T) {
 	t.Run("a second sign-in replaces the stored token", func(t *testing.T) {
 		again := portalLoginAs(t, portalUser)
 		leaks.add(again.cookie, again.csrf)
-		leaks.add(again.trace.codes...)
+		leaks.add(again.trace.secrets()...)
 		tok, ok := storedSecret(t, backendName)
 		if !ok || tok == "" {
 			t.Fatalf("the stored IdP link secret is missing after the second login")

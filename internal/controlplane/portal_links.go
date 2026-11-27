@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -87,7 +88,8 @@ func (p *portalService) linkView(ctx context.Context, iss, sub string) portalLin
 	case errors.Is(err, portal.ErrLinkNotFound):
 		return portalLinkView{Status: portal.LinkMissing}
 	case err != nil:
-		p.logger.Warn("portal: idp link read failed", "error", err)
+		// Only the error's type: a store error must not reach the log verbatim.
+		p.logger.Warn("portal: idp link read failed", "error_type", fmt.Sprintf("%T", err))
 		return portalLinkView{Status: portal.LinkUnknown}
 	}
 	return portalLinkView{Status: portal.LinkLinked, Generation: l.Generation, RelinkDueAt: l.RelinkDueAt.UTC().Format(time.RFC3339)}

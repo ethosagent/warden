@@ -98,6 +98,10 @@ services:
         aliases:
           - secretsmanager.us-east-1.amazonaws.com
     environment:
+      # The only access key id fake-aws accepts: the CP's (AWS_ACCESS_KEY_ID on
+      # control-plane above). No worker holds it, so no worker can reach
+      # consent.store even on cp-net.
+      - FAKEAWS_ACCESS_KEY_ID=warden-e2e-fake-access-key-id
       - FAKEAWS_CERT=/etc/fakeaws/fakeaws-server.crt
       - FAKEAWS_KEY=/etc/fakeaws/fakeaws-server.key
     volumes:
