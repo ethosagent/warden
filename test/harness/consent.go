@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/test/fakes"
 )
 
 // The consent portal sign-in (W-P3-CSIG-02): the control plane boots with a
@@ -29,7 +31,9 @@ const (
 // consent.oidc.issuer must equal identity.issuer. The portal's redirect URL is
 // the control plane's https origin + /portal/callback, so its cookies are the
 // __Host- ones. The IdP link is on (the default): the issuer fake must return a
-// refresh token (h.Issuer().SetRefreshToken) for a login to succeed.
+// refresh token (h.Issuer().SetRefreshToken) for a login to succeed, and
+// consent.store is an aws backend with the default warden-cp/ prefix over an
+// in-memory account (h.UserStoreAWS), so the link is persisted (W-P3-CSIG-03).
 func WithConsent() Option {
 	return func(h *H) {
 		h.wantIssuer = true
@@ -47,6 +51,7 @@ func (h *H) prepareConsent() {
 	if !h.wantConsent {
 		return
 	}
+	h.userStoreAWS = fakes.NewFakeAWSSecretsClient()
 	h.tb.Setenv(portalSecretEnv, portalSecretValue)
 	h.issuer.RegisterClient(PortalClientID, portalSecretValue)
 }
@@ -65,7 +70,33 @@ consent:
     clientID: %[2]s
     clientSecretEnv: %[3]s
     redirectURL: %[4]s
-`, h.issuer.Issuer(), PortalClientID, portalSecretEnv, h.ConsoleURL()+"/portal/callback")
+  store:
+    backend: aws
+    aws:
+      region: %[5]s
+`, h.issuer.Issuer(), PortalClientID, portalSecretEnv, h.ConsoleURL()+"/portal/callback", userStoreRegion)
+}
+
+// userStoreRegion is consent.store.aws.region; the fake account ignores it.
+const userStoreRegion = "us-east-1"
+
+// applyConsent hands the control plane the consent.store account, as the CP's
+// role scoped to the consent.store prefix sees it.
+func (h *H) applyConsent(p *controlplane.Params) {
+	if !h.wantConsent || h.userStoreAWS == nil {
+		return
+	}
+	p.UserStoreAWSClient = h.userStoreAWS.View(config.DefaultConsentStoreNamePrefix)
+}
+
+// UserStoreAWS is the AWS account behind the control plane's consent.store,
+// unscoped (it sees every name), for assertions on what was written where.
+func (h *H) UserStoreAWS() *fakes.FakeAWSSecretsClient {
+	h.tb.Helper()
+	if !h.wantConsent {
+		h.tb.Fatal("harness: UserStoreAWS needs the WithConsent option")
+	}
+	return h.userStoreAWS
 }
 
 // PortalSession is one row of the control plane's portal_sessions table.

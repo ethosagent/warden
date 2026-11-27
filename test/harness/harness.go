@@ -186,6 +186,9 @@ type H struct {
 	// wantConsent (WithConsent) adds the CP-local consent block (the portal
 	// sign-in) on top of the console.
 	wantConsent bool
+	// userStoreAWS is the AWS account behind consent.store (WithConsent): the
+	// CP-only user credential store the IdP link writes to.
+	userStoreAWS *fakes.FakeAWSSecretsClient
 	// versionedPolicy (WithVersionedPolicyStore) boots the control plane with
 	// --policy-store=versioned and a state dir.
 	versionedPolicy bool
@@ -866,6 +869,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyCPAdmin(&ip.cp.params)
 	h.applyBackup(&ip.cp.params)
 	h.applyKeys(&ip.cp.params)
+	h.applyConsent(&ip.cp.params)
 	h.applyBundles(&ip.cp.params)
 	h.applyAPIKeys(&ip.cp.params)
 	h.applyStrict(&ip.cp.params)
