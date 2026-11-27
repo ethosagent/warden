@@ -238,7 +238,12 @@ type Grant struct {
 	// GrantID is a fresh random id each BeginGrant; the TokenRecord in the
 	// consent store carries the same id, so a stale writer can tell it lost.
 	GrantID string
-	State   GrantState
+	// PrevGrantID is the active grant id that the current connecting attempt
+	// replaced (a reconnect over a working grant), or "". ActivateGrant and
+	// RevokeGrant clear it. The reconciler (W-P3-BRKR-04) uses it to restore
+	// the earlier grant when a reconnect never completes.
+	PrevGrantID string
+	State       GrantState
 	// Scopes is the canonical set the provider granted (set by ActivateGrant).
 	Scopes  []string
 	Account Account
@@ -297,6 +302,9 @@ type GrantStore interface {
 
 	// BeginGrant upserts the (UserKey, Provider) row as connecting with a new
 	// GrantID, keeping its earlier scopes and account until ActivateGrant.
+	// Over an active row it records the replaced id in PrevGrantID; over a
+	// connecting row it keeps the PrevGrantID already recorded; over a
+	// reconsent_required or revoked row PrevGrantID is "".
 	BeginGrant(ctx context.Context, ref GrantRef) (Grant, error)
 	// ActivateGrant sets the connecting grant with that id active with the
 	// granted scopes and account. ErrGrantState when the row with that id is
@@ -310,10 +318,14 @@ type GrantStore interface {
 	// succeeds. ErrGrantState when the row moved on; ErrNotFound when there is
 	// no row.
 	MarkReconsentRequired(ctx context.Context, userKey, provider, grantID string) (Grant, error)
-	// RevokeGrant marks the (userKey, provider) grant revoked. It is
+	// RevokeGrant marks the (userKey, provider) grant revoked and clears
+	// PrevGrantID. With a non-empty grantID it is a compare-and-set: the row
+	// must still carry that id (else ErrGrantState), so a reconciler working
+	// from an old Sweep cannot revoke a newer grant after a reconnect; "" revokes
+	// whatever grant the row holds (portal revoke, offboarding). It is
 	// idempotent: revoking a revoked grant succeeds and keeps the first
 	// RevokedAt. ErrNotFound when there is no row.
-	RevokeGrant(ctx context.Context, userKey, provider string) (Grant, error)
+	RevokeGrant(ctx context.Context, userKey, provider, grantID string) (Grant, error)
 	// GetGrant returns the (userKey, provider) grant in any state.
 	GetGrant(ctx context.Context, userKey, provider string) (Grant, error)
 	// ListGrants returns the user's grants ordered by provider; revoked ones

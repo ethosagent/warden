@@ -36,12 +36,12 @@ const migration0001 = `CREATE TABLE pending_authorizations (
   mcp_tool       TEXT    NULL,
   status         TEXT    NOT NULL CHECK (status IN ('pending','granted','denied','expired')),
   reason         TEXT    NULL,
-  created_at     INTEGER NOT NULL,
-  expires_at     INTEGER NOT NULL,
-  completed_at   INTEGER NULL
+  created_at     INTEGER NOT NULL, -- Unix epoch milliseconds (UTC)
+  expires_at     INTEGER NOT NULL, -- Unix epoch milliseconds (UTC)
+  completed_at   INTEGER NULL      -- Unix epoch milliseconds (UTC); NULL while open
 );
 CREATE INDEX pending_authorizations_status_expires ON pending_authorizations (status, expires_at);
-CREATE INDEX pending_authorizations_user_key ON pending_authorizations (user_key);`
+CREATE INDEX pending_authorizations_user_open ON pending_authorizations (user_key, status, expires_at);`
 
 // migration0002 holds one browser attempt, consumed once with DELETE ...
 // RETURNING. state_hash is the SHA-256 of the OAuth state; verifier is the
@@ -57,29 +57,33 @@ const migration0002 = `CREATE TABLE connect_attempts (
   scopes_json  TEXT    NOT NULL,
   verifier     TEXT    NOT NULL,
   browser_hash TEXT    NOT NULL,
-  created_at   INTEGER NOT NULL,
-  expires_at   INTEGER NOT NULL
+  created_at   INTEGER NOT NULL, -- Unix epoch milliseconds (UTC)
+  expires_at   INTEGER NOT NULL  -- Unix epoch milliseconds (UTC)
 );
 CREATE INDEX connect_attempts_user_key ON connect_attempts (user_key, expires_at);
 CREATE INDEX connect_attempts_expires ON connect_attempts (expires_at);`
 
 // migration0003 is the grant metadata: one row per (user_key, provider). The
 // token itself lives in consent.store; no column here can hold it. The name
-// leaves "grants" to the P4 delegation grants.
+// leaves "grants" to the P4 delegation grants. prev_grant_id is set when a
+// reconnect replaces an active grant, so the reconciler (W-P3-BRKR-04) can
+// restore that grant, whose token may still be in consent.store, instead of
+// deleting a working token when the reconnect never completes.
 const migration0003 = `CREATE TABLE oauth_grants (
   user_key               TEXT    NOT NULL,
   iss                    TEXT    NOT NULL,
   sub                    TEXT    NOT NULL,
   provider               TEXT    NOT NULL,
   grant_id               TEXT    NOT NULL UNIQUE,
+  prev_grant_id          TEXT    NULL, -- the active grant_id a reconnect replaced, until ActivateGrant
   state                  TEXT    NOT NULL CHECK (state IN ('connecting','active','reconsent_required','revoked')),
   scopes_json            TEXT    NOT NULL,
   provider_account_id    TEXT    NULL,
   provider_account_login TEXT    NULL,
-  granted_at             INTEGER NOT NULL,
-  updated_at             INTEGER NOT NULL,
-  last_used_at           INTEGER NULL,
-  revoked_at             INTEGER NULL,
+  granted_at             INTEGER NOT NULL, -- Unix epoch milliseconds (UTC)
+  updated_at             INTEGER NOT NULL, -- Unix epoch milliseconds (UTC)
+  last_used_at           INTEGER NULL,     -- Unix epoch milliseconds (UTC)
+  revoked_at             INTEGER NULL,     -- Unix epoch milliseconds (UTC)
   UNIQUE (user_key, provider)
 );
 CREATE INDEX oauth_grants_state_updated ON oauth_grants (state, updated_at);`

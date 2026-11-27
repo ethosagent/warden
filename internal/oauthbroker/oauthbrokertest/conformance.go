@@ -54,15 +54,19 @@ func Run(t *testing.T, newStore Factory) {
 		{"SubscribeTerminalOrUnknown", subscribeTerminalOrUnknown, oauthbroker.Limits{}},
 		{"SubscribeCancel", subscribeCancel, oauthbroker.Limits{}},
 		{"PendingLimitPerUser", pendingLimit, oauthbroker.Limits{}},
+		{"PendingLimitConcurrent", pendingLimitConcurrent, oauthbroker.Limits{}},
 		{"AttemptConsumedOnce", attemptConsumedOnce, oauthbroker.Limits{}},
 		{"AttemptConsumeConcurrentOneWins", attemptConsumeConcurrent, oauthbroker.Limits{}},
 		{"AttemptExpired", attemptExpired, oauthbroker.Limits{}},
 		{"AttemptDuplicateAndValidation", attemptDuplicate, oauthbroker.Limits{}},
 		{"AttemptLimitPerUser", attemptLimitPerUser, oauthbroker.Limits{}},
+		{"AttemptLimitConcurrent", attemptLimitConcurrent, oauthbroker.Limits{}},
 		{"AttemptLimitTotal", attemptLimitTotal, oauthbroker.Limits{MaxLiveAttempts: totalCap}},
 		{"GrantReconnectKeepsOneRow", grantReconnect, oauthbroker.Limits{}},
 		{"GrantActivateCompareAndSet", grantActivateCAS, oauthbroker.Limits{}},
 		{"GrantRevokeIdempotent", grantRevoke, oauthbroker.Limits{}},
+		{"GrantRevokeCompareAndSet", grantRevokeCAS, oauthbroker.Limits{}},
+		{"GrantPrevGrantID", grantPrevGrantID, oauthbroker.Limits{}},
 		{"GrantReconsentRequired", grantReconsent, oauthbroker.Limits{}},
 		{"GrantListPerUser", grantList, oauthbroker.Limits{}},
 		{"TouchLastUsedThrottled", touchLastUsed, oauthbroker.Limits{}},
@@ -344,6 +348,57 @@ func pendingLimit(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, c
 	mustPending(t, ctx, s, NewPending("alice", "google")) // expired pendings do not count
 }
 
+// concurrentCreates runs n creates at once and returns how many succeeded;
+// every failure must be ErrTooMany.
+func concurrentCreates(t *testing.T, n int, create func(i int) error) int {
+	t.Helper()
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs[i] = create(i)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	ok := 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case !errors.Is(err, oauthbroker.ErrTooMany):
+			t.Fatalf("create err = %v, want nil or ErrTooMany", err)
+		}
+	}
+	return ok
+}
+
+func pendingLimitConcurrent(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, _ *clocktest.Fake) {
+	limit := oauthbroker.MaxOpenPendingsPerUser
+	ok := concurrentCreates(t, limit+5, func(int) error {
+		_, err := s.CreatePending(ctx, NewPending("alice", "google"), ttl)
+		return err
+	})
+	if ok != limit {
+		t.Fatalf("%d of %d concurrent CreatePending succeeded, want exactly %d", ok, limit+5, limit)
+	}
+}
+
+func attemptLimitConcurrent(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, _ *clocktest.Fake) {
+	limit := oauthbroker.MaxOpenAttemptsPerUser
+	ok := concurrentCreates(t, limit+5, func(i int) error {
+		_, err := s.CreateAttempt(ctx, NewAttempt("alice", "google", "", i))
+		return err
+	})
+	if ok != limit {
+		t.Fatalf("%d of %d concurrent CreateAttempt succeeded, want exactly %d", ok, limit+5, limit)
+	}
+}
+
 func attemptConsumedOnce(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, _ *clocktest.Fake) {
 	in := NewAttempt("alice", "google", "pend-1", 1)
 	created, err := s.CreateAttempt(ctx, in)
@@ -554,7 +609,7 @@ func grantActivateCAS(t *testing.T, ctx context.Context, s oauthbroker.GrantStor
 }
 
 func grantRevoke(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, clk *clocktest.Fake) {
-	_, err := s.RevokeGrant(ctx, UserKey("alice"), "google")
+	_, err := s.RevokeGrant(ctx, UserKey("alice"), "google", "")
 	wantErr(t, "revoke with no row", err, oauthbroker.ErrNotFound)
 	g, err := s.BeginGrant(ctx, ref("alice", "google"))
 	if err != nil {
@@ -564,7 +619,7 @@ func grantRevoke(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, cl
 		t.Fatalf("ActivateGrant: %v", err)
 	}
 	clk.Advance(time.Second)
-	r1, err := s.RevokeGrant(ctx, UserKey("alice"), "google")
+	r1, err := s.RevokeGrant(ctx, UserKey("alice"), "google", "")
 	if err != nil {
 		t.Fatalf("RevokeGrant: %v", err)
 	}
@@ -572,7 +627,7 @@ func grantRevoke(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, cl
 		t.Fatalf("revoked grant = %+v", r1)
 	}
 	clk.Advance(time.Second)
-	r2, err := s.RevokeGrant(ctx, UserKey("alice"), "google")
+	r2, err := s.RevokeGrant(ctx, UserKey("alice"), "google", "")
 	if err != nil {
 		t.Fatalf("second RevokeGrant: %v", err)
 	}
@@ -594,11 +649,118 @@ func grantRevoke(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, cl
 		t.Fatalf("reconnect after revoke = %+v, want connecting with revoked_at cleared", g3)
 	}
 	// A revoke while connecting also counts (the reconciler and offboarding).
-	if _, err := s.RevokeGrant(ctx, UserKey("alice"), "google"); err != nil {
+	if _, err := s.RevokeGrant(ctx, UserKey("alice"), "google", ""); err != nil {
 		t.Fatalf("RevokeGrant(connecting): %v", err)
 	}
 	_, err = s.ActivateGrant(ctx, g3.GrantID, []string{"email"}, oauthbroker.Account{})
 	wantErr(t, "activate after a revoke during connect", err, oauthbroker.ErrGrantState)
+}
+
+func grantRevokeCAS(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, _ *clocktest.Fake) {
+	uk := UserKey("alice")
+	_, err := s.RevokeGrant(ctx, uk, "google", "any-id")
+	wantErr(t, "CAS revoke with no row", err, oauthbroker.ErrNotFound)
+	old, err := s.BeginGrant(ctx, ref("alice", "google"))
+	if err != nil {
+		t.Fatalf("BeginGrant: %v", err)
+	}
+	if _, err := s.ActivateGrant(ctx, old.GrantID, []string{"email"}, oauthbroker.Account{}); err != nil {
+		t.Fatalf("ActivateGrant: %v", err)
+	}
+	// A reconnect replaces the grant id; a reconciler holding the old id loses.
+	cur, err := s.BeginGrant(ctx, ref("alice", "google"))
+	if err != nil {
+		t.Fatalf("BeginGrant (reconnect): %v", err)
+	}
+	_, err = s.RevokeGrant(ctx, uk, "google", old.GrantID)
+	wantErr(t, "revoke with a replaced grant id", err, oauthbroker.ErrGrantState)
+	if got, _ := s.GetGrant(ctx, uk, "google"); got.State != oauthbroker.GrantConnecting || got.GrantID != cur.GrantID {
+		t.Fatalf("a mismatched revoke changed the row: %+v", got)
+	}
+	// The matching id revokes, and repeating it is idempotent.
+	r, err := s.RevokeGrant(ctx, uk, "google", cur.GrantID)
+	if err != nil || r.State != oauthbroker.GrantRevoked || r.GrantID != cur.GrantID {
+		t.Fatalf("revoke with the current id = %+v, %v", r, err)
+	}
+	if _, err := s.RevokeGrant(ctx, uk, "google", cur.GrantID); err != nil {
+		t.Fatalf("repeat CAS revoke: %v", err)
+	}
+	_, err = s.RevokeGrant(ctx, uk, "google", old.GrantID)
+	wantErr(t, "revoke a revoked grant with another id", err, oauthbroker.ErrGrantState)
+	// "" revokes whatever grant the row holds.
+	next, err := s.BeginGrant(ctx, ref("alice", "google"))
+	if err != nil {
+		t.Fatalf("BeginGrant after revoke: %v", err)
+	}
+	r, err = s.RevokeGrant(ctx, uk, "google", "")
+	if err != nil || r.State != oauthbroker.GrantRevoked || r.GrantID != next.GrantID {
+		t.Fatalf("revoke with \"\" = %+v, %v", r, err)
+	}
+}
+
+func grantPrevGrantID(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, _ *clocktest.Fake) {
+	uk := UserKey("alice")
+	first, err := s.BeginGrant(ctx, ref("alice", "google"))
+	if err != nil {
+		t.Fatalf("BeginGrant: %v", err)
+	}
+	if first.PrevGrantID != "" {
+		t.Fatalf("a new row has prev_grant_id %q", first.PrevGrantID)
+	}
+	// Reconnect over connecting: nothing working was replaced.
+	again, err := s.BeginGrant(ctx, ref("alice", "google"))
+	if err != nil || again.PrevGrantID != "" {
+		t.Fatalf("reconnect over connecting = %+v, %v; want empty prev_grant_id", again, err)
+	}
+	active, err := s.ActivateGrant(ctx, again.GrantID, []string{"email"}, oauthbroker.Account{})
+	if err != nil || active.PrevGrantID != "" {
+		t.Fatalf("ActivateGrant = %+v, %v", active, err)
+	}
+	// Reconnect over active records the replaced id ...
+	re, err := s.BeginGrant(ctx, ref("alice", "google"))
+	if err != nil || re.PrevGrantID != active.GrantID {
+		t.Fatalf("reconnect over active = %+v, %v; want prev_grant_id %s", re, err, active.GrantID)
+	}
+	if got, _ := s.GetGrant(ctx, uk, "google"); got.PrevGrantID != active.GrantID {
+		t.Fatalf("GetGrant prev_grant_id = %q", got.PrevGrantID)
+	}
+	// ... and a second Begin before the callback keeps it (the replaced
+	// working grant is still the one to restore).
+	re2, err := s.BeginGrant(ctx, ref("alice", "google"))
+	if err != nil || re2.PrevGrantID != active.GrantID {
+		t.Fatalf("second reconnect = %+v, %v; want prev_grant_id kept", re2, err)
+	}
+	// Activation clears it.
+	done, err := s.ActivateGrant(ctx, re2.GrantID, []string{"email"}, oauthbroker.Account{})
+	if err != nil || done.PrevGrantID != "" {
+		t.Fatalf("ActivateGrant after reconnect = %+v, %v; want prev_grant_id cleared", done, err)
+	}
+	// Reconnect over reconsent_required or revoked: nothing working to restore.
+	if _, err := s.MarkReconsentRequired(ctx, uk, "google", done.GrantID); err != nil {
+		t.Fatalf("MarkReconsentRequired: %v", err)
+	}
+	rc, err := s.BeginGrant(ctx, ref("alice", "google"))
+	if err != nil || rc.PrevGrantID != "" {
+		t.Fatalf("reconnect over reconsent_required = %+v, %v", rc, err)
+	}
+	rb, err := s.BeginGrant(ctx, ref("alice", "github"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActivateGrant(ctx, rb.GrantID, nil, oauthbroker.Account{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.BeginGrant(ctx, ref("alice", "github")); err != nil {
+		t.Fatal(err)
+	}
+	rv, err := s.RevokeGrant(ctx, uk, "github", "")
+	if err != nil || rv.PrevGrantID != "" {
+		t.Fatalf("revoke = %+v, %v; want prev_grant_id cleared", rv, err)
+	}
+	after, err := s.BeginGrant(ctx, ref("alice", "github"))
+	if err != nil || after.PrevGrantID != "" {
+		t.Fatalf("reconnect over revoked = %+v, %v", after, err)
+	}
 }
 
 func grantReconsent(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, _ *clocktest.Fake) {
@@ -623,7 +785,7 @@ func grantReconsent(t *testing.T, ctx context.Context, s oauthbroker.GrantStore,
 	if _, err := s.MarkReconsentRequired(ctx, uk, "google", g.GrantID); err != nil {
 		t.Fatalf("second MarkReconsentRequired: %v", err)
 	}
-	if _, err := s.RevokeGrant(ctx, uk, "google"); err != nil {
+	if _, err := s.RevokeGrant(ctx, uk, "google", ""); err != nil {
 		t.Fatalf("RevokeGrant: %v", err)
 	}
 	_, err = s.MarkReconsentRequired(ctx, uk, "google", g.GrantID)
@@ -639,7 +801,7 @@ func grantList(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, _ *c
 	if _, err := s.BeginGrant(ctx, ref("bob", "google")); err != nil {
 		t.Fatalf("BeginGrant(bob): %v", err)
 	}
-	if _, err := s.RevokeGrant(ctx, UserKey("alice"), "github"); err != nil {
+	if _, err := s.RevokeGrant(ctx, UserKey("alice"), "github", ""); err != nil {
 		t.Fatalf("RevokeGrant: %v", err)
 	}
 	names := func(gs []oauthbroker.Grant) []string {

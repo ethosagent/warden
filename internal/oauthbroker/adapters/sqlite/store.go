@@ -333,7 +333,7 @@ func (s *Store) ConsumeAttempt(ctx context.Context, stateHash string) (oauthbrok
 
 // --- oauth_grants ---
 
-const grantCols = `user_key, iss, sub, provider, grant_id, state, scopes_json, provider_account_id,
+const grantCols = `user_key, iss, sub, provider, grant_id, prev_grant_id, state, scopes_json, provider_account_id,
   provider_account_login, granted_at, updated_at, last_used_at, revoked_at`
 
 func scanGrant(r rowScanner) (oauthbroker.Grant, error) {
@@ -341,10 +341,11 @@ func scanGrant(r rowScanner) (oauthbroker.Grant, error) {
 		g                 oauthbroker.Grant
 		state, scopes     string
 		accID, accLogin   sql.NullString
+		prev              sql.NullString
 		granted, updated  int64
 		lastUsed, revoked sql.NullInt64
 	)
-	if err := r.Scan(&g.UserKey, &g.Iss, &g.Sub, &g.Provider, &g.GrantID, &state, &scopes,
+	if err := r.Scan(&g.UserKey, &g.Iss, &g.Sub, &g.Provider, &g.GrantID, &prev, &state, &scopes,
 		&accID, &accLogin, &granted, &updated, &lastUsed, &revoked); err != nil {
 		return oauthbroker.Grant{}, err
 	}
@@ -352,7 +353,7 @@ func scanGrant(r rowScanner) (oauthbroker.Grant, error) {
 	if err != nil {
 		return oauthbroker.Grant{}, err
 	}
-	g.State, g.Scopes = oauthbroker.GrantState(state), sc
+	g.State, g.Scopes, g.PrevGrantID = oauthbroker.GrantState(state), sc, prev.String
 	g.Account = oauthbroker.Account{ID: accID.String, Login: accLogin.String}
 	g.GrantedAt, g.UpdatedAt = time.UnixMilli(granted).UTC(), time.UnixMilli(updated).UTC()
 	g.LastUsedAt, g.RevokedAt = fromMS(lastUsed), fromMS(revoked)
@@ -388,6 +389,10 @@ func (s *Store) BeginGrant(ctx context.Context, ref oauthbroker.GrantRef) (oauth
 VALUES (?, ?, ?, ?, ?, 'connecting', '[]', ?, ?)
 ON CONFLICT (user_key, provider) DO UPDATE SET
   iss = excluded.iss, sub = excluded.sub, grant_id = excluded.grant_id,
+  prev_grant_id = CASE oauth_grants.state
+    WHEN 'active' THEN oauth_grants.grant_id
+    WHEN 'connecting' THEN oauth_grants.prev_grant_id
+    ELSE NULL END,
   state = 'connecting', updated_at = excluded.updated_at, revoked_at = NULL
 RETURNING `+grantCols,
 			ref.UserKey, ref.Iss, ref.Sub, ref.Provider, id, now, now)
@@ -407,7 +412,7 @@ func (s *Store) ActivateGrant(ctx context.Context, grantID string, scopes []stri
 	}
 	now := ms(s.clk.Now())
 	g, err := s.grantRow(ctx, "activate grant", `UPDATE oauth_grants SET
-  state = 'active', scopes_json = ?, provider_account_id = ?, provider_account_login = ?,
+  state = 'active', prev_grant_id = NULL, scopes_json = ?, provider_account_id = ?, provider_account_login = ?,
   granted_at = ?, updated_at = ?
 WHERE grant_id = ? AND state = 'connecting'
 RETURNING `+grantCols,
@@ -441,17 +446,25 @@ RETURNING `+grantCols,
 }
 
 // RevokeGrant implements oauthbroker.GrantStore. An already revoked grant is
-// returned unchanged.
-func (s *Store) RevokeGrant(ctx context.Context, userKey, provider string) (oauthbroker.Grant, error) {
+// returned unchanged; a non-empty grantID must match the row's.
+func (s *Store) RevokeGrant(ctx context.Context, userKey, provider, grantID string) (oauthbroker.Grant, error) {
 	now := ms(s.clk.Now())
-	g, err := s.grantRow(ctx, "revoke grant", `UPDATE oauth_grants SET state = 'revoked', revoked_at = ?, updated_at = ?
-WHERE user_key = ? AND provider = ? AND state <> 'revoked'
+	g, err := s.grantRow(ctx, "revoke grant", `UPDATE oauth_grants
+SET state = 'revoked', prev_grant_id = NULL, revoked_at = ?, updated_at = ?
+WHERE user_key = ? AND provider = ? AND state <> 'revoked' AND (? = '' OR grant_id = ?)
 RETURNING `+grantCols,
-		now, now, userKey, provider)
+		now, now, userKey, provider, grantID, grantID)
 	if !errors.Is(err, sql.ErrNoRows) {
 		return g, err
 	}
-	return s.GetGrant(ctx, userKey, provider)
+	cur, err := s.GetGrant(ctx, userKey, provider)
+	if err != nil {
+		return oauthbroker.Grant{}, err
+	}
+	if grantID != "" && cur.GrantID != grantID {
+		return oauthbroker.Grant{}, oauthbroker.ErrGrantState
+	}
+	return cur, nil
 }
 
 // GetGrant implements oauthbroker.GrantStore.

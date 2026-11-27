@@ -32,8 +32,9 @@ func TestGrantStoreConformance(t *testing.T) {
 	})
 }
 
-// TestGrantStoreConformanceSchema pins the three tables' columns: exactly the
-// designed set, and none named for a token, secret or value.
+// TestGrantStoreConformanceSchema pins the three tables' columns (exactly the
+// designed set, none named for a token, secret or value) and the index that
+// serves the open-pending cap.
 func TestGrantStoreConformanceSchema(t *testing.T) {
 	db := openDB(t)
 	want := map[string][]string{
@@ -41,7 +42,7 @@ func TestGrantStoreConformanceSchema(t *testing.T) {
 			"request_method", "request_host", "request_path", "mcp_tool", "status", "reason", "created_at", "expires_at", "completed_at"},
 		"connect_attempts": {"state_hash", "pending_id", "iss", "sub", "user_key", "provider", "scopes_json", "verifier",
 			"browser_hash", "created_at", "expires_at"},
-		"oauth_grants": {"user_key", "iss", "sub", "provider", "grant_id", "state", "scopes_json", "provider_account_id",
+		"oauth_grants": {"user_key", "iss", "sub", "provider", "grant_id", "prev_grant_id", "state", "scopes_json", "provider_account_id",
 			"provider_account_login", "granted_at", "updated_at", "last_used_at", "revoked_at"},
 	}
 	for table, cols := range want {
@@ -67,6 +68,22 @@ func TestGrantStoreConformanceSchema(t *testing.T) {
 		if !slices.Equal(got, cols) {
 			t.Errorf("%s columns = %v\nwant %v", table, got, cols)
 		}
+	}
+	var idx []string
+	rows, err := db.SQL().Query(`SELECT name FROM pragma_index_info('pending_authorizations_user_open') ORDER BY seqno`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		idx = append(idx, c)
+	}
+	_ = rows.Close()
+	if want := []string{"user_key", "status", "expires_at"}; !slices.Equal(idx, want) {
+		t.Errorf("open-pending cap index = %v, want %v", idx, want)
 	}
 }
 
@@ -194,7 +211,7 @@ func TestStoreErrorsWrapped(t *testing.T) {
 	_, errs["BeginGrant"] = s.BeginGrant(ctx, oauthbroker.GrantRef{UserKey: uk, Iss: "i", Sub: "s", Provider: "p"})
 	_, errs["ActivateGrant"] = s.ActivateGrant(ctx, "g", nil, oauthbroker.Account{})
 	_, errs["MarkReconsentRequired"] = s.MarkReconsentRequired(ctx, uk, "p", "g")
-	_, errs["RevokeGrant"] = s.RevokeGrant(ctx, uk, "p")
+	_, errs["RevokeGrant"] = s.RevokeGrant(ctx, uk, "p", "")
 	_, errs["GetGrant"] = s.GetGrant(ctx, uk, "p")
 	_, errs["ListGrants"] = s.ListGrants(ctx, uk, true)
 	errs["TouchLastUsed"] = s.TouchLastUsed(ctx, uk, "p", time.Now())
