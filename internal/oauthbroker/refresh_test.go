@@ -201,6 +201,7 @@ func TestRefreshErrors(t *testing.T) {
 		{"200 hostile error code", 200, `{"error":"has space ` + tClientSc + `"}`, ErrRefreshPermanent, nil, RefreshPermanent},
 		{"200 no access token", 200, `{"token_type":"Bearer"}`, ErrRefreshPermanent, nil, RefreshPermanent},
 		{"200 not json", 200, `SENSITIVE-DESCRIPTION`, ErrRefreshPermanent, nil, RefreshPermanent},
+		{"github 200 incorrect_client_credentials", 200, `{"error":"incorrect_client_credentials","error_description":"SENSITIVE-DESCRIPTION"}`, ErrRefreshInvalidClient, []error{ErrRefreshInvalidGrant}, RefreshInvalidClient},
 		{"redirect not followed", 302, ``, ErrRefreshPermanent, nil, RefreshPermanent},
 	}
 	for _, tc := range cases {
@@ -273,10 +274,10 @@ func TestRefreshOversizedResponse(t *testing.T) {
 }
 
 func TestRefreshNeverExpiringAccessToken(t *testing.T) {
-	// A response with no expires_in (GitHub token without expiry) stores expiry 0.
+	// A refreshable record whose response has no expires_in gets the short default, never "no expiry".
 	f := newRefreshFixture(t, "github", jsonReply(200, `{"access_token":"`+tNewAcc+`"}`))
 	out, err := Refresh(t.Context(), f.provider(t), storedRecord(), NewSecret(tClientSc))
-	if err != nil || out.Expiry != 0 || out.RefreshToken != tRefresh {
+	if err != nil || out.Expiry != refreshNow.Unix()+defaultAccessLifetime || out.RefreshToken != tRefresh {
 		t.Fatalf("%v %v", out, err)
 	}
 }
@@ -300,7 +301,7 @@ func TestRefreshRequiresConfiguration(t *testing.T) {
 func TestRefreshRefusesPlainHTTPNonLoopback(t *testing.T) {
 	for raw, want := range map[string]bool{
 		"https://oauth2.googleapis.com/token": true, "http://127.0.0.1:9/t": true, "http://localhost/t": true,
-		"http://example.com/t": false, "ftp://x/t": false, "https://u:p@x/t": false, "": false,
+		"http://example.com/t": false, "http://127.evil.com/t": false, "http://[::1]:9/t": true, "http://LOCALHOST/t": true, "ftp://x/t": false, "https://u:p@x/t": false, "": false,
 	} {
 		if refreshURLAllowed(raw) != want {
 			t.Errorf("refreshURLAllowed(%q) != %v", raw, want)
@@ -351,7 +352,107 @@ func TestRefreshNoSecretInLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	lg.Info("x", "rec", out, "p", p, "err", err)
-	_ = fmt.Sprintf("%v %+v %#v %v", out, out, out, p)
+	fmt.Fprintf(&buf, "%v %+v %#v %v", out, out, out, p)
 	assertClean(t, nil, &buf)
 	assertClean(t, nil, f.logs)
+}
+
+func TestRefreshLifetimeClamps(t *testing.T) {
+	year := int64(maxLifetime)
+	for _, tc := range []struct {
+		name, body string
+		wantExp    int64
+		wantRefExp int64
+		wantErr    bool
+	}{
+		{"1e19", `{"access_token":"x","expires_in":1e19,"refresh_token":"r","refresh_token_expires_in":1e19}`, refreshNow.Unix() + year, refreshNow.Unix() + year, false},
+		{"huge int", `{"access_token":"x","expires_in":99999999999999999999}`, refreshNow.Unix() + year, 12345, false},
+		{"zero", `{"access_token":"x","expires_in":0}`, refreshNow.Unix() + defaultAccessLifetime, 12345, false},
+		{"negative", `{"access_token":"x","expires_in":-5}`, 0, 0, true},
+		{"negative refresh", `{"access_token":"x","expires_in":5,"refresh_token_expires_in":-1}`, 0, 0, true},
+		{"nan string", `{"access_token":"x","expires_in":"NaN"}`, 0, 0, true},
+		{"inf string", `{"access_token":"x","expires_in":"Inf"}`, 0, 0, true},
+		{"quoted ok", `{"access_token":"x","expires_in":"90"}`, refreshNow.Unix() + 90, 12345, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRefreshFixture(t, "google", jsonReply(200, tc.body))
+			out, err := Refresh(t.Context(), f.provider(t), storedRecord(), NewSecret(tClientSc))
+			if tc.wantErr {
+				if !errors.Is(err, ErrRefreshPermanent) {
+					t.Fatalf("err = %v", err)
+				}
+				return
+			}
+			if err != nil || out.Expiry != tc.wantExp || out.RefreshExpiry != tc.wantRefExp {
+				t.Fatalf("expiry %d refresh_expiry %d err %v", out.Expiry, out.RefreshExpiry, err)
+			}
+		})
+	}
+}
+
+func TestRefreshErrorCodesAreClosedSet(t *testing.T) {
+	for _, hostile := range []string{"ghu_" + strings.Repeat("a", 36), "GOCSPX-" + strings.Repeat("b", 28), tClientSc, tRefresh} {
+		f := newRefreshFixture(t, "google", jsonReply(400, `{"error":"`+hostile+`"}`))
+		_, err := Refresh(t.Context(), f.provider(t), storedRecord(), NewSecret(tClientSc))
+		if !errors.Is(err, ErrRefreshPermanent) || !strings.HasSuffix(err.Error(), ": other") {
+			t.Fatalf("err = %v", err)
+		}
+		if strings.Contains(err.Error(), hostile) || strings.Contains(f.logs.String(), hostile) {
+			t.Fatalf("token-shaped error code leaked: %v", err)
+		}
+	}
+	for _, c := range []string{"invalid_scope", "slow_down", "temporarily_unavailable"} {
+		if sanitizeOAuthCode(c) != c {
+			t.Errorf("%s must be kept", c)
+		}
+	}
+}
+
+func TestRefreshInvalidClientHintRateLimited(t *testing.T) {
+	f := newRefreshFixture(t, "google", jsonReply(401, `{"error":"invalid_client"}`))
+	p := f.provider(t)
+	for range 3 {
+		_, _ = Refresh(t.Context(), p, storedRecord(), NewSecret(tClientSc))
+	}
+	if n := strings.Count(f.logs.String(), "oauth_refresh_invalid_client"); n != 1 {
+		t.Fatalf("hint logged %d times, want 1", n)
+	}
+	f.reply = jsonReply(200, `{"access_token":"x","expires_in":60}`)
+	if _, err := Refresh(t.Context(), p, storedRecord(), NewSecret(tClientSc)); err != nil {
+		t.Fatal(err)
+	}
+	f.reply = jsonReply(401, `{"error":"invalid_client"}`)
+	_, _ = Refresh(t.Context(), p, storedRecord(), NewSecret(tClientSc))
+	if n := strings.Count(f.logs.String(), "oauth_refresh_invalid_client"); n != 2 {
+		t.Fatalf("hint after a success logged %d times total, want 2", n)
+	}
+}
+
+type blockedPoster struct{ n int }
+
+func (b *blockedPoster) PostForm(context.Context, FormRequest) (int, []byte, error) {
+	b.n++
+	return 0, nil, fmt.Errorf("dial: %w", &BlockedError{Reason: "ssrf_blocked", AddrClass: "private"})
+}
+
+func TestRefreshBlockedDestination(t *testing.T) {
+	var buf bytes.Buffer
+	bp := &blockedPoster{}
+	r, _ := newReg(t, []config.OAuthProviderConfig{{ID: "prov", Type: "generic", ClientID: "cid", ClientSecretEnv: "S",
+		AuthURL: "https://idp.example.com/a", TokenURL: "https://idp.example.com/t"}}, Options{
+		LookupEnv: func(string) (string, bool) { return "s", true }, Now: func() time.Time { return refreshNow },
+		HTTPClient: bp, Logger: slog.New(slog.NewJSONHandler(&buf, nil))})
+	p, _ := r.Get("prov")
+	for range 2 {
+		_, err := Refresh(t.Context(), p, storedRecord(), NewSecret("s"))
+		if !errors.Is(err, ErrRefreshPermanent) || !errors.Is(err, ErrBlockedDestination) || errors.Is(err, ErrRefreshRetryable) {
+			t.Fatalf("err = %v", err)
+		}
+	}
+	if r.RefreshCounters().Count("prov", RefreshBlocked) != 2 {
+		t.Fatal("blocked outcome not counted")
+	}
+	if strings.Count(buf.String(), "oauth_refresh_blocked_destination") != 1 || !strings.Contains(buf.String(), "private") || strings.Contains(buf.String(), "idp.example.com") {
+		t.Fatalf("log = %s", buf.String())
+	}
 }

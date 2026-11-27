@@ -1,15 +1,21 @@
-// Package httpclient is the FormPoster every OAuth broker call to a provider
-// token endpoint uses (refresh today; exchange and revoke share it). It dials
-// through proxy.SafeDialer so a generic provider URL cannot reach a private,
-// link-local or metadata address, ignores the environment proxy, never follows
-// a redirect (it drives an http.Transport directly, so a 302 is returned as
-// is and credentials are never forwarded), is bound by the caller's context,
-// and caps response bodies at MaxBodyBytes+1.
+// Package httpclient is the FormPoster the OAuth broker uses for form POSTs to
+// a provider token endpoint (the refresh_token grant today). It dials through
+// proxy.SafeDialer so a generic provider URL cannot reach a private, link-local
+// or metadata address, ignores the environment proxy, never follows a redirect
+// (it drives an http.Transport directly, so a 302 is returned as is and
+// credentials are never forwarded), is bound by the caller's context plus a
+// hard 10s cap, and caps response bodies at MaxBodyBytes+1.
+//
+// It is not a general provider client: the authorization-code exchange through
+// golang.org/x/oauth2 needs an *http.Client, and GitHub's revoke is a DELETE
+// with a JSON body, so those tickets build their own constructor over the same
+// SafeDialer policy.
 package httpclient
 
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -22,6 +28,9 @@ import (
 
 // DialTimeout bounds connect, TLS handshake and response headers.
 const DialTimeout = 5 * time.Second
+
+// HardTimeout caps one PostForm call whatever the caller's context says.
+const HardTimeout = 10 * time.Second
 
 // MaxBodyBytes is the response cap (the same as oauthbroker.MaxProviderResponseBytes).
 const MaxBodyBytes = oauthbroker.MaxProviderResponseBytes
@@ -57,6 +66,8 @@ func New(allowPrivate []string, resolver proxy.NameResolver) (*Poster, error) {
 
 // PostForm implements oauthbroker.FormPoster.
 func (p *Poster) PostForm(ctx context.Context, r oauthbroker.FormRequest) (int, []byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, HardTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.URL, strings.NewReader(r.Form))
 	if err != nil {
 		return 0, nil, errBadRequest
@@ -68,6 +79,10 @@ func (p *Poster) PostForm(ctx context.Context, r oauthbroker.FormRequest) (int, 
 	}
 	resp, err := p.rt.RoundTrip(req)
 	if err != nil {
+		var ssrf *proxy.SSRFError
+		if errors.As(err, &ssrf) {
+			return 0, nil, &oauthbroker.BlockedError{Reason: ssrf.Reason, AddrClass: ssrf.AddrClass}
+		}
 		return 0, nil, err
 	}
 	defer resp.Body.Close()

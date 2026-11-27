@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -108,6 +109,10 @@ type Provider struct {
 	httpc    FormPoster
 	logger   *slog.Logger
 	counters *RefreshCounters
+
+	// hinted and blockedLogged rate-limit the operator log lines to one per
+	// provider until a refresh succeeds.
+	hinted, blockedLogged atomic.Bool
 }
 
 // RevokeEndpoint returns RevokeURL with {client_id} replaced by the

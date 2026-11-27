@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -45,6 +47,30 @@ var (
 	ErrRefreshUnconfigured = errors.New("oauthbroker: refresh client is not configured")
 )
 
+// ErrBlockedDestination is returned (wrapped in a *BlockedError) by a
+// FormPoster whose SSRF-safe dialer refused the token endpoint's address.
+var ErrBlockedDestination = errors.New("oauthbroker: token endpoint address is blocked")
+
+// BlockedError carries the bounded SSRF refusal classes of a blocked dial. It
+// never holds a host or address.
+type BlockedError struct{ Reason, AddrClass string }
+
+func (e *BlockedError) Error() string {
+	return ErrBlockedDestination.Error() + ": " + e.Reason + "/" + e.AddrClass
+}
+func (e *BlockedError) Is(t error) bool { return t == ErrBlockedDestination }
+
+// refreshBlocked is the Refresh error for a blocked destination; it satisfies
+// errors.Is(err, ErrRefreshPermanent) and ErrBlockedDestination.
+type refreshBlocked struct{}
+
+func (refreshBlocked) Error() string {
+	return "oauthbroker: provider token endpoint is blocked by the SSRF policy"
+}
+func (refreshBlocked) Is(t error) bool {
+	return t == ErrBlockedDestination || t == ErrRefreshPermanent
+}
+
 type refreshInvalidClient struct{}
 
 func (refreshInvalidClient) Error() string { return ErrRefreshInvalidClient.Error() }
@@ -61,7 +87,9 @@ type FormRequest struct {
 	BasicUser, BasicPass string
 }
 
-// FormPoster is the provider HTTP port. Implementations send Accept:
+// FormPoster is the provider HTTP port. Callers must pass a context with a
+// deadline (Refresh applies RefreshTimeout); implementations also cap a call
+// with a hard timeout of their own. Implementations send Accept:
 // application/json, follow no redirects (a 3xx is returned as is), bound the
 // call by ctx, return at most MaxProviderResponseBytes+1 body bytes, and never
 // put credentials in a returned error. Production gets the SSRF-safe
@@ -80,6 +108,7 @@ const (
 	RefreshRetryable     = "retryable"
 	RefreshNotRefresh    = "not_refreshable"
 	RefreshUnconfigured  = "unconfigured"
+	RefreshBlocked       = "blocked"
 )
 
 // RefreshCounters is the in-memory warden_cp_oauth_refresh_total{provider,
@@ -123,7 +152,18 @@ func (c *RefreshCounters) Snapshot() map[string]map[string]uint64 {
 // RefreshCounters returns the registry's refresh counter.
 func (r *Registry) RefreshCounters() *RefreshCounters { return &r.refresh }
 
-// flexInt decodes a JSON number or a numeric string (some providers quote it).
+// Lifetimes are clamped: a provider (or a hostile generic endpoint) cannot
+// pin a token for longer than maxLifetime, and a refreshable record whose
+// response names no access lifetime gets defaultAccessLifetime instead of
+// "never expires".
+const (
+	maxLifetime           = 365 * 24 * 3600
+	defaultAccessLifetime = 3600
+)
+
+// flexInt decodes a JSON number or a numeric string (some providers quote it)
+// into seconds, clamped to maxLifetime. Negative, NaN and infinite values are
+// invalid (the whole response is then malformed).
 type flexInt int64
 
 func (f *flexInt) UnmarshalJSON(b []byte) error {
@@ -131,15 +171,14 @@ func (f *flexInt) UnmarshalJSON(b []byte) error {
 	if s == "" || s == "null" {
 		return nil
 	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		fl, ferr := strconv.ParseFloat(s, 64)
-		if ferr != nil {
-			return errors.New("not a number")
-		}
-		n = int64(fl)
+	fl, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(fl) || math.IsInf(fl, 0) || fl < 0 {
+		return errors.New("invalid lifetime")
 	}
-	*f = flexInt(n)
+	if fl > maxLifetime {
+		fl = maxLifetime
+	}
+	*f = flexInt(fl)
 	return nil
 }
 
@@ -177,6 +216,8 @@ func (p *Provider) countRefresh(err error) {
 		outcome = RefreshOK
 	case errors.Is(err, ErrNotRefreshable):
 		outcome = RefreshNotRefresh
+	case errors.Is(err, ErrBlockedDestination):
+		outcome = RefreshBlocked
 	case errors.Is(err, ErrRefreshInvalidGrant):
 		outcome = RefreshInvalidGrant
 	case errors.Is(err, ErrRefreshInvalidClient):
@@ -189,6 +230,10 @@ func (p *Provider) countRefresh(err error) {
 		outcome = RefreshPermanent
 	}
 	p.counters.inc(p.ID, outcome)
+	if outcome == RefreshOK {
+		p.hinted.Store(false)
+		p.blockedLogged.Store(false)
+	}
 }
 
 func (p *Provider) refresh(ctx context.Context, rec TokenRecord, clientSecret Secret) (TokenRecord, error) {
@@ -221,6 +266,15 @@ func (p *Provider) refresh(ctx context.Context, rec TokenRecord, clientSecret Se
 
 	status, body, err := p.httpc.PostForm(ctx, fr)
 	if err != nil {
+		var be *BlockedError
+		if errors.As(err, &be) {
+			if p.logger != nil && p.blockedLogged.CompareAndSwap(false, true) {
+				p.logger.Error("oauth_refresh_blocked_destination",
+					"provider", p.ID, "reason", be.Reason, "addr_class", be.AddrClass,
+					"hint", "the provider token endpoint resolves to an address the SSRF policy refuses; for a private GitHub Enterprise Server allow its CIDR in the provider client")
+			}
+			return TokenRecord{}, refreshBlocked{}
+		}
 		// The transport error text is dropped on purpose: only the class is kept.
 		return TokenRecord{}, fmt.Errorf("%w: transport failure", ErrRefreshRetryable)
 	}
@@ -258,10 +312,11 @@ func (p *Provider) refresh(ctx context.Context, rec TokenRecord, clientSecret Se
 		out.Scope = strings.Join(ParseScopes(tr.Scope), " ")
 	}
 	out.ObtainedAt = now
-	out.Expiry = 0
-	if tr.ExpiresIn > 0 {
-		out.Expiry = now + int64(tr.ExpiresIn)
+	life := int64(tr.ExpiresIn)
+	if life <= 0 {
+		life = defaultAccessLifetime
 	}
+	out.Expiry = now + life
 	if tr.RefreshToken != "" {
 		out.RefreshToken = tr.RefreshToken
 		out.RefreshExpiry = 0
@@ -280,8 +335,8 @@ func (p *Provider) classify(code string, status int) error {
 	switch {
 	case code == "invalid_grant" || code == "bad_refresh_token":
 		return fmt.Errorf("%w: %s", ErrRefreshInvalidGrant, code)
-	case code == "invalid_client" || status == 401:
-		if p.logger != nil {
+	case code == "invalid_client" || code == "incorrect_client_credentials" || status == 401:
+		if p.logger != nil && p.hinted.CompareAndSwap(false, true) {
 			p.logger.Error("oauth_refresh_invalid_client",
 				"provider", p.ID,
 				"hint", "the provider rejected the client credentials; check the consent.providers client secret and restart the control plane after rotating it")
@@ -303,23 +358,24 @@ func orUnknown(code string) string {
 	return code
 }
 
-// sanitizeOAuthCode keeps an OAuth error code only when it is a short token of
-// [A-Za-z0-9_.-]; anything else (free text that could echo a secret) is dropped.
+// knownOAuthCodes is the closed set of error codes a message may carry
+// (RFC 6749 5.2 plus the GitHub and Google extras); anything else, which could
+// be free text or a token-shaped value, becomes "other".
+var knownOAuthCodes = map[string]bool{
+	"invalid_request": true, "invalid_client": true, "invalid_grant": true,
+	"unauthorized_client": true, "unsupported_grant_type": true, "invalid_scope": true,
+	"access_denied": true, "server_error": true, "bad_refresh_token": true,
+	"incorrect_client_credentials": true, "temporarily_unavailable": true, "slow_down": true,
+}
+
 func sanitizeOAuthCode(s string) string {
-	if s == "" || len(s) > 64 {
-		if s != "" {
-			return "unrecognized"
-		}
+	if s == "" {
 		return ""
 	}
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-', r == '.':
-		default:
-			return "unrecognized"
-		}
+	if knownOAuthCodes[s] {
+		return s
 	}
-	return s
+	return "other"
 }
 
 // refreshURLAllowed: https, or http on a loopback host.
@@ -335,5 +391,9 @@ func refreshURLAllowed(raw string) bool {
 		return false
 	}
 	h := u.Hostname()
-	return h == "localhost" || h == "::1" || strings.HasPrefix(h, "127.")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }

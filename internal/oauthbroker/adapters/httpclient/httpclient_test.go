@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/ethosagent/warden/internal/oauthbroker"
-	"github.com/ethosagent/warden/internal/proxy"
 )
 
 func TestBlocksLoopbackByDefault(t *testing.T) {
@@ -25,9 +24,9 @@ func TestBlocksLoopbackByDefault(t *testing.T) {
 	if err == nil || hits.Load() != 0 {
 		t.Fatalf("loopback must be refused by the SSRF dialer: err=%v hits=%d", err, hits.Load())
 	}
-	var ssrf *proxy.SSRFError
-	if !errors.As(err, &ssrf) {
-		t.Fatalf("want an SSRFError, got %v", err)
+	var be *oauthbroker.BlockedError
+	if !errors.As(err, &be) || be.AddrClass != "loopback" {
+		t.Fatalf("want a BlockedError(loopback), got %v", err)
 	}
 }
 
