@@ -65,7 +65,7 @@ func newTokenClientFake(tb testing.TB) *tokenClientFake {
 // and a wrong client secret is 401 invalid_client.
 func tokenClientConformance(t *testing.T, f *tokenClientFake) {
 	ctx := context.Background()
-	var c offboard.TokenClient = f.client
+	c := f.client
 	f.idp.AddRefreshChain("rt-conf-1", "sam", "sam@example.com", tokenClientFakeClient)
 	r, err := c.Refresh(ctx, "rt-conf-1")
 	if err != nil || r.Status != 200 || r.RefreshToken == "" || r.RefreshToken == "rt-conf-1" || r.IDToken == "" {
