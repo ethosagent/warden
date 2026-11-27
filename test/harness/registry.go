@@ -50,6 +50,7 @@ var Fakes = map[string]FakeEntry{
 	"config.ConfigProvider":    entry("fakes.FakeConfigProvider", newConfigProviderFake, configProviderConformance),
 	"secrets.SecretProvider":   entry("fakes.FakeSecretProvider", newSecretProviderFake, secretProviderConformance),
 	"secrets.SecretStore":      entry("fakes.NewFakeSecretStore", func(testing.TB) *fakes.FakeSecretStore { return fakes.NewFakeSecretStore() }, secretStoreConformance),
+	"secrets.VersionedStore":   entry("fakes.NewFakeSecretStore", func(testing.TB) *fakes.FakeSecretStore { return fakes.NewFakeSecretStore() }, versionedStoreConformance),
 	"analytics.AnalyticsStore": entry("fakes.FakeAnalyticsStore", func(testing.TB) *fakes.FakeAnalyticsStore { return &fakes.FakeAnalyticsStore{} }, analyticsStoreConformance),
 	"proxy.Dialer":             entry("harness mappingDialer (via New)", newDialerFake, dialerConformance),
 	"proxy.NameResolver":       entry("dnstest.New + proxy.NewUpstreamResolver", newNameResolverFake, nameResolverConformance),
@@ -233,8 +234,8 @@ func secretStoreConformance(t *testing.T, f *fakes.FakeSecretStore) {
 	var s secrets.SecretStore = f
 	ctx := context.Background()
 
-	if _, err := s.Get(ctx, "k"); !errors.Is(err, secrets.ErrSecretNotFound) {
-		t.Fatalf("Get(absent) error = %v, want ErrSecretNotFound", err)
+	if _, err := s.Get(ctx, "k"); !errors.Is(err, secrets.ErrSecretNotFound) || !errors.Is(err, secrets.ErrNotFound) {
+		t.Fatalf("Get(absent) error = %v, want ErrNotFound and ErrSecretNotFound", err)
 	}
 	if err := s.Put(ctx, "k", "v1"); err != nil {
 		t.Fatal(err)
@@ -282,8 +283,38 @@ func secretStoreConformance(t *testing.T, f *fakes.FakeSecretStore) {
 	if err := s.Delete(ctx, "k"); err != nil {
 		t.Errorf("Delete of an absent key must be idempotent, got %v", err)
 	}
-	if _, err := s.Get(ctx, "k"); !errors.Is(err, secrets.ErrSecretNotFound) {
-		t.Errorf("Get after Delete error = %v, want ErrSecretNotFound", err)
+	if _, err := s.Get(ctx, "k"); !errors.Is(err, secrets.ErrNotFound) {
+		t.Errorf("Get after Delete error = %v, want ErrNotFound", err)
+	}
+}
+
+// --- secrets.VersionedStore ---
+
+func versionedStoreConformance(t *testing.T, f *fakes.FakeSecretStore) {
+	var s secrets.VersionedStore = f
+	ctx := context.Background()
+
+	if _, _, err := s.GetVersion(ctx, "k"); !errors.Is(err, secrets.ErrNotFound) {
+		t.Fatalf("GetVersion(absent) error = %v, want ErrNotFound", err)
+	}
+	if err := s.PutIfVersion(ctx, "k", "v1", 0); err != nil {
+		t.Fatalf("PutIfVersion(absent, 0) = %v; version 0 must create", err)
+	}
+	if err := s.PutIfVersion(ctx, "k", "other", 0); !errors.Is(err, secrets.ErrVersionConflict) {
+		t.Fatalf("PutIfVersion(existing, 0) = %v, want ErrVersionConflict", err)
+	}
+	v, ver, err := s.GetVersion(ctx, "k")
+	if err != nil || v != "v1" || ver != 1 {
+		t.Fatalf("GetVersion = %q, %d, %v; want v1 at version 1", v, ver, err)
+	}
+	if err := s.PutIfVersion(ctx, "k", "v2", ver); err != nil {
+		t.Fatalf("PutIfVersion(current) = %v", err)
+	}
+	if err := s.PutIfVersion(ctx, "k", "stale", ver); !errors.Is(err, secrets.ErrVersionConflict) {
+		t.Fatalf("PutIfVersion(stale) = %v, want ErrVersionConflict", err)
+	}
+	if v, ver, _ := s.GetVersion(ctx, "k"); v != "v2" || ver != 2 {
+		t.Errorf("after a conflict GetVersion = %q, %d; want v2 at version 2, unchanged", v, ver)
 	}
 }
 

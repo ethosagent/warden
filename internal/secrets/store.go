@@ -2,9 +2,22 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
+
+// ErrNotFound is the backend-neutral "this key has no value" error. Every
+// SecretStore's Get (and VersionedStore.GetVersion) wraps it when the key is
+// absent, so callers test errors.Is(err, ErrNotFound) without knowing which
+// backend is configured. Backend-specific sentinels stay alongside it: the AWS
+// store's error matches both ErrNotFound and ErrSecretNotFound.
+var ErrNotFound = errors.New("secrets: key not found")
+
+// ErrVersionConflict is returned by VersionedStore.PutIfVersion when the
+// stored version is not the expected one (including version 0, create-only,
+// against a key that already exists). The stored value is left unchanged.
+var ErrVersionConflict = errors.New("secrets: version conflict")
 
 // SecretStore is the write-capable, backend-agnostic secret store shared by
 // both Warden planes. It is the WRITE half that complements the read-only
@@ -50,6 +63,26 @@ type SecretStore interface {
 	// not call the backend's value-read path (e.g. GetSecretValue); it reads
 	// only names/versions/timestamps. Logs key+version only.
 	List(ctx context.Context) ([]SecretMeta, error)
+}
+
+// VersionedStore is an OPTIONAL extension of SecretStore for backends that
+// offer compare-and-swap on a per-key version (Vault KV v2 options.cas). Code
+// that needs CAS type-asserts a SecretStore to VersionedStore and falls back
+// (or refuses) when the backend does not implement it; the AWS store does not.
+//
+// Versions are the backend's own monotonically increasing per-key numbers.
+// They are not values and may be logged; the value is subject to the same
+// by-reference-only rule as SecretStore.
+type VersionedStore interface {
+	// GetVersion returns key's current value and version. An absent key wraps
+	// ErrNotFound.
+	GetVersion(ctx context.Context, key string) (value string, version int64, err error)
+
+	// PutIfVersion writes value only when key's current version equals
+	// version. version 0 means create-only: it succeeds only when the key does
+	// not exist. Any mismatch returns an error wrapping ErrVersionConflict and
+	// leaves the stored value unchanged.
+	PutIfVersion(ctx context.Context, key, value string, version int64) error
 }
 
 // SecretMeta is a value-free descriptor of a stored secret, returned by
