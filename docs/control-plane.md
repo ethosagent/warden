@@ -3647,8 +3647,11 @@ bundle).
   recompute replaces it. So a restart with a failing rollup still serves the list
   with 200, and every other policy change (deny entries, the block list,
   settings) keeps reaching workers. A failed write logs `user_cost_persist_failed`
-  at ERROR and is counted; the in-memory list is still served. A backup restore
-  keeps the row.
+  at ERROR, is counted and is retried on every later run until it succeeds; the
+  in-memory list is still served. A row that cannot be read logs
+  `user_cost_load_failed` and counts as unknown, not empty: the startup rebuild
+  decides, and only if it also fails is the policy held as without a state dir
+  (below). A backup restore keeps the row.
 - **No `--state-dir`.** Without a state DB there is no persisted list. The
   control plane retries the rebuild a few times before its first load; while a
   `dailyCostUSD` rule is served and no rebuild has succeeded since start, the

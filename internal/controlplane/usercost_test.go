@@ -45,6 +45,8 @@ type ucOpts struct {
 	policy    string
 	// wrap, when set, wraps the fleet store the Server is built over.
 	wrap func(*analytics.FleetSQLiteStore) analytics.FleetStore
+	// backoff, when set, replaces the startup retry waits.
+	backoff []time.Duration
 }
 
 func newUserCostEnv(t *testing.T, o ucOpts) *ucEnv {
@@ -74,6 +76,7 @@ func newUserCostEnv(t *testing.T, o ucOpts) *ucEnv {
 	cfg := Config{
 		PolicyPath: o.policy, State: o.db, PolicyStore: PolicyStoreVersioned,
 		Store: store, Clock: o.clk, Logger: slog.New(slog.NewJSONHandler(logs, nil)),
+		userCostStartupBackoff: o.backoff,
 	}
 	if o.bundles != "" {
 		if o.fk == nil {
@@ -485,6 +488,44 @@ func TestUserCostAggregator_PersistedYesterdayServesNothing(t *testing.T) {
 	}
 }
 
+// TestUserCostAggregator_CorruptPersistedRow: an unreadable persisted row
+// means "unknown", not "empty": with the rollup also failing the load is held
+// (never a cost-capped wire without the list); with a working rollup the
+// live list is served.
+func TestUserCostAggregator_CorruptPersistedRow(t *testing.T) {
+	e := newUserCostEnv(t, ucOpts{})
+	e.setRules(t, []config.UserLimit{engLLM(0.01)}, nil)
+	e.spend(t, "worker-a", "alice", "eng-llm", 0.02)
+	e.recompute()
+	if _, err := e.db.SQL().Exec(`UPDATE user_cost_blocks SET list_json = '{not json'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.fleet.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	e2, _ := failingEnv(t, e, ucOpts{backoff: []time.Duration{time.Millisecond}})
+	if _, _, ok, _ := e2.s.policy.snapshot(); ok {
+		t.Fatal("corrupt row and failing rollup: a policy was loaded")
+	}
+	rec := httptest.NewRecorder()
+	e2.s.policy.ServePolicy(rec, httptest.NewRequest(http.MethodGet, "/policy", nil))
+	if rec.Code == http.StatusOK {
+		t.Fatalf("corrupt row and failing rollup: /policy = 200 %s, want it held", rec.Body.String())
+	}
+	if !strings.Contains(e2.logs.String(), "user_cost_load_failed") {
+		t.Errorf("the corrupt row was not logged:\n%s", e2.logs.String())
+	}
+	if err := e2.fleet.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	e3 := newUserCostEnv(t, ucOpts{db: e.db, fleetPath: e.fleetPath, clk: e.clk, backoff: []time.Duration{time.Millisecond}})
+	if list, _, _ := e3.served(t); len(list) != 1 || list[0].Sub != "alice" {
+		t.Fatalf("corrupt row and working rollup = %v, want the live alice", list)
+	}
+}
+
 // TestUserCostAggregator_PersistWriteFailure: a failed write of the
 // persisted list is counted and logged; the new list is still served.
 func TestUserCostAggregator_PersistWriteFailure(t *testing.T) {
@@ -500,6 +541,24 @@ func TestUserCostAggregator_PersistWriteFailure(t *testing.T) {
 	}
 	if n := e.s.userCost.PersistErrors(); n != 1 {
 		t.Errorf("persist errors = %d, want 1", n)
+	}
+	// The table is back: the next run repairs the row although the list did
+	// not change.
+	if _, err := e.db.SQL().Exec(userCostMigration0001); err != nil {
+		t.Fatal(err)
+	}
+	e.recompute()
+	st := &userCostStore{db: e.db.SQL(), now: e.clk.Now}
+	day, list, ok, err := st.load(context.Background())
+	if err != nil || !ok || day != e.today() || len(list) != 1 || list[0].entry.Sub != "alice" {
+		t.Fatalf("persisted row after the repair run = %q %v %v %v, want today's alice", day, list, ok, err)
+	}
+	if n := e.s.userCost.PersistErrors(); n != 1 {
+		t.Errorf("persist errors after the repair = %d, want still 1", n)
+	}
+	e.recompute() // clean now: no further write needed, none fails
+	if n := e.s.userCost.PersistErrors(); n != 1 {
+		t.Errorf("persist errors = %d after a clean run, want 1", n)
 	}
 	if !strings.Contains(e.logs.String(), userCostPersistFailedMsg) || strings.Contains(e.logs.String(), "alice") {
 		t.Errorf("want %s logged without subs:\n%s", userCostPersistFailedMsg, e.logs.String())

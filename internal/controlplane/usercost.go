@@ -115,6 +115,9 @@ type userCostAggregator struct {
 	// computed is set by the first recompute that succeeds; until then the
 	// overlay fails any load that serves a cost cap (errUserCostPending).
 	computed bool
+	// persistDirty is set while the persisted row lags the list (a failed
+	// save); every run retries the save until it succeeds.
+	persistDirty bool
 	// trimWarned is set once the overlay has logged a size cut of the current
 	// list, so the 3s reload does not repeat it.
 	trimWarned bool
@@ -317,22 +320,29 @@ func (a *userCostAggregator) recomputeOnce(ctx context.Context, refresh bool) {
 	if changed {
 		a.trimWarned = false
 	}
+	dirty := a.persistDirty
 	a.mu.Unlock()
 	a.blocked.Store(int64(len(next)))
 	a.countCut.Store(int64(cut))
+	// Persist before the refresh serves it, so a restart starts from the list
+	// workers last saw. A failed write is counted and retried on every later
+	// run until one succeeds, even when the list is unchanged; the list is
+	// still served meanwhile.
+	if a.persist != nil && (changed || dirty) {
+		err := a.persist.save(ctx, day, next)
+		if err != nil {
+			a.persistErrors.Add(1)
+			a.logger.Error(userCostPersistFailedMsg, "error", boundedErr(err))
+		}
+		a.mu.Lock()
+		a.persistDirty = err != nil
+		a.mu.Unlock()
+	}
 	if !changed {
 		return
 	}
 	if cut > 0 {
 		a.logger.Warn("user cost blocks: list cut to the limit", "dropped", cut, "limit", config.MaxCostBlockedUsers)
-	}
-	// Persist before the refresh serves it, so a restart starts from the list
-	// workers last saw. A failed write is counted; the list is still served.
-	if a.persist != nil {
-		if err := a.persist.save(ctx, day, next); err != nil {
-			a.persistErrors.Add(1)
-			a.logger.Error(userCostPersistFailedMsg, "error", boundedErr(err))
-		}
 	}
 	a.logger.Info("user cost blocks updated", "blocked", len(next), "day", day)
 	if refresh {
@@ -496,16 +506,16 @@ func (a *userCostAggregator) observeServed(w policyWire) {
 // seed installs the persisted last good list as the start state, before the
 // first load: entries for today are served until a live recompute replaces
 // them; a row from an earlier day (or no row) starts empty. Either way the
-// list counts as known, so no load waits on the rollup. A read error is
-// logged and starts empty as well.
-func (a *userCostAggregator) seed(ctx context.Context) {
+// list counts as known, so no load waits on the rollup. A read or decode
+// error leaves the list unknown: seed reports false and prime decides (with
+// both failing, the overlay holds the load with errUserCostPending).
+func (a *userCostAggregator) seed(ctx context.Context) bool {
 	day, list, ok, err := a.persist.load(ctx)
-	today := analytics.UsageDay(a.clock.Now())
-	switch {
-	case err != nil:
+	if err != nil {
 		a.logger.Error("user_cost_load_failed", "error", boundedErr(err))
-		list = nil
-	case !ok || day != today:
+		return false
+	}
+	if !ok || day != analytics.UsageDay(a.clock.Now()) {
 		list = nil
 	}
 	a.mu.Lock()
@@ -513,6 +523,7 @@ func (a *userCostAggregator) seed(ctx context.Context) {
 	a.mu.Unlock()
 	a.blocked.Store(int64(len(list)))
 	a.logger.Info("user cost blocks loaded", "source", "persisted", "blocked", len(list))
+	return true
 }
 
 // costCapsOf maps each served rule with a dailyCostUSD to its cap: userLimits
@@ -641,17 +652,21 @@ func (s *Server) initUserCost() {
 	s.policy.onLoaded = a.observeServed
 	s.userCost = a
 	ctx := context.Background()
+	if b := s.cfg.userCostStartupBackoff; b != nil {
+		a.startupBackoff = b
+	}
 	if s.cfg.State != nil {
 		// The persisted last good list is the start state; one live attempt
 		// then refreshes it, and the loop keeps it current.
 		a.persist = &userCostStore{db: s.cfg.State.SQL(), now: s.cfg.Clock.Now}
-		a.seed(ctx)
-		a.startupBackoff = nil
-		a.prime(ctx)
+		if a.seed(ctx) {
+			// A known start state: one live attempt, no retries.
+			a.startupBackoff = nil
+		}
+		if !a.prime(ctx) {
+			s.cfg.Logger.Error("control plane: fleet cost blocks are unknown (the persisted list could not be read and the rollup failed); /policy is held at last-known-good while a dailyCostUSD rule is served, retrying")
+		}
 		return
-	}
-	if b := s.cfg.userCostStartupBackoff; b != nil {
-		a.startupBackoff = b
 	}
 	// No state DB: rebuild the list before the first load, so a restart
 	// serves it from the first /policy; with a failing rollup the load fails
