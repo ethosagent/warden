@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -831,6 +832,44 @@ func TestReservedKey_DashboardSecretStore(t *testing.T) {
 			}
 			if m, ok := store.keys[c.key]; !ok || m.Version != "1" {
 				t.Fatal("reserved key was changed or removed in the store")
+			}
+		})
+	}
+}
+
+// TestSecretStoreReservedKey (W-P3-BRKR-06): the per-user and client-secret
+// keys, including their whitespace and leading-slash variants, are refused on
+// POST and DELETE with the store untouched, and are hidden from List.
+func TestSecretStoreReservedKey(t *testing.T) {
+	for _, key := range []string{"users/x/google", "oauth-clients/google", " /users/x/google", "/oauth-clients/google"} {
+		t.Run(key, func(t *testing.T) {
+			store := newWritableSecretStore()
+			store.keys["users/x/google"] = secrets.SecretMeta{Key: "users/x/google", Version: "1"}
+			store.keys["oauth-clients/google"] = secrets.SecretMeta{Key: "oauth-clients/google", Version: "1"}
+			store.keys["plain"] = secrets.SecretMeta{Key: "plain", Version: "1"}
+			srv := NewServer(&fakeDataSource{}, config.Policy{}, emptyProvider())
+			srv.SetWriteGuard(AllowUngatedWritesForTests)
+			srv.SetSecretStore(store, config.SecretBackendEcho)
+			h := srv.Handler()
+
+			body, err := json.Marshal(map[string]string{"key": key, "value": "evil"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rr := doPost(t, h, "/dashboard/api/secretstore", string(body))
+			if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "reserved_key") {
+				t.Fatalf("POST = %d %s, want 403 reserved_key", rr.Code, rr.Body.String())
+			}
+			rr = doDelete(t, h, "/dashboard/api/secretstore?key="+url.QueryEscape(key))
+			if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "reserved_key") {
+				t.Fatalf("DELETE = %d %s, want 403 reserved_key", rr.Code, rr.Body.String())
+			}
+			if len(store.keys) != 3 || store.keys["users/x/google"].Version != "1" || store.keys["oauth-clients/google"].Version != "1" {
+				t.Fatalf("store changed: %+v", store.keys)
+			}
+			got := doGet(t, h, "/dashboard/api/secretstore").Body.String()
+			if strings.Contains(got, "users/x/google") || strings.Contains(got, "oauth-clients") || !strings.Contains(got, "plain") {
+				t.Fatalf("List must hide reserved keys and keep plain: %s", got)
 			}
 		})
 	}

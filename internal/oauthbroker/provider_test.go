@@ -436,3 +436,31 @@ func TestClientSecretHonoursCallerDeadline(t *testing.T) {
 		t.Fatal("ClientSecret ignored the caller's deadline while the store hung")
 	}
 }
+
+// TestClientSecretFromUserStore: a clientSecretKey provider resolves its secret
+// through the consent.store resolver only, and a key other than
+// oauth-clients/<id> fails validation.
+func TestClientSecretFromUserStore(t *testing.T) {
+	// Options has no other secret source: the distributed secretStore is not reachable from here.
+	consent := &fakeResolver{vals: map[string]string{"oauth-clients/google": "from-consent-store"}}
+	cfg := []config.OAuthProviderConfig{{ID: "google", Type: "google", ClientID: "c", ClientSecretKey: "oauth-clients/google"}}
+	r, _ := newReg(t, cfg, Options{Resolver: consent})
+	p, _ := r.Get("google")
+	s, err := p.ClientSecret(context.Background())
+	if err != nil || s.Reveal() != "from-consent-store" {
+		t.Fatalf("ClientSecret = %v, %v", s, err)
+	}
+	consent.mu.Lock()
+	calls := consent.calls
+	consent.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("consent.store reads = %d, want 1 (startup read, then cached)", calls)
+	}
+
+	for _, key := range []string{"oauth-clients/other", "users/x/google", "cp/keys/google", "google"} {
+		bad := []config.OAuthProviderConfig{{ID: "google", Type: "google", ClientID: "c", ClientSecretKey: key}}
+		if _, err := NewRegistry(bad, Options{LookupEnv: noEnv, Resolver: consent}); err == nil {
+			t.Errorf("clientSecretKey %q for provider google must fail validation", key)
+		}
+	}
+}

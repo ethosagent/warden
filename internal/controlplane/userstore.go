@@ -90,16 +90,28 @@ func NewUserStore(cfg *config.ConsentStore, opts UserStoreOptions) (secrets.Secr
 	}
 }
 
-// checkUserStorePersistent refuses to start with consent and its IdP link
-// enabled unless the user credential store keeps values: the CP would sign
-// users in and then lose the refresh token offboarding relies on. No store
-// (consent.store absent) and the echo store are both refused; the error names
-// both keys. A nil consent block (consent off) passes.
+// checkUserStorePersistent refuses to start with consent enabled unless the
+// user credential store keeps values. Two rules: consent.providers set (the
+// OAuth broker; error "oauth broker requires a persistent consent.store"), and
+// the IdP link enabled (the CP would sign users in and then lose the refresh
+// token offboarding relies on; the error names both keys). No store
+// (consent.store absent) and the echo store are both refused. A nil consent block (consent off) passes.
 func checkUserStorePersistent(consent *config.ConsentConfig, st secrets.SecretStore) error {
-	if consent == nil || !consent.Enabled || !consent.IdPLink.Enabled {
+	if consent == nil || !consent.Enabled {
 		return nil
 	}
-	if st != nil && secrets.IsPersistent(st) {
+	persistent := st != nil && secrets.IsPersistent(st)
+	if persistent {
+		return nil
+	}
+	if len(consent.Providers) > 0 {
+		backend := "(none: consent.store is not configured)"
+		if consent.Store != nil {
+			backend = consent.Store.Backend
+		}
+		return fmt.Errorf("control-plane: oauth broker requires a persistent consent.store (consent.providers is set but consent.store.backend is %s)", backend)
+	}
+	if !consent.IdPLink.Enabled {
 		return nil
 	}
 	backend := "(none: consent.store is not configured)"
