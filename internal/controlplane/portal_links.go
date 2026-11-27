@@ -54,7 +54,7 @@ func (s *Server) initIdPLinks(p *portalService) {
 		s.cfg.Logger.Error("control plane: idp link store unavailable; portal logins will fail", "error", err)
 		return
 	}
-	p.links, p.linkStore = ls, ls
+	p.links, p.linkStore, p.linkStatus = ls, ls, ls
 }
 
 // IdPLinks returns the portal's LinkStore (W-P3-OFFB-02 rotates through it),
@@ -73,32 +73,24 @@ type portalLinkView struct {
 	RelinkDueAt string
 }
 
-// IdP link statuses the stub page shows.
-const (
-	linkViewDisabled = "disabled"
-	linkViewLinked   = "linked"
-	linkViewMissing  = "missing"
-	linkViewUnknown  = "unknown"
-)
-
 // linkView reads the link of (iss, sub) for the stub page. It never carries
 // the token or its Reference.
 func (p *portalService) linkView(ctx context.Context, iss, sub string) portalLinkView {
 	if !p.cfg.IdPLink.Enabled {
-		return portalLinkView{Status: linkViewDisabled}
+		return portalLinkView{Status: portal.LinkDisabled}
 	}
 	if p.linkStore == nil {
-		return portalLinkView{Status: linkViewUnknown}
+		return portalLinkView{Status: portal.LinkUnknown}
 	}
 	l, err := p.linkStore.Get(ctx, iss, sub)
 	switch {
 	case errors.Is(err, portal.ErrLinkNotFound):
-		return portalLinkView{Status: linkViewMissing}
+		return portalLinkView{Status: portal.LinkMissing}
 	case err != nil:
 		p.logger.Warn("portal: idp link read failed", "error", err)
-		return portalLinkView{Status: linkViewUnknown}
+		return portalLinkView{Status: portal.LinkUnknown}
 	}
-	return portalLinkView{Status: linkViewLinked, Generation: l.Generation, RelinkDueAt: l.RelinkDueAt.UTC().Format(time.RFC3339)}
+	return portalLinkView{Status: portal.LinkLinked, Generation: l.Generation, RelinkDueAt: l.RelinkDueAt.UTC().Format(time.RFC3339)}
 }
 
 const (

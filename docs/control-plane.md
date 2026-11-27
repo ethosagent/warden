@@ -1028,7 +1028,9 @@ creates the session, so offboarding can later refresh it to detect disabled user
 - Each stored link logs `idp_link_stored` with `user_key`, `ref` and
   `generation`; with admin audit on it records `user.idp_linked` (target
   `idp_link`, `target_ref` the user key). The token is never logged or recorded.
-  `GET /portal` shows the link status, generation and when to sign in again.
+  `GET /portal` shows the link status, generation and when to sign in again;
+  `GET /portal/api/me` reports `link.status` (`linked`, `missing`, `unknown` on a
+  read error, `disabled` with the IdP link off) and `link.relinkDueAt`.
 
 ### Portal session middleware
 

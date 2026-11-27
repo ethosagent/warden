@@ -478,3 +478,24 @@ func TestPortalBlockedNonASCIIEmail(t *testing.T) {
 		t.Fatal("the blocked principal's portal session was not deleted")
 	}
 }
+
+// TestPortalMeLinkStatusFromStore: with no test override the portal reads the
+// link status from the real LinkStore it stores logins through, so
+// /portal/api/me reports the stored link and its relink_due_at.
+func TestPortalMeLinkStatusFromStore(t *testing.T) {
+	r := newPortalRig(t, portalRigOpts{})
+	if r.srv.portal.linkStore == nil || r.srv.portal.linkStatus != portal.LinkReader(r.srv.portal.linkStore) {
+		t.Fatal("linkStatus is not wired to the LinkStore")
+	}
+	r.ready()
+	r.idp.SetLogin(fakes.Valid("lee", "lee@example.com"))
+	c := r.login("")
+	me := decodeMe(t, r.serve(http.MethodGet, "/portal/api/me", c))
+	l, err := r.srv.IdPLinks().Get(context.Background(), r.idp.Issuer(), "lee")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if me.Link != (portalLink{Status: portal.LinkLinked, RelinkDueAt: l.RelinkDueAt.UTC().Format(time.RFC3339)}) {
+		t.Fatalf("link = %+v, want linked due %v", me.Link, l.RelinkDueAt)
+	}
+}

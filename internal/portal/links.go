@@ -138,7 +138,10 @@ type LinkStore struct {
 	locks    keyedMutex
 }
 
-var _ LinkWriter = (*LinkStore)(nil)
+var (
+	_ LinkWriter = (*LinkStore)(nil)
+	_ LinkReader = (*LinkStore)(nil)
+)
 
 // NewLinkStore returns a LinkStore, or an error naming a missing dependency.
 func NewLinkStore(c LinkStoreConfig) (*LinkStore, error) {
@@ -241,6 +244,20 @@ func (s *LinkStore) Link(ctx context.Context, l Link) (IdPLink, error) {
 // Get returns the link of (iss, sub), or ErrLinkNotFound.
 func (s *LinkStore) Get(ctx context.Context, iss, sub string) (IdPLink, error) {
 	return s.repo.Get(ctx, iss, sub)
+}
+
+// LinkStatus implements LinkReader for GET /portal/api/me: "linked" with
+// RelinkDueAt when a row exists, "missing" when none does, and "unknown" with
+// the read error otherwise. It never returns the token or its Reference.
+func (s *LinkStore) LinkStatus(ctx context.Context, iss, sub string) (LinkStatus, error) {
+	l, err := s.repo.Get(ctx, iss, sub)
+	switch {
+	case errors.Is(err, ErrLinkNotFound):
+		return LinkStatus{Status: LinkMissing}, nil
+	case err != nil:
+		return LinkStatus{Status: LinkUnknown}, err
+	}
+	return LinkStatus{Status: LinkLinked, RelinkDueAt: l.RelinkDueAt}, nil
 }
 
 // List returns every link.
