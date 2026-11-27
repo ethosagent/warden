@@ -318,31 +318,40 @@ var passwordFormAction = regexp.MustCompile(`(?is)<form[^>]*\bmethod="post"[^>]*
 // maxHops bounds each redirect walk; the real flow needs at most three.
 const maxHops = 6
 
-// consoleLogin signs user (a seeded LDAP uid, password DEX_TEST_PASSWORD) in
-// to the console through Dex's browser flow and returns the session. A login
-// the CP refuses returns *loginRefused.
-func consoleLogin(user string) (*consoleSession, error) {
+// loginTrace is what one browser login saw on its way: where the CP first
+// sent the browser (query dropped) and the authorization codes Dex handed back
+// to the CP callback. The codes are secret; they are kept only so a test can
+// sweep logs for them and must never be printed.
+type loginTrace struct {
+	LoginRedirect string
+	codes         []string
+}
+
+// browserLogin drives b through the CP's OIDC browser flow: GET loginPath on
+// the CP, follow the redirects to Dex's LDAP form, submit user's credentials
+// (password DEX_TEST_PASSWORD), and follow Dex back through the CP callback
+// until the CP lands the browser on landingPath. A landing with
+// ?login_error=<code> returns *loginRefused; a callback answered without a
+// redirect (a 502 or 503) is an error naming its status.
+func browserLogin(b *http.Client, user, loginPath, landingPath string) (loginTrace, error) {
+	var tr loginTrace
 	password, err := lookupDevEnv("DEX_TEST_PASSWORD")
 	if err != nil {
-		return nil, err
-	}
-	b, err := newBrowser()
-	if err != nil {
-		return nil, err
+		return tr, err
 	}
 	cp, err := url.Parse(compose.CPBase)
 	if err != nil {
-		return nil, err
+		return tr, err
 	}
 	// 1. The CP starts the flow and sends the browser to the IdP.
-	status, _, next, err := hop(b, http.MethodGet, cp.JoinPath("/auth/login"), nil)
+	status, _, next, err := hop(b, http.MethodGet, cp.JoinPath(loginPath), nil)
 	if err != nil {
-		return nil, err
+		return tr, err
 	}
 	if next == nil {
-		return nil, fmt.Errorf("GET /auth/login: status %d, want a redirect to Dex", status)
+		return tr, fmt.Errorf("GET %s: status %d, want a redirect to Dex", loginPath, status)
 	}
-	cs := &consoleSession{client: b, User: user, LoginRedirect: noQuery(next)}
+	tr.LoginRedirect = noQuery(next)
 
 	// 2. Walk Dex's redirects (connector choice, login page) to the form.
 	u := next
@@ -350,7 +359,7 @@ func consoleLogin(user string) (*consoleSession, error) {
 	for i := 0; i < maxHops && action == nil; i++ {
 		status, body, next, err := hop(b, http.MethodGet, u, nil)
 		if err != nil {
-			return nil, err
+			return tr, err
 		}
 		if next != nil {
 			u = next
@@ -358,42 +367,62 @@ func consoleLogin(user string) (*consoleSession, error) {
 		}
 		m := passwordFormAction.FindSubmatch(body)
 		if status != http.StatusOK || m == nil {
-			return nil, fmt.Errorf("GET %s: status %d and no password form", noQuery(u), status)
+			return tr, fmt.Errorf("GET %s: status %d and no password form", noQuery(u), status)
 		}
 		ref, err := url.Parse(html.UnescapeString(string(m[1])))
 		if err != nil {
-			return nil, fmt.Errorf("dex password form action is not a URL: %w", err)
+			return tr, fmt.Errorf("dex password form action is not a URL: %w", err)
 		}
 		action = u.ResolveReference(ref)
 	}
 	if action == nil {
-		return nil, fmt.Errorf("no dex password form within %d redirects", maxHops)
+		return tr, fmt.Errorf("no dex password form within %d redirects", maxHops)
 	}
 
 	// 3. Submit the credentials, then follow Dex back to the CP callback and
-	// the CP on to the dashboard.
+	// the CP on to the landing page.
 	status, _, next, err = hop(b, http.MethodPost, action, url.Values{"login": {user}, "password": {password}})
 	if err != nil {
-		return nil, err
+		return tr, err
 	}
 	for i := 0; ; i++ {
 		if next == nil {
-			return nil, fmt.Errorf("login as %q stopped at status %d before reaching the dashboard (wrong password or a dex error page)", user, status)
+			return tr, fmt.Errorf("login as %q stopped at status %d before reaching %s (wrong password, a dex error page, or a refused callback)", user, status, landingPath)
 		}
-		if next.Host == cp.Host && next.Path == "/dashboard/" {
-			if code := next.Query().Get("login_error"); code != "" {
-				return nil, &loginRefused{Code: code}
+		if next.Host == cp.Host {
+			if c := next.Query().Get("code"); c != "" {
+				tr.codes = append(tr.codes, c)
 			}
-			break
+		}
+		if next.Host == cp.Host && next.Path == landingPath {
+			if code := next.Query().Get("login_error"); code != "" {
+				return tr, &loginRefused{Code: code}
+			}
+			return tr, nil
 		}
 		if i == maxHops {
-			return nil, fmt.Errorf("login as %q did not reach the dashboard within %d redirects (last %s)", user, maxHops, noQuery(next))
+			return tr, fmt.Errorf("login as %q did not reach %s within %d redirects (last %s)", user, landingPath, maxHops, noQuery(next))
 		}
 		u = next
 		if status, _, next, err = hop(b, http.MethodGet, u, nil); err != nil {
-			return nil, err
+			return tr, err
 		}
 	}
+}
+
+// consoleLogin signs user (a seeded LDAP uid, password DEX_TEST_PASSWORD) in
+// to the console through Dex's browser flow and returns the session. A login
+// the CP refuses returns *loginRefused.
+func consoleLogin(user string) (*consoleSession, error) {
+	b, err := newBrowser()
+	if err != nil {
+		return nil, err
+	}
+	tr, err := browserLogin(b, user, "/auth/login", "/dashboard/")
+	if err != nil {
+		return nil, err
+	}
+	cs := &consoleSession{client: b, User: user, LoginRedirect: tr.LoginRedirect}
 
 	// 4. The session cookie is set; /auth/me names the user and the CSRF token.
 	code, body, err := cs.do(http.MethodGet, "/auth/me", nil, false)

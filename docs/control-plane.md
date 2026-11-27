@@ -1065,6 +1065,14 @@ the portal session middleware (and `/connect/*` will):
   admin audit on a logout records `portal.logout` (target `portal_session`).
 - With consent disabled every `/portal/*` path is `404`.
 
+### End-to-end test
+
+`make e2e-identity-scenario NAME=TestPortalSignIn` runs the portal sign-in
+against the L2 identity stack (real Dex with the seeded LDAP users, the
+`warden-portal` client, `consent.store` on a fake AWS Secrets Manager); see
+[docker-end-to-end.md](docker-end-to-end.md) "The L2 identity stack", next to
+the console SSO tests (`make e2e-identity-scenario NAME=TestConsoleSSO`).
+
 ## API keys (`console.apiKeys`)
 
 Scripts and CI can call the admin API with a scoped, expiring `wak_` key instead of
