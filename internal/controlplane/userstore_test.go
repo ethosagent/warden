@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/dashboard"
@@ -384,5 +386,50 @@ func TestUserStorePersistent(t *testing.T) {
 	err := bootErr(t, Params{ConfigPath: cfg, StateDir: stateDir})
 	if err == nil || !strings.Contains(err.Error(), "consent.idpLink.enabled") || !strings.Contains(err.Error(), "consent.store.backend") {
 		t.Fatalf("Run err = %v, want the persistent-store refusal", err)
+	}
+}
+
+// TestAtomicWriteConfigCheckedRefuses: the post-render check sees the parsed,
+// normalized candidate (a padded namePrefix arrives trimmed), and an error from
+// it is returned with the served file byte-identical, no temp file left and no
+// refresh of the served policy.
+func TestAtomicWriteConfigCheckedRefuses(t *testing.T) {
+	path := writePolicyFile(t, "api.openai.com")
+	srv := New(Config{PolicyPath: path})
+	etag := srv.policy.currentETag()
+
+	root := map[string]yaml.Node{}
+	if err := yaml.Unmarshal([]byte(readFile(t, path)+"secretStore:\n  backend: aws\n  aws:\n    region: us-east-1\n    namePrefix: \" "+config.DefaultConsentStoreNamePrefix+"\"\n"), &root); err != nil {
+		t.Fatal(err)
+	}
+	// Change the file behind the server's back: a refresh would now move the
+	// served ETag, so an unchanged ETag proves none happened.
+	other := readFile(t, writePolicyFile(t, "other.example.com"))
+	if err := os.WriteFile(path, []byte(other), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	refuse := errors.New("binding refused")
+	var seen string
+	err := srv.atomicWriteConfigChecked(root, func(p config.Policy) error {
+		if p.SecretStore.AWS != nil {
+			seen = p.SecretStore.AWS.NamePrefix
+		}
+		return refuse
+	})
+	if !errors.Is(err, refuse) {
+		t.Fatalf("err = %v, want the check's error", err)
+	}
+	if seen != config.DefaultConsentStoreNamePrefix {
+		t.Fatalf("check saw namePrefix %q, want the trimmed %q", seen, config.DefaultConsentStoreNamePrefix)
+	}
+	if got := readFile(t, path); got != other {
+		t.Fatal("served file changed by a refused write")
+	}
+	if matches, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".warden-policy-*")); len(matches) != 0 {
+		t.Fatalf("temp files left behind: %v", matches)
+	}
+	if got := srv.policy.currentETag(); got != etag {
+		t.Fatalf("served ETag moved (%s -> %s): the policy was refreshed", etag, got)
 	}
 }
