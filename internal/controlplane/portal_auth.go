@@ -13,6 +13,7 @@ import (
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/identity/adapters/oidc"
 	"github.com/ethosagent/warden/internal/portal"
 	"github.com/ethosagent/warden/internal/webauth"
@@ -59,8 +60,11 @@ type portalService struct {
 	// linkStore is the concrete store behind links (nil when the IdP link is
 	// off or no consent.store is configured); the stub page reads it.
 	linkStore *portal.LinkStore
-	cookie    webauth.Cookie
-	logger    *slog.Logger
+	// idVerifier is the portal's ID-token verifier (aud warden-portal); the
+	// offboarding refresh job verifies refreshed ID tokens with it.
+	idVerifier identity.Verifier
+	cookie     webauth.Cookie
+	logger     *slog.Logger
 
 	// audit records a callback's outcome in the admin audit log
 	// (Server.recordPortalLogin); nil when admin audit is disabled.
@@ -108,6 +112,7 @@ func (s *Server) initPortal() {
 		s.cfg.Logger.Error("control plane: portal login unavailable", "error", err)
 		return
 	}
+	p.idVerifier = verifier
 	p.provider = webauth.NewProvider(webauth.ProviderConfig{
 		Name: "portal", Issuer: cc.OIDC.Issuer,
 		OAuth: oauth2.Config{
@@ -274,7 +279,7 @@ func (p *portalService) finishLogin(w http.ResponseWriter, r *http.Request, logi
 		return "", res
 	}
 	if p.links != nil && p.cfg.IdPLink.Enabled {
-		if err := p.links.StoreLink(ctx, portal.Link{Iss: claims.Issuer, Sub: claims.Sub, Email: claims.Email, RefreshToken: login.RefreshToken}); err != nil {
+		if err := p.links.StoreLink(ctx, portal.Link{Iss: claims.Issuer, Sub: claims.Sub, Email: claims.Email, EmailVerified: claims.EmailVerified, RefreshToken: login.RefreshToken}); err != nil {
 			// Only a classified reason is logged, never the error text: a
 			// store error could echo what it was asked to write.
 			p.logger.Error("portal login: idp link store failed", "sub", claims.Sub, "reason", idpLinkFailureReason(err))

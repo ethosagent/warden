@@ -51,6 +51,74 @@ type IdPLink struct {
 	LastRefreshStatus string
 	// OffboardedAt is set by offboarding (W-P3-OFFB-01); a login clears it.
 	OffboardedAt time.Time
+
+	// The refresh job's record (W-P3-OFFB-02, idp_links/0002). A login resets
+	// State to LinkActive and clears ConsecutiveFailures, LastErrorCode and
+	// RotationPendingRef.
+
+	// State is one of the Link* states below.
+	State string
+	// LastOKAt is the last successful refresh (zero: none yet).
+	LastOKAt time.Time
+	// ConsecutiveFailures counts the refreshes since the last success that
+	// failed without a verdict (transport errors, timeouts, 429, 5xx).
+	ConsecutiveFailures int64
+	// LastErrorCode is the last failure's class code, never IdP text.
+	LastErrorCode string
+	// RotationPendingRef is the Reference of a rotated token the job holds in
+	// memory and has not yet written (set before Rotate, cleared after it).
+	// Non-empty after a crash means the chain may be lost.
+	RotationPendingRef string
+	// EmailVerified is the email_verified claim of the last verified ID token
+	// (login or refresh).
+	EmailVerified bool
+}
+
+// Link states (idp_links.link_state). Only the refresh job and a login write
+// them; offboarding (W-P3-OFFB-01) sets LinkOffboarded.
+const (
+	// LinkActive: the chain refreshed (or was just linked) and is not near
+	// its absolute lifetime.
+	LinkActive = "active"
+	// LinkExpiring: within consent.offboarding.reauthWarning of RelinkDueAt.
+	LinkExpiring = "expiring"
+	// LinkReauthRequired: the chain reached its absolute lifetime (RelinkDueAt
+	// passed, or the IdP answered "Refresh token expired."). Only a login
+	// revives it.
+	LinkReauthRequired = "reauth_required"
+	// LinkTokenLost: the stored token no longer works (the IdP says it is
+	// invalid or claimed, or a rotated token could not be written). Never an
+	// offboarding signal; the user is asked to sign in again.
+	LinkTokenLost = "token_lost"
+	// LinkSuspect: a refresh returned an ID token that failed verification
+	// or named another subject. Nothing acts on it automatically.
+	LinkSuspect = "suspect"
+	// LinkOffboarded: offboarding erased the link (W-P3-OFFB-01).
+	LinkOffboarded = "offboarded"
+)
+
+// RefreshState is the part of an idp_links row the refresh job writes with
+// LinkStore.SetState. Every field is written as given (read the row, change
+// it, write it back under the generation compare-and-swap).
+type RefreshState struct {
+	State               string
+	LastOKAt            time.Time
+	LastRefreshAt       time.Time
+	LastRefreshStatus   string
+	ConsecutiveFailures int64
+	LastErrorCode       string
+	RotationPendingRef  string
+	Email               string
+	EmailVerified       bool
+}
+
+// RefreshState returns the row's refresh-job columns.
+func (l IdPLink) RefreshState() RefreshState {
+	return RefreshState{
+		State: l.State, LastOKAt: l.LastOKAt, LastRefreshAt: l.LastRefreshAt, LastRefreshStatus: l.LastRefreshStatus,
+		ConsecutiveFailures: l.ConsecutiveFailures, LastErrorCode: l.LastErrorCode,
+		RotationPendingRef: l.RotationPendingRef, Email: l.Email, EmailVerified: l.EmailVerified,
+	}
 }
 
 // RefreshStatusRotated is LastRefreshStatus after a successful Rotate.
@@ -97,6 +165,10 @@ type LinkRepo interface {
 	// increments generation only WHERE generation = expectedGeneration, and
 	// returns ErrStaleGeneration when no row matched.
 	Rotate(ctx context.Context, iss, sub string, expectedGeneration int64, refreshRef string, at time.Time, status string) error
+	// SetState writes st's columns only WHERE generation =
+	// expectedGeneration, leaving the generation as it is, and returns
+	// ErrStaleGeneration when no row matched.
+	SetState(ctx context.Context, iss, sub string, expectedGeneration int64, st RefreshState) error
 }
 
 // LinkSecrets is the part of consent.store a LinkStore uses.
@@ -223,6 +295,7 @@ func (s *LinkStore) Link(ctx context.Context, l Link) (IdPLink, error) {
 		Iss: l.Iss, Sub: l.Sub, UserKey: uk, Email: l.Email, SecretKey: sk,
 		RefreshRef: s.keys.Ref(l.RefreshToken),
 		LinkedAt:   now, RefreshIssuedAt: now, RelinkDueAt: now.Add(s.lifetime),
+		State: LinkActive, EmailVerified: l.EmailVerified,
 	})
 	if err != nil {
 		if isNew {
@@ -321,6 +394,27 @@ func (s *LinkStore) Rotate(ctx context.Context, iss, sub string, expectedGenerat
 	s.logger.Info("idp_link_rotated", "user_key", uk, "ref", ref, "generation", row.Generation)
 	return row, nil
 }
+
+// SetState writes the refresh job's columns of (iss, sub) if the stored
+// generation is still expectedGeneration, under the user's mutex (shared with
+// StoreLink and Rotate), so a verdict about an older token never lands on a
+// row a newer login wrote: that case returns ErrStaleGeneration and writes
+// nothing.
+func (s *LinkStore) SetState(ctx context.Context, iss, sub string, expectedGeneration int64, st RefreshState) error {
+	uk, err := s.keys.UserKey(iss, sub)
+	if err != nil {
+		return fmt.Errorf("portal: idp link key: %w", err)
+	}
+	unlock, err := s.locks.lock(ctx, uk)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.repo.SetState(ctx, iss, sub, expectedGeneration, st)
+}
+
+// Ref returns token's log-safe Reference, as idp_links stores it.
+func (s *LinkStore) Ref(token string) string { return s.keys.Ref(token) }
 
 // keyedMutex is one mutex per key, taken with a context. Entries live only
 // while held or waited on.

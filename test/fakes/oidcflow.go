@@ -41,6 +41,15 @@ type flowState struct {
 	requests    []AuthRequest
 	tokenCalls  int
 	refresh     string
+
+	// The refresh_token grant (oidcrefresh.go).
+	chains       map[string]refreshChain
+	refreshFail  map[string]RefreshFailure
+	refreshMint  map[string][]MintOption
+	noRotate     bool
+	onRefresh    func(sub string)
+	refreshCalls int
+	lastIssued   string
 }
 
 // RegisterClient makes the token endpoint accept id with secret (client_secret
@@ -162,6 +171,10 @@ func (i *OIDCIssuer) handleToken(w http.ResponseWriter, r *http.Request) {
 		i.handleDeviceToken(w, r)
 		return
 	}
+	if r.PostForm.Get("grant_type") == "refresh_token" {
+		i.handleRefresh(w, r)
+		return
+	}
 	id, secret, ok := r.BasicAuth()
 	if ok {
 		id, _ = url.QueryUnescape(id)
@@ -194,14 +207,20 @@ func (i *OIDCIssuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	if len(login) > 0 {
 		opts = append(opts, login...)
 	}
+	idTok := i.Mint(opts...)
 	resp := map[string]any{
 		"access_token": "fake-access-token",
 		"token_type":   "Bearer",
 		"expires_in":   int(OIDCTokenTTL.Seconds()),
-		"id_token":     i.Mint(opts...),
+		"id_token":     idTok,
 	}
 	if refresh != "" {
 		resp["refresh_token"] = refresh
+		// The login starts a new refresh chain for its subject.
+		sub, email := tokenSubject(idTok)
+		i.flow.mu.Lock()
+		i.addChainLocked(refresh, refreshChain{sub: sub, email: email, client: id})
+		i.flow.mu.Unlock()
 	}
 	writeJSON(w, resp)
 }

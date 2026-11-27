@@ -55,6 +55,7 @@ var Fakes = map[string]FakeEntry{
 	"proxy.NameResolver":       entry("dnstest.New + proxy.NewUpstreamResolver", newNameResolverFake, nameResolverConformance),
 	"identity.Verifier":        entry("fakes.NewVerifier", func(testing.TB) *fakes.Verifier { return fakes.NewVerifier() }, verifierConformance),
 	"keys.PrivateKeyStore":     entry("fakes.NewFakeKeyStore", func(testing.TB) *fakes.FakeKeyStore { return fakes.NewFakeKeyStore() }, keyStoreConformance),
+	"offboard.TokenClient":     entry("fakes.OIDCIssuer refresh_token grant (newTokenClientFake)", newTokenClientFake, tokenClientConformance),
 	"clock.Clock":              entry("clocktest.NewFake", func(testing.TB) *clocktest.Fake { return clocktest.NewFake(time.Unix(1_700_000_000, 0)) }, clockConformance),
 }
 
@@ -91,6 +92,9 @@ var Excluded = map[string]string{
 	// Worker CA enrollment (W-P2-WCA-02), on the cpstate SQLite DB like the stores above.
 	"controlplane.EnrollmentTokenStore": "the control plane's own enrollment tokens; the harness runs the real one, a fake would hide the single-use transaction and the data_version reload",
 	"controlplane.WorkerCertStore":      "the control plane's own issued-cert table; the harness runs the real one, a fake would hide the uniqueness and revoke rules",
+
+	// Offboarding refresh job (W-P3-OFFB-02).
+	"offboard.LinkStore": "the refresh job's view of portal.LinkStore over the control plane's own idp_links table and consent.store; the harness runs the real one (consent.store is the fake AWS account), a fake would hide the per-user lock and the generation compare-and-swap that keep a refresh from overwriting a newer login",
 }
 
 // --- keys.PrivateKeyStore ---

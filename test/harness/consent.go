@@ -74,7 +74,7 @@ consent:
     backend: aws
     aws:
       region: %[5]s
-`, h.issuer.Issuer(), PortalClientID, portalSecretEnv, h.ConsoleURL()+"/portal/callback", userStoreRegion)
+`, h.issuer.Issuer(), PortalClientID, portalSecretEnv, h.ConsoleURL()+"/portal/callback", userStoreRegion) + h.offboardingYAML()
 }
 
 // userStoreRegion is consent.store.aws.region; the fake account ignores it.
@@ -104,6 +104,9 @@ type IdPLink struct {
 	Iss, Sub, UserKey, SecretKey, RefreshRef string
 	Generation                               int64
 	RelinkDueAt                              int64
+	// LinkState and LastErrorCode are the refresh job's record (W-P3-OFFB-02).
+	LinkState, LastErrorCode string
+	ConsecutiveFailures      int64
 }
 
 // IdPLinks reads the idp_links table of the control plane's state database,
@@ -112,7 +115,7 @@ func (h *H) IdPLinks() []IdPLink {
 	h.tb.Helper()
 	db := h.openCPStateReadOnly()
 	defer func() { _ = db.Close() }()
-	rows, err := db.SQL().Query(`SELECT iss, sub, user_key, secret_key, refresh_ref, generation, relink_due_at FROM idp_links ORDER BY iss, sub`)
+	rows, err := db.SQL().Query(`SELECT iss, sub, user_key, secret_key, refresh_ref, generation, relink_due_at, link_state, last_error_code, consecutive_failures FROM idp_links ORDER BY iss, sub`)
 	if err != nil {
 		h.tb.Fatalf("harness: read idp links: %v", err)
 	}
@@ -120,7 +123,7 @@ func (h *H) IdPLinks() []IdPLink {
 	var out []IdPLink
 	for rows.Next() {
 		var l IdPLink
-		if err := rows.Scan(&l.Iss, &l.Sub, &l.UserKey, &l.SecretKey, &l.RefreshRef, &l.Generation, &l.RelinkDueAt); err != nil {
+		if err := rows.Scan(&l.Iss, &l.Sub, &l.UserKey, &l.SecretKey, &l.RefreshRef, &l.Generation, &l.RelinkDueAt, &l.LinkState, &l.LastErrorCode, &l.ConsecutiveFailures); err != nil {
 			h.tb.Fatalf("harness: scan an idp link: %v", err)
 		}
 		out = append(out, l)

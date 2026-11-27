@@ -144,7 +144,7 @@ func TestIdPLinkStored(t *testing.T) {
 	}
 	want := portal.IdPLink{
 		Iss: linkIss, Sub: linkSub, UserKey: uk, Email: "dana@example.com", SecretKey: "idp/" + uk,
-		RefreshRef: secrets.Ref(linkToken).String(), Generation: 1,
+		RefreshRef: secrets.Ref(linkToken).String(), Generation: 1, State: portal.LinkActive,
 		LinkedAt: linkEpoch, RefreshIssuedAt: linkEpoch, RelinkDueAt: linkEpoch.Add(linkLifetime),
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -201,7 +201,8 @@ func TestIdPLinksValueFree(t *testing.T) {
 	allowed := map[string]string{
 		"Iss": "issuer URL", "Sub": "subject", "UserKey": "hash of (iss, sub)", "Email": "display address",
 		"SecretKey": "logical key name", "RefreshRef": "secrets.Ref: hash prefix, last4, length",
-		"LastRefreshStatus": "status word",
+		"LastRefreshStatus": "status word", "State": "link state word", "LastErrorCode": "failure class code",
+		"RotationPendingRef": "secrets.Ref of a rotated token: hash prefix, last4, length",
 	}
 	timeT := reflect.TypeOf(time.Time{})
 	rt := reflect.TypeOf(portal.IdPLink{})
@@ -209,7 +210,7 @@ func TestIdPLinksValueFree(t *testing.T) {
 	for i := range rt.NumField() {
 		f := rt.Field(i)
 		switch {
-		case f.Type == timeT, f.Type.Kind() == reflect.Int64:
+		case f.Type == timeT, f.Type.Kind() == reflect.Int64, f.Type.Kind() == reflect.Bool:
 			continue
 		case f.Type.Kind() == reflect.String:
 			if _, ok := allowed[f.Name]; !ok {
@@ -240,7 +241,8 @@ func TestIdPLinksValueFree(t *testing.T) {
 		cols = append(cols, c)
 	}
 	wantCols := []string{"iss", "sub", "user_key", "email", "secret_key", "refresh_ref", "generation", "linked_at",
-		"refresh_issued_at", "relink_due_at", "last_refresh_at", "last_refresh_status", "offboarded_at"}
+		"refresh_issued_at", "relink_due_at", "last_refresh_at", "last_refresh_status", "offboarded_at",
+		"link_state", "last_ok_at", "consecutive_failures", "last_error_code", "rotation_pending_ref", "email_verified"}
 	if !reflect.DeepEqual(cols, wantCols) {
 		t.Fatalf("idp_links columns = %v, want %v (a new column needs this review)", cols, wantCols)
 	}

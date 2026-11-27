@@ -42,6 +42,7 @@ import (
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/offboard"
 	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/internal/workerca"
 )
@@ -368,6 +369,10 @@ type Server struct {
 	// portal is the consent portal's sign-in (/portal/login, /portal/callback,
 	// /portal); set only with Consent and State (W-P3-CSIG-02).
 	portal *portalService
+	// offboarding is the IdP refresh job (W-P3-OFFB-02); nil unless the
+	// portal's IdP link is on and consent.offboarding.mode is not off.
+	offboarding     *offboard.Job
+	offboardMetrics *offboard.Metrics
 	// audit is the admin audit middleware's state; nil when cfg.AdminAudit is
 	// (admin audit disabled), in which case no route is wrapped.
 	audit *adminAuditor
@@ -489,6 +494,7 @@ func New(cfg Config) *Server {
 	s.initSessions()
 	s.initAuth()
 	s.initPortal()
+	s.initOffboarding()
 	s.initAPIKeys()
 	s.initBreakGlass()
 	s.warnAdminToken()
@@ -606,6 +612,12 @@ func (s *Server) Start(ctx context.Context) {
 			}
 		}
 	}()
+
+	// The offboarding IdP refresh job (consent.offboarding.mode observe or
+	// enforce); its first run is one minute after Start.
+	if s.offboarding != nil {
+		s.offboarding.Start(ctx)
+	}
 
 	// Retention: a persistent store prunes events past its retention window on a
 	// slow cadence. The in-memory store does not implement pruner (it is

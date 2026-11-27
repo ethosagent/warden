@@ -56,6 +56,8 @@ type portalRigOpts struct {
 	// userStore is consent.store (Config.UserStore); nil gets a fresh
 	// fakes.MemorySecretStore, so the real LinkStore stores the IdP link.
 	userStore secrets.SecretStore
+	// offboarding is consent.offboarding (zero: off).
+	offboarding config.ConsentOffboarding
 }
 
 func newPortalRig(t *testing.T, o portalRigOpts) *portalRig {
@@ -96,6 +98,7 @@ func newPortalRig(t *testing.T, o portalRigOpts) *portalRig {
 			AllowedGroups: o.allowedGroups,
 			Session:       config.ConsentSession{Idle: config.DefaultConsentIdle, Absolute: config.DefaultConsentAbsolute},
 			IdPLink:       config.ConsentIdPLink{Enabled: !o.noIdPLink, RefreshLifetime: config.DefaultConsentRefreshLifetime},
+			Offboarding:   o.offboarding,
 		}
 	}
 	logs := &syncBuf{}
@@ -483,7 +486,7 @@ func TestPortalAdmission(t *testing.T) {
 		r.ready()
 		r.idp.SetLogin(fakes.Valid("pat", "pat@example.com"))
 		r.login("")
-		if len(links.links) != 1 || links.links[0] != (portal.Link{Iss: r.idp.Issuer(), Sub: "pat", Email: "pat@example.com", RefreshToken: portalRefreshToken}) {
+		if len(links.links) != 1 || links.links[0] != (portal.Link{Iss: r.idp.Issuer(), Sub: "pat", Email: "pat@example.com", EmailVerified: true, RefreshToken: portalRefreshToken}) {
 			t.Fatalf("links = %v", links.links)
 		}
 		links.err = errors.New("store down")

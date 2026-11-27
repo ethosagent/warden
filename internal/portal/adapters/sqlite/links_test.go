@@ -38,7 +38,7 @@ func TestRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := in
-	want.Generation = 1
+	want.Generation, want.State = 1, portal.LinkActive
 	if got != want {
 		t.Fatalf("Upsert = %+v, want %+v", got, want)
 	}
@@ -79,5 +79,48 @@ func TestRepo(t *testing.T) {
 	all, err := r.List(ctx)
 	if err != nil || len(all) != 1 || all[0].Generation != 3 {
 		t.Fatalf("List = %+v, %v", all, err)
+	}
+}
+
+// TestRepoSetState: SetState writes every refresh-job column under the
+// generation compare-and-swap without changing the generation; a re-login
+// Upsert resets the record to active but keeps last_ok_at.
+func TestRepoSetState(t *testing.T) {
+	ctx := context.Background()
+	r, _ := openRepo(t)
+	t0 := time.UnixMilli(1_800_000_000_000).UTC()
+	in := portal.IdPLink{Iss: "https://i", Sub: "s", UserKey: "0123456789abcdef0123456789abcdef", Email: "e@x",
+		SecretKey: "idp/0123456789abcdef0123456789abcdef", RefreshRef: "ref1",
+		LinkedAt: t0, RefreshIssuedAt: t0, RelinkDueAt: t0.Add(time.Hour)}
+	if _, err := r.Upsert(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	st := portal.RefreshState{
+		State: portal.LinkTokenLost, LastOKAt: t0.Add(time.Minute), LastRefreshAt: t0.Add(2 * time.Minute),
+		LastRefreshStatus: "failed", ConsecutiveFailures: 2, LastErrorCode: "token_lost",
+		RotationPendingRef: "pending-ref", Email: "new@x", EmailVerified: true,
+	}
+	if err := r.SetState(ctx, "https://i", "s", 2, st); !errors.Is(err, portal.ErrStaleGeneration) {
+		t.Fatalf("stale SetState = %v", err)
+	}
+	if err := r.SetState(ctx, "https://i", "s", 1, st); err != nil {
+		t.Fatal(err)
+	}
+	g, err := r.Get(ctx, "https://i", "s")
+	if err != nil || g.Generation != 1 || g.RefreshState() != st {
+		t.Fatalf("after SetState = %+v, %v", g, err)
+	}
+	if err := r.SetState(ctx, "https://i", "absent", 1, st); !errors.Is(err, portal.ErrStaleGeneration) {
+		t.Fatalf("SetState of an absent row = %v", err)
+	}
+	re := in
+	re.RefreshRef, re.EmailVerified = "ref2", false
+	got, err := r.Upsert(ctx, re)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != portal.LinkActive || got.ConsecutiveFailures != 0 || got.LastErrorCode != "" ||
+		got.RotationPendingRef != "" || got.EmailVerified || !got.LastOKAt.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("re-login Upsert = %+v, want the record reset and last_ok_at kept", got)
 	}
 }

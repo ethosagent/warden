@@ -95,6 +95,10 @@ var All = slices.Concat(
 		// Reference to idp_links; a re-login bumps the generation; a store outage
 		// fails the login closed.
 		{Name: "portal_idp_link", Opts: portalOpts(), Run: portalIdPLink},
+		// Offboarding refresh job in observe mode (W-P3-OFFB-02): the scheduled
+		// run rotates the stored IdP refresh token with a generation bump, and an
+		// upstream refusal is recorded without touching the user's session.
+		{Name: "portal_offboarding_refresh", Opts: portalOffboardingOpts(), Run: portalOffboardingRefresh},
 
 		// Break-glass login (W-P1-OPS1-08): a real argon2id login opens a Secure
 		// admin session with a signed row, an ERROR line and a Finding per
