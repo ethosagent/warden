@@ -202,6 +202,7 @@ zones:
     - internal/workerca/adapters/signer/**  # x509.CreateCertificate lives here: only the control plane issues worker certs (#88)
     - internal/apikeys/**   # CP-only API keys: domain and its SQLite adapter (APIK-01)
     - internal/oauthbroker   # CP-only OAuth broker: per-user provider grants (BRKR-01)
+    - internal/oauthbroker/adapters/httpclient   # CP-only SSRF-safe provider token-endpoint client (BRKR-07)
   shared:
     - internal/config
     - internal/denyreason
