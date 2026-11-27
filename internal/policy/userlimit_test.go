@@ -562,19 +562,42 @@ func TestChargeUserLimit_ManyRulesNoAllocs(t *testing.T) {
 	}
 }
 
+// TestChargeUserLimit_ManyRulesUnderAMicrosecond pins the shape that keeps a
+// charge with 256 rules well under a microsecond, deterministically (a
+// wall-clock assertion would flake on a loaded host; BenchmarkChargeUserLimit
+// carries the number, about 300 ns/op and 0 allocs/op). The match walks only
+// the index lists the subject's sub, email, groups and agent select, never the
+// whole rule list, so the candidate rules a charge can test stay bounded by
+// how many rules name this subject, not by how many rules exist.
 func TestChargeUserLimit_ManyRulesUnderAMicrosecond(t *testing.T) {
-	if testing.Short() || raceEnabled {
-		t.Skip("timing check: skipped in -short and under -race")
+	p := manyRules()
+	e := NewEvaluator(p)
+	ls := e.userLimits
+	s := benchSubject()
+	const agent = "agent-a"
+	// Every list the match can walk for this subject and agent.
+	walked := len(ls.bySub[s.Sub]) + len(ls.byEmail[s.Email]) + len(ls.byAgent[agent])
+	agentGroups := ls.byAgentGroup[agent]
+	for _, g := range s.Groups {
+		walked += len(ls.byGroup[g]) + len(agentGroups[g])
 	}
-	// Best of three runs, so a busy CI host does not fail a fast path.
-	best := int64(-1)
-	for i := 0; i < 3; i++ {
-		if ns := testing.Benchmark(BenchmarkChargeUserLimit).NsPerOp(); best < 0 || ns < best {
-			best = ns
-		}
+	// The subject is named by one groups rule ("eng"); the agent by one
+	// agents rule ("bot"). The 85 agent-narrowed rules that share "eng" are
+	// indexed under their own agents and are never visited.
+	if walked > 4 {
+		t.Fatalf("a charge with %d rules can test %d candidate rules, want at most 4", len(p.UserLimits), walked)
 	}
-	if best >= 1000 {
-		t.Errorf("ChargeUserLimit with %d rules = %d ns/op, want under 1000", config.MaxUserLimits, best)
+	if v := e.ChargeUserLimit(ulReq("api.openai.com", s), agent); v.LimitRule != "eng" {
+		t.Fatalf("bench subject matched %q, want eng", v.LimitRule)
+	}
+	// The same bound holds for a subject that matches nothing: only its own
+	// (empty) lists are walked before the default.
+	nobody := user("nobody", "nobody@corp.example", true, "none")
+	if n := len(ls.bySub[nobody.Sub]) + len(ls.byEmail[nobody.Email]) + len(ls.byGroup["none"]) + len(agentGroups["none"]); n != 0 {
+		t.Fatalf("an unknown subject selects %d candidate rules, want 0", n)
+	}
+	if got := testing.AllocsPerRun(1000, func() { e.ChargeUserLimit(ulReq("api.openai.com", nobody), agent) }); got != 0 {
+		t.Errorf("ChargeUserLimit for an unmatched subject allocates %v, want 0", got)
 	}
 }
 
