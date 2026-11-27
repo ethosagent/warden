@@ -206,10 +206,56 @@ func validateSecretStore(c SecretStoreConfig) error {
 // definition.
 const ReservedSecretNamespace = "cp"
 
-// IsReservedSecretKey reports whether key is the reserved namespace itself or
-// lies under "cp/", after trimming the surrounding whitespace every store entry
-// point trims.
+// The P3 per-user credential namespaces (W-P3-CSIG-06). They live only in the
+// CP-only consent.store; reserving them in every other store and on every
+// worker and human route means no policy, console or API edit can make a worker
+// swap in, read or overwrite a per-user credential, and nothing can plant a
+// value under a name the CP would later trust. secrets.UserGrantKey and its
+// siblings are the only builders of keys under them.
+const (
+	// ReservedUserGrantNamespace holds provider grants: users/<userKey>/<provider>.
+	ReservedUserGrantNamespace = "users"
+	// ReservedIdPLinkNamespace holds IdP refresh tokens: idp/<userKey>.
+	ReservedIdPLinkNamespace = "idp"
+	// ReservedRevokingNamespace holds parked revokes: revoking/<userKey>/<provider>.
+	ReservedRevokingNamespace = "revoking"
+	// ReservedClientSecretNamespace holds OAuth client secrets: oauth-clients/<provider>.
+	ReservedClientSecretNamespace = "oauth-clients"
+)
+
+// reservedSecretNamespaces lists every reserved namespace, the original cp
+// namespace first.
+var reservedSecretNamespaces = []string{
+	ReservedSecretNamespace,
+	ReservedUserGrantNamespace,
+	ReservedIdPLinkNamespace,
+	ReservedRevokingNamespace,
+	ReservedClientSecretNamespace,
+}
+
+// ReservedSecretNamespaces returns a copy of the reserved namespace names.
+func ReservedSecretNamespaces() []string {
+	return append([]string(nil), reservedSecretNamespaces...)
+}
+
+// ReservedSecretNamespaceOf returns the reserved namespace key is in, if any.
+// A key is in namespace ns when it is ns itself or starts with "ns/", after the
+// normalization every store entry point applies (surrounding whitespace
+// trimmed) and with leading slashes dropped, so "/idp/x" (which a path-style
+// backend may collapse onto idp/x) cannot slip past the guard.
+func ReservedSecretNamespaceOf(key string) (string, bool) {
+	k := strings.TrimLeft(strings.TrimSpace(key), "/")
+	for _, ns := range reservedSecretNamespaces {
+		if k == ns || strings.HasPrefix(k, ns+"/") {
+			return ns, true
+		}
+	}
+	return "", false
+}
+
+// IsReservedSecretKey reports whether key is in a reserved namespace (cp/,
+// users/, idp/, revoking/ or oauth-clients/); see ReservedSecretNamespaceOf.
 func IsReservedSecretKey(key string) bool {
-	k := strings.TrimSpace(key)
-	return k == ReservedSecretNamespace || strings.HasPrefix(k, ReservedSecretNamespace+"/")
+	_, ok := ReservedSecretNamespaceOf(key)
+	return ok
 }

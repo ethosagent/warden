@@ -90,6 +90,11 @@ var All = slices.Concat(
 		// fake creates a portal_sessions row behind __Host-warden_portal (no
 		// console session), and one without a refresh token creates nothing.
 		{Name: "portal_login", Opts: portalOpts(), Run: portalLogin},
+		// IdP link (W-P3-CSIG-03): a portal login writes the refresh token to the
+		// persistent CP-only consent.store at warden-cp/idp/<userKey> and only a
+		// Reference to idp_links; a re-login bumps the generation; a store outage
+		// fails the login closed.
+		{Name: "portal_idp_link", Opts: portalOpts(), Run: portalIdPLink},
 
 		// Break-glass login (W-P1-OPS1-08): a real argon2id login opens a Secure
 		// admin session with a signed row, an ERROR line and a Finding per
@@ -281,6 +286,10 @@ var All = slices.Concat(
 		// cp/ secret namespace reserved (W-P2-WCA-07): hidden from the list,
 		// POST and DELETE refused with 403 reserved_key.
 		{Name: "reserved_secret_namespace", Opts: strictAuthOpts(), Run: reservedSecretNamespace},
+		// Per-user credential namespaces reserved (W-P3-CSIG-06): idp/, users/,
+		// revoking/ and oauth-clients/ are hidden from the list and refused on
+		// POST and DELETE with 403 reserved_key.
+		{Name: "reserved_user_secret_namespaces", Opts: strictAuthOpts(), Run: reservedUserSecretNamespaces},
 		// Held long-poll (W-P1-WTOK-09): a revoke out of process returns that
 		// token's held /policy with 401 while another token's stays parked.
 		{Name: "worker_token_longpoll_revoke", Opts: workerTokenOpts(), Run: workerTokenLongPollRevoke},

@@ -184,7 +184,8 @@ func TestConsentIssuerHeadChecked(t *testing.T) {
 
 	// Stage 2: --config is fully consistent (consent issuer == identity issuer).
 	cfg := filepath.Join(t.TempDir(), "config.yaml")
-	body := basePolicy + identityBlockYAML + consoleBlock + consentBlockYAML
+	// idpLink off: this test boots without a persistent consent.store.
+	body := basePolicy + identityBlockYAML + consoleBlock + consentBlockYAML + "  idpLink:\n    enabled: false\n"
 	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

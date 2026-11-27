@@ -949,6 +949,8 @@ consent:
   from `consent.oidc.issuer` is refused with 400 `identity_issuer_mismatch`.
 - `https` issuer unless `internalIssuerURL` is set; `redirectURL` is `https`
   unless its host is loopback, and must differ from `console.oidc.redirectURL`.
+- `consent.store` is the CP-only user credential store; see
+  [CP-only user credential store](#cp-only-user-credential-store-consentstore).
 
 ### Consent portal sign-in
 
@@ -990,6 +992,40 @@ With the block enabled and `--state-dir` set the control plane mounts:
   to 20 rows per address per minute by its own limiter (a portal flood does not use up
   the `auth.login_failed` budget). No code, state, verifier, nonce, token or
   cookie value is logged or recorded.
+
+### IdP link (`consent.idpLink`)
+
+With `consent.idpLink.enabled: true` (the default) the portal login asks for
+`offline_access`, and the callback stores the user's IdP refresh token before it
+creates the session, so offboarding can later refresh it to detect disabled users:
+
+- The token goes to the CP-only `consent.store` at logical key
+  `idp/<userKey>`, where `userKey` is derived from the verified ID token's `iss` and
+  `sub` (32 hex characters). With the default `namePrefix` the AWS secret name is
+  `warden-cp/idp/<userKey>`. No worker holds a credential for `consent.store`.
+- `idp_links` (migration `idp_links/0001`) holds only `iss`, `sub`, `user_key`,
+  `email`, `secret_key`, `refresh_ref` (the token's Reference: hash prefix, last four
+  characters and length), `generation`, `linked_at`, `refresh_issued_at`,
+  `relink_due_at` (`refresh_issued_at` + `idpLink.refreshLifetime`, the IdP's absolute
+  lifetime of the refresh chain), `last_refresh_at`, `last_refresh_status` and
+  `offboarded_at`. No column holds a token. Times are epoch milliseconds.
+- Writes for one user are serialized. A login writes the secret first and then
+  upserts the row, incrementing `generation` (the first link is generation 1; a
+  re-login keeps `linked_at` and resets `refresh_issued_at`, `relink_due_at`, the
+  last-refresh columns and `offboarded_at`). Offboarding's rotation writes only when
+  the stored generation is still the one it read, so it never overwrites a newer
+  login.
+- Fail closed: a failed `consent.store` write is 503 `secret_store_unavailable`
+  with no session and no row; a token response without a refresh token is 502
+  `offline_access_not_granted`. The control plane refuses to start with the IdP
+  link enabled and no `consent.store`, or a non-persistent one (`echo`).
+- Logout and session expiry leave the link and the stored token in place.
+- `warden-cp restore` keeps `idp_links`: the tokens live in `consent.store`,
+  outside the backup, so the rows still describe them.
+- Each stored link logs `idp_link_stored` with `user_key`, `ref` and
+  `generation`; with admin audit on it records `user.idp_linked` (target
+  `idp_link`, `target_ref` the user key). The token is never logged or recorded.
+  `GET /portal` shows the link status, generation and when to sign in again.
 
 ## API keys (`console.apiKeys`)
 
@@ -2729,6 +2765,132 @@ widened:
 Upgrade note: rename any existing `cp` or `cp/...` placeholder, `auth[]`
 credential value or stored secret before upgrading. The control plane and the
 workers refuse to load a config that names the reserved namespace.
+
+### CP-only user credential store (`consent.store`)
+
+Every per-user credential in P3 (IdP refresh tokens, provider grants, parked
+revokes and OAuth client secrets) lives in one CP-only store, `consent.store`,
+never in the distributed `secretStore`. The control plane hands workers its
+`secretStore` selector (and, when configured, its explicit credential) over the
+settings wire, so anything written there is readable by every worker; nothing
+hands a worker a credential for `consent.store`. The block is part of the
+CP-local `consent:` block: read from `--config` only, never on `/policy` or the
+settings wire, and never mounted on `/central/secrets` or the dashboard secret
+store tab.
+
+```yaml
+consent:
+  enabled: true
+  # oidc, session, idpLink ... as above
+  store:
+    backend: aws                 # aws | vault (not yet available) | echo (--dev only)
+    namePrefix: warden-cp/       # default; must end with /
+    aws:
+      region: us-east-1          # required for aws
+    # vault:                     # accepted once the Vault KV v2 store lands
+    #   addr: https://vault.example.com:8200
+    #   mount: secret
+    #   namespace: team          # optional
+    #   tokenEnv: VAULT_TOKEN    # env var NAME, never the token
+```
+
+Logical keys (built only by the `secrets.UserKey` helpers; `<userKey>` is a
+fixed 32-hex pseudonym of the user's issuer and subject):
+
+| Key | Holds |
+|-----|-------|
+| `idp/<userKey>` | the user's IdP refresh token |
+| `users/<userKey>/<provider>` | the user's grant for a provider |
+| `revoking/<userKey>/<provider>` | a grant parked until its provider revoke succeeds |
+| `oauth-clients/<provider>` | a provider's OAuth client secret |
+
+With the default prefix the backend name of `idp/<userKey>` is
+`warden-cp/idp/<userKey>`.
+
+- **Credentials.** The AWS client takes credentials from the control plane's
+  environment or instance role only (env, then IMDS); the Vault token is read
+  from the CP environment variable named by `tokenEnv`. The block has no key or
+  token field, and the strict parser rejects one.
+- **Persistence.** With `consent.idpLink.enabled` (the default) the control
+  plane refuses to start unless `consent.store` is configured with a backend
+  that keeps values (aws today); no store and `echo` are refused, naming
+  `consent.idpLink.enabled` and `consent.store.backend`. Set
+  `idpLink.enabled: false` to run consent sign-in without a store.
+- **Startup refusals.** The control plane refuses to start, naming both keys,
+  when `consent.store.namePrefix` equals, starts with, or is a prefix of
+  `secretStore.aws.namePrefix` on the same backend (compared after trimming,
+  case-insensitively, and with the default prefix filled in). For AWS the region and
+  account are not taken into account: a worker grant on a prefix usually spans
+  regions, and the account behind a credential is not known before calling AWS.
+  It also refuses a `consent.store` that nests with `keys.store.aws.namePrefix`,
+  `backend: echo` without `--dev` (echo keeps no value), and, for now,
+  `backend: vault`. A settings write, rollback, applied draft or `warden policy
+  import` that would move `secretStore` onto the `consent.store` namespace is
+  refused with 400 `{"error":"user_store_overlap","detail":...}`.
+- **Reserved namespaces.** `idp/`, `users/`, `revoking/` and `oauth-clients/`
+  are reserved everywhere else, exactly like `cp/` above: config validation
+  rejects a `secrets[]` placeholder under one with `invalid_secret_key: reserved
+  namespace "<ns>/"`, a worker refuses one before any backend call, and
+  `/central/secrets` and `/dashboard/api/secretstore` leave them out of `GET`
+  and answer `POST` and `DELETE` with 403 `reserved_key`. No policy or console
+  edit can make a worker swap in, read or overwrite a per-user credential.
+
+Give only the control plane's role access to `warden-cp/*`. Worker roles, and
+any credential you put in `secretStore.aws`, must never cover it. Example IAM
+statements for the control plane role (use your own prefix if you changed it;
+keep `warden-cp/*` with the slash, so it does not also match
+`warden-cp-keys/`). `secretsmanager:ListSecrets` has no resource-level
+permissions, so it needs its own statement on `"*"`; listing returns names and
+metadata only, never values, and the names under `warden-cp/` carry only the
+pseudonymous `<userKey>` and provider ids, never a subject or email:
+
+```json
+[
+  {
+    "Sid": "WardenCpUserCredentialStore",
+    "Effect": "Allow",
+    "Action": [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:PutSecretValue",
+      "secretsmanager:CreateSecret",
+      "secretsmanager:DeleteSecret"
+    ],
+    "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp/*"
+  },
+  {
+    "Sid": "WardenCpListSecrets",
+    "Effect": "Allow",
+    "Action": "secretsmanager:ListSecrets",
+    "Resource": "*"
+  }
+]
+```
+
+And an explicit deny on every worker role, so it holds even if a later grant
+is widened:
+
+```json
+{
+  "Sid": "NeverTheUserCredentialStore",
+  "Effect": "Deny",
+  "Action": "secretsmanager:*",
+  "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp/*"
+}
+```
+
+The Vault equivalent, once the Vault backend lands: a policy attached only to
+the control plane's token, and no worker policy that names the path.
+
+```hcl
+# warden-cp: the control plane token only
+path "secret/data/warden-cp/*"     { capabilities = ["create", "read", "update", "delete"] }
+path "secret/metadata/warden-cp/*" { capabilities = ["read", "list", "delete"] }
+```
+
+Upgrade note: an existing `secrets[]` placeholder or `auth[]` credential value
+under `idp/`, `users/`, `revoking/` or `oauth-clients/` now fails validation with
+the message above; rename it before upgrading. Other placeholders are
+unaffected.
 
 ## Worker CA (`workerCA:`)
 

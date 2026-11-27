@@ -87,9 +87,12 @@ func consentIssuerBinding(consent *config.ConsentConfig, id *config.IdentitySett
 	return &dashboard.IssuerMismatchError{Err: fmt.Errorf("identity.issuer %q must equal consent.oidc.issuer %q while consent is enabled", got, consent.OIDC.Issuer)}
 }
 
-// checkIssuerBindings runs the two identity.issuer guards (the token-service
-// collision and the consent binding) against one settings block. nil settings
-// carry no identity block.
+// checkIssuerBindings runs every guard that binds settings to CP-local config
+// against one settings block: the two identity.issuer guards (the
+// token-service collision and the consent binding) and the consent.store
+// overlap with the distributed secretStore (W-P3-CSIG-06). Every writer of
+// served settings calls it, so a new binding belongs here, not at a new call
+// site. nil settings carry no identity or secrets block.
 func (s *Server) checkIssuerBindings(settings *config.SettingsWire) error {
 	var id *config.IdentitySettings
 	if settings != nil {
@@ -98,5 +101,8 @@ func (s *Server) checkIssuerBindings(settings *config.SettingsWire) error {
 	if err := s.checkIssuerCollision(id); err != nil {
 		return err
 	}
-	return s.checkConsentIssuer(id)
+	if err := s.checkConsentIssuer(id); err != nil {
+		return err
+	}
+	return s.checkUserStoreBinding(settings)
 }

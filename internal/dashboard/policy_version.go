@@ -233,7 +233,7 @@ func writeWriterError(w http.ResponseWriter, err error) {
 	if writeHeld(w, err) {
 		return
 	}
-	if writeIssuerMismatch(w, err) {
+	if writeBindingError(w, err) {
 		return
 	}
 	var cerr *ChangeError

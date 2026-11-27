@@ -205,6 +205,7 @@ zones:
     - internal/apikeys/**   # CP-only API keys: domain and its SQLite adapter (APIK-01)
     - internal/webauth/**   # CP-only browser sign-in and its test fake (#276)
     - internal/portal   # CP-only consent portal domain (CSIG-02)
+    - internal/portal/adapters/**   # the SQLite idp_links store (CSIG-03)
   shared:
     - internal/config
     - internal/denyreason

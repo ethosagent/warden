@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/controlplane"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/test/fakes"
 )
 
 // The consent portal sign-in (W-P3-CSIG-02): the control plane boots with a
@@ -29,7 +31,9 @@ const (
 // consent.oidc.issuer must equal identity.issuer. The portal's redirect URL is
 // the control plane's https origin + /portal/callback, so its cookies are the
 // __Host- ones. The IdP link is on (the default): the issuer fake must return a
-// refresh token (h.Issuer().SetRefreshToken) for a login to succeed.
+// refresh token (h.Issuer().SetRefreshToken) for a login to succeed, and
+// consent.store is an aws backend with the default warden-cp/ prefix over an
+// in-memory account (h.UserStoreAWS), so the link is persisted (W-P3-CSIG-03).
 func WithConsent() Option {
 	return func(h *H) {
 		h.wantIssuer = true
@@ -47,6 +51,7 @@ func (h *H) prepareConsent() {
 	if !h.wantConsent {
 		return
 	}
+	h.userStoreAWS = fakes.NewFakeAWSSecretsClient()
 	h.tb.Setenv(portalSecretEnv, portalSecretValue)
 	h.issuer.RegisterClient(PortalClientID, portalSecretValue)
 }
@@ -65,7 +70,82 @@ consent:
     clientID: %[2]s
     clientSecretEnv: %[3]s
     redirectURL: %[4]s
-`, h.issuer.Issuer(), PortalClientID, portalSecretEnv, h.ConsoleURL()+"/portal/callback")
+  store:
+    backend: aws
+    aws:
+      region: %[5]s
+`, h.issuer.Issuer(), PortalClientID, portalSecretEnv, h.ConsoleURL()+"/portal/callback", userStoreRegion)
+}
+
+// userStoreRegion is consent.store.aws.region; the fake account ignores it.
+const userStoreRegion = "us-east-1"
+
+// applyConsent hands the control plane the consent.store account, as the CP's
+// role scoped to the consent.store prefix sees it.
+func (h *H) applyConsent(p *controlplane.Params) {
+	if !h.wantConsent || h.userStoreAWS == nil {
+		return
+	}
+	p.UserStoreAWSClient = h.userStoreAWS.View(config.DefaultConsentStoreNamePrefix)
+}
+
+// UserStoreAWS is the AWS account behind the control plane's consent.store,
+// unscoped (it sees every name), for assertions on what was written where.
+func (h *H) UserStoreAWS() *fakes.FakeAWSSecretsClient {
+	h.tb.Helper()
+	if !h.wantConsent {
+		h.tb.Fatal("harness: UserStoreAWS needs the WithConsent option")
+	}
+	return h.userStoreAWS
+}
+
+// IdPLink is one row of the control plane's idp_links table.
+type IdPLink struct {
+	Iss, Sub, UserKey, SecretKey, RefreshRef string
+	Generation                               int64
+	RelinkDueAt                              int64
+}
+
+// IdPLinks reads the idp_links table of the control plane's state database,
+// read-only.
+func (h *H) IdPLinks() []IdPLink {
+	h.tb.Helper()
+	db := h.openCPStateReadOnly()
+	defer func() { _ = db.Close() }()
+	rows, err := db.SQL().Query(`SELECT iss, sub, user_key, secret_key, refresh_ref, generation, relink_due_at FROM idp_links ORDER BY iss, sub`)
+	if err != nil {
+		h.tb.Fatalf("harness: read idp links: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []IdPLink
+	for rows.Next() {
+		var l IdPLink
+		if err := rows.Scan(&l.Iss, &l.Sub, &l.UserKey, &l.SecretKey, &l.RefreshRef, &l.Generation, &l.RelinkDueAt); err != nil {
+			h.tb.Fatalf("harness: scan an idp link: %v", err)
+		}
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		h.tb.Fatalf("harness: read idp links: %v", err)
+	}
+	return out
+}
+
+// openCPStateReadOnly opens the control plane's state database read-only.
+func (h *H) openCPStateReadOnly() *cpstate.DB {
+	h.tb.Helper()
+	if !h.wantConsent {
+		h.tb.Fatal("harness: reading the portal tables needs the WithConsent option")
+	}
+	path := filepath.Join(h.root, "cp-state", "warden-cp.db")
+	if _, err := os.Stat(path); err != nil {
+		h.tb.Fatalf("harness: control-plane state db: %v", err)
+	}
+	db, err := cpstate.OpenReadOnly(context.Background(), path, controlplane.StateMigrations())
+	if err != nil {
+		h.tb.Fatalf("harness: open the state db: %v", err)
+	}
+	return db
 }
 
 // PortalSession is one row of the control plane's portal_sessions table.
@@ -79,17 +159,7 @@ type PortalSession struct {
 // database, read-only.
 func (h *H) PortalSessions() []PortalSession {
 	h.tb.Helper()
-	if !h.wantConsent {
-		h.tb.Fatal("harness: PortalSessions needs the WithConsent option")
-	}
-	path := filepath.Join(h.root, "cp-state", "warden-cp.db")
-	if _, err := os.Stat(path); err != nil {
-		h.tb.Fatalf("harness: control-plane state db: %v", err)
-	}
-	db, err := cpstate.OpenReadOnly(context.Background(), path, controlplane.StateMigrations())
-	if err != nil {
-		h.tb.Fatalf("harness: open the state db: %v", err)
-	}
+	db := h.openCPStateReadOnly()
 	defer func() { _ = db.Close() }()
 	rows, err := db.SQL().Query(`SELECT iss, sub, email, created_at, expires_at FROM portal_sessions ORDER BY created_at, id_hash`)
 	if err != nil {
