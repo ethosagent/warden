@@ -17,6 +17,7 @@ import (
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/portal"
+	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/internal/webauth"
 	"github.com/ethosagent/warden/internal/webauth/webauthtest"
 	"github.com/ethosagent/warden/test/fakes"
@@ -52,6 +53,9 @@ type portalRigOpts struct {
 	noConsent     bool
 	noState       bool
 	links         portal.LinkWriter
+	// userStore is consent.store (Config.UserStore); nil gets a fresh
+	// fakes.MemorySecretStore, so the real LinkStore stores the IdP link.
+	userStore secrets.SecretStore
 }
 
 func newPortalRig(t *testing.T, o portalRigOpts) *portalRig {
@@ -95,14 +99,20 @@ func newPortalRig(t *testing.T, o portalRigOpts) *portalRig {
 		}
 	}
 	logs := &syncBuf{}
+	userStore := o.userStore
+	if userStore == nil {
+		userStore = fakes.NewMemorySecretStore()
+	}
 	srv := New(Config{
-		PolicyPath: writePolicyFile(t, "a.example"), State: db, Console: cc, Consent: consent,
+		PolicyPath: writePolicyFile(t, "a.example"), State: db, Console: cc, Consent: consent, UserStore: userStore,
 		ClientSecret: rigClientSecret, ConsentClientSecret: portalClientSecret, Now: clk.Now,
 		Logger: slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if srv.portal != nil && srv.portal.provider != nil {
 		srv.portal.provider.SetBackoff(10*time.Millisecond, 20*time.Millisecond)
-		srv.portal.links = o.links
+		if o.links != nil {
+			srv.portal.links = o.links
+		}
 	}
 	if srv.auth != nil && srv.auth.provider != nil {
 		srv.auth.provider.SetBackoff(10*time.Millisecond, 20*time.Millisecond)
@@ -597,7 +607,13 @@ func TestPortalLoginAudited(t *testing.T) {
 	r.ready()
 	r.idp.SetLogin(fakes.Valid("pat", "pat@example.com"))
 	c := r.login("")
-	row := wantOneRow(t, rec)
+	// The IdP link (on by default) adds its own row (W-P3-CSIG-03).
+	linked := rowsByAction(rec, actionIdPLinked)
+	logins := rowsByAction(rec, actionPortalLogin)
+	if len(linked) != 1 || len(logins) != 1 {
+		t.Fatalf("rows: %d %s, %d %s, want one each", len(linked), actionIdPLinked, len(logins), actionPortalLogin)
+	}
+	row := logins[0]
 	if row.Action != actionPortalLogin || row.Target != targetPortalSession || row.Outcome != adminaudit.OutcomeOK ||
 		row.Actor != (adminaudit.Actor{Sub: "pat", Email: "pat@example.com"}) || row.TargetRef != shortHash(webauth.HashID(c.Value)) {
 		t.Fatalf("login row = %+v", row)

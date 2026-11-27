@@ -993,6 +993,38 @@ With the block enabled and `--state-dir` set the control plane mounts:
   the `auth.login_failed` budget). No code, state, verifier, nonce, token or
   cookie value is logged or recorded.
 
+### IdP link (`consent.idpLink`)
+
+With `consent.idpLink.enabled: true` (the default) the portal login asks for
+`offline_access`, and the callback stores the user's IdP refresh token before it
+creates the session, so offboarding can later refresh it to detect disabled users:
+
+- The token goes to the CP-only `consent.store` at logical key
+  `idp/<userKey>`, where `userKey` is derived from the verified ID token's `iss` and
+  `sub` (32 hex characters). With the default `namePrefix` the AWS secret name is
+  `warden-cp/idp/<userKey>`. No worker holds a credential for `consent.store`.
+- `idp_links` (migration `idp_links/0001`) holds only `iss`, `sub`, `user_key`,
+  `email`, `secret_key`, `refresh_ref` (the token's Reference: hash prefix, last four
+  characters and length), `generation`, `linked_at`, `refresh_issued_at`,
+  `relink_due_at` (`refresh_issued_at` + `idpLink.refreshLifetime`, the IdP's absolute
+  lifetime of the refresh chain), `last_refresh_at`, `last_refresh_status` and
+  `offboarded_at`. No column holds a token. Times are epoch milliseconds.
+- Writes for one user are serialized. A login writes the secret first and then
+  upserts the row, incrementing `generation` (the first link is generation 1; a
+  re-login keeps `linked_at` and resets `refresh_issued_at`, `relink_due_at`, the
+  last-refresh columns and `offboarded_at`). Offboarding's rotation writes only when
+  the stored generation is still the one it read, so it never overwrites a newer
+  login.
+- Fail closed: a failed `consent.store` write is 503 `secret_store_unavailable`
+  with no session and no row; a token response without a refresh token is 502
+  `offline_access_not_granted`. The control plane refuses to start with the IdP
+  link enabled and no `consent.store`, or a non-persistent one (`echo`).
+- Logout and session expiry leave the link and the stored token in place.
+- Each stored link logs `idp_link_stored` with `user_key`, `ref` and
+  `generation`; with admin audit on it records `user.idp_linked` (target
+  `idp_link`, `target_ref` the user key). The token is never logged or recorded.
+  `GET /portal` shows the link status, generation and when to sign in again.
+
 ## API keys (`console.apiKeys`)
 
 Scripts and CI can call the admin API with a scoped, expiring `wak_` key instead of

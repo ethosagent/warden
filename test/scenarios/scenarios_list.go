@@ -90,6 +90,11 @@ var All = slices.Concat(
 		// fake creates a portal_sessions row behind __Host-warden_portal (no
 		// console session), and one without a refresh token creates nothing.
 		{Name: "portal_login", Opts: portalOpts(), Run: portalLogin},
+		// IdP link (W-P3-CSIG-03): a portal login writes the refresh token to the
+		// persistent CP-only consent.store at warden-cp/idp/<userKey> and only a
+		// Reference to idp_links; a re-login bumps the generation; a store outage
+		// fails the login closed.
+		{Name: "portal_idp_link", Opts: portalOpts(), Run: portalIdPLink},
 
 		// Break-glass login (W-P1-OPS1-08): a real argon2id login opens a Secure
 		// admin session with a signed row, an ERROR line and a Finding per

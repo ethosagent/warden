@@ -18,6 +18,7 @@ import (
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys/adapters/metastore"
+	idplinksqlite "github.com/ethosagent/warden/internal/portal/adapters/sqlite"
 	tokensvcsqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
 )
 
@@ -40,6 +41,7 @@ func StateMigrations() []cpstate.Migration {
 	migs = append(migs, SessionMigrations()...)
 	migs = append(migs, OIDCPendingMigrations()...)
 	migs = append(migs, PortalSessionMigrations()...)
+	migs = append(migs, idplinksqlite.Migrations()...)
 	migs = append(migs, PolicyStoreMigrations()...)
 	migs = append(migs, BundleMigrations()...)
 	migs = append(migs, adminaudit.Migrations()...)

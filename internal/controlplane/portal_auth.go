@@ -53,15 +53,22 @@ type portalService struct {
 	sessions *PortalSessionStore
 	// blocks is the block list; nil means none is kept.
 	blocks *BlockStore
-	// links stores the IdP link on login (W-P3-CSIG-03); nil until that
-	// ticket wires the CP-only consent.store.
-	links  portal.LinkWriter
-	cookie webauth.Cookie
-	logger *slog.Logger
+	// links stores the IdP link on login (W-P3-CSIG-03): linkStore over
+	// idp_links and the CP-only consent.store. With consent.idpLink enabled
+	// and no writer, a login fails closed (503 secret_store_unavailable).
+	links portal.LinkWriter
+	// linkStore is the concrete store behind links (nil when the IdP link is
+	// off or no consent.store is configured); the stub page reads it.
+	linkStore *portal.LinkStore
+	cookie    webauth.Cookie
+	logger    *slog.Logger
 
 	// audit records a callback's outcome in the admin audit log
 	// (Server.recordPortalLogin); nil when admin audit is disabled.
 	audit func(*http.Request, portalLoginResult)
+	// linkAudit records user.idp_linked after a stored link
+	// (Server.recordIdPLinked); nil when admin audit is disabled.
+	linkAudit func(r *http.Request, iss, sub, email string)
 }
 
 // initPortal builds the portal when the consent block is enabled and a state
@@ -84,6 +91,9 @@ func (s *Server) initPortal() {
 	}
 	p.cookie = cookie
 	p.sessions = NewPortalSessionStore(s.cfg.State.SQL(), cc.Session.Idle, cc.Session.Absolute, s.cfg.Now)
+	if cc.IdPLink.Enabled {
+		s.initIdPLinks(p)
+	}
 	client, err := oidc.NewHTTPClient(oidc.HTTPClientConfig{Issuer: cc.OIDC.Issuer, InternalIssuerURL: cc.OIDC.InternalIssuerURL})
 	if err != nil {
 		s.cfg.Logger.Error("control plane: portal login unavailable", "error", err)
@@ -257,6 +267,13 @@ func (p *portalService) finishLogin(w http.ResponseWriter, r *http.Request, logi
 		}
 		return "", res
 	}
+	if p.cfg.IdPLink.Enabled && p.links == nil {
+		// No CP-only store to keep the token in: Run refuses to start this
+		// way, so only a hand-built Server gets here. Fail closed.
+		p.logger.Error("portal login: idp link store not configured", "sub", claims.Sub, "reason", "idp_link_store_missing")
+		res.reason, res.status = portalSecretStoreUnavailable, http.StatusServiceUnavailable
+		return "", res
+	}
 	if p.links != nil && p.cfg.IdPLink.Enabled {
 		if err := p.links.StoreLink(ctx, portal.Link{Iss: claims.Issuer, Sub: claims.Sub, Email: claims.Email, RefreshToken: login.RefreshToken}); err != nil {
 			// Only the error's type is logged: a store error could echo what
@@ -264,6 +281,9 @@ func (p *portalService) finishLogin(w http.ResponseWriter, r *http.Request, logi
 			p.logger.Error("portal login: idp link store failed", "sub", claims.Sub, "reason", "idp_link_store_failed", "error_type", fmt.Sprintf("%T", err))
 			res.reason, res.status = portalSecretStoreUnavailable, http.StatusServiceUnavailable
 			return "", res
+		}
+		if p.linkAudit != nil {
+			p.linkAudit(r, claims.Issuer, claims.Sub, claims.Email)
 		}
 	}
 	rawID, sess, err := p.sessions.Create(ctx, webauth.SessionInput{
@@ -344,6 +364,8 @@ var portalHomeTmpl = template.Must(template.New("portal").Parse(`<!doctype html>
 {{- end}}
 {{- if .Email}}
 <p>Signed in as <strong>{{.Email}}</strong>. Session ends {{.ExpiresAt}}.</p>
+<p>IdP link: <span id="idp-link-status">{{.Link.Status}}</span>
+{{- if eq .Link.Status "linked"}} (generation {{.Link.Generation}}); sign in again before <time id="idp-link-relink-due">{{.Link.RelinkDueAt}}</time>{{end}}.</p>
 <form method="post" action="/portal/logout">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <button type="submit">Sign out</button>
@@ -362,7 +384,10 @@ func (p *portalService) handleHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	webauth.NoStore(w)
-	data := struct{ Error, Email, ExpiresAt, CSRF string }{Error: portalLoginMessages[r.URL.Query().Get("login_error")]}
+	data := struct {
+		Error, Email, ExpiresAt, CSRF string
+		Link                          portalLinkView
+	}{Error: portalLoginMessages[r.URL.Query().Get("login_error")]}
 	if sess, rawID, ok := p.session(r); ok {
 		data.Email = sess.Email
 		if data.Email == "" {
@@ -370,6 +395,7 @@ func (p *portalService) handleHome(w http.ResponseWriter, r *http.Request) {
 		}
 		data.ExpiresAt = sess.ExpiresAt.UTC().Format(time.RFC3339)
 		data.CSRF = webauth.CSRFToken([]byte(rawID), portal.CSRFLabel)
+		data.Link = p.linkView(r.Context(), sess.Iss, sess.Sub)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = portalHomeTmpl.Execute(w, data)
