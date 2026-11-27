@@ -236,7 +236,7 @@ func newUTEnv(t *testing.T, typ string) *utEnv {
 		rotating(n, w)
 	}))
 	t.Cleanup(env.srv.Close)
-	cfg := config.OAuthProviderConfig{ID: utProvider, Type: typ, ClientID: "cid", ClientSecretEnv: "SEC", TokenURL: env.srv.URL + "/token", AllowedScopes: []string{"a", "b", "c"}}
+	cfg := config.OAuthProviderConfig{ID: utProvider, Type: typ, ClientID: "cid", ClientSecretEnv: "SEC", TokenURL: env.srv.URL + "/token", RevokeURL: env.srv.URL + "/revoke", AllowedScopes: []string{"a", "b", "c"}}
 	if typ == config.OAuthProviderGitHubApp {
 		cfg.AllowedScopes = nil
 	}
