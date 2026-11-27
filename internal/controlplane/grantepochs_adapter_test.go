@@ -28,7 +28,7 @@ func TestGrantEpochAdapter(t *testing.T) {
 	_, ch := h.ps.watch.bundleSnapshot()
 	before := h.latest(t)
 
-	var b oauthbroker.EpochBumper = h.s.GrantEpochBumper()
+	b := h.s.GrantEpochBumper()
 	if err := b.Bump(context.Background(), alice); err != nil {
 		t.Fatal(err)
 	}
