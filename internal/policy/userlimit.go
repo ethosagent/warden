@@ -28,7 +28,10 @@ import (
 // it (a users rule that also lists groups needs both). Users match by exact
 // sub, or by email only when the subject's email is verified. A nil subject,
 // or one with an empty sub, uses only anonymousLimit, keyed by the worker's
-// agent id, and is never charged to a user's bucket.
+// agent id, and is never charged to a user's bucket. When the subject's group
+// list was truncated and an outranking rule missed only on its groups, the
+// result is Deny with identity_groups_truncated (fail closed, as the allowlist
+// does), never a fall-through to a looser rule or to no limit.
 //
 // Everything a match needs is compiled at policy load, so a match is a few map
 // lookups and allocates nothing. Buckets live in a sharded map that load()
@@ -78,6 +81,8 @@ type compiledUserLimit struct {
 	hasRate      bool
 	dailyCostUSD float64
 	perAgent     bool
+	// rank orders rules by precedence (tier, then list order); lower wins.
+	rank int32
 	// defHash is a hash of the rule's canonical (normalized) definition. A
 	// bucket remembers the hash of the rule that opened it; a different hash
 	// means the rule changed and the bucket starts over.
@@ -99,6 +104,9 @@ type userLimitSet struct {
 	byAgent      map[string][]int32 // agents-only tier
 	def          *compiledUserLimit
 	anon         *compiledUserLimit
+	// groupRules is every groups-tier rule, ascending. Only the truncated
+	// group list path walks it (see truncatedCandidate).
+	groupRules []int32
 	// hashes is every rule's defHash by name, default and anonymous included.
 	hashes map[string]uint64
 }
@@ -118,9 +126,21 @@ func compileUserLimits(p config.Policy) *userLimitSet {
 		return m
 	}
 	ls.rules = make([]compiledUserLimit, 0, len(p.UserLimits))
+	n := int32(len(p.UserLimits))
 	for _, l := range p.UserLimits {
 		i := int32(len(ls.rules))
 		r := compileUserLimit(l, l.Name)
+		switch {
+		case len(l.Match.Users) > 0:
+			r.rank = i
+		case len(l.Match.Groups) > 0:
+			r.rank = n + i
+			ls.groupRules = append(ls.groupRules, i)
+		case len(l.Match.Agents) > 0:
+			r.rank = 2*n + i
+		default:
+			r.rank = rankNone
+		}
 		switch {
 		case len(l.Match.Users) > 0:
 			for s := range r.subs {
@@ -159,6 +179,7 @@ func compileUserLimits(p config.Policy) *userLimitSet {
 	}
 	if l := p.DefaultUserLimit; l != nil {
 		r := compileUserLimit(*l, config.UserLimitNameDefault)
+		r.rank = 3 * n
 		ls.def = &r
 		ls.hashes[r.name] = r.defHash
 	}
@@ -229,8 +250,65 @@ func userLimitDefHash(l config.UserLimit) uint64 {
 	return h.Sum64()
 }
 
+// rankNone is the rank of no rule at all; it loses to every rule.
+const rankNone = int32(1 << 30)
+
 // match returns the rule that applies, or nil. host is already normalized.
-func (ls *userLimitSet) match(s *identity.Subject, agentID, host string) *compiledUserLimit {
+//
+// truncated is true when the subject's group list was cut (GroupsTruncated)
+// and a rule that outranks the result was skipped only because none of its
+// groups was in the list: the missing group may be the one the cut dropped, so
+// the caller fails closed (identity_groups_truncated) instead of falling
+// through to a looser rule or to no limit at all. r is then that skipped rule.
+func (ls *userLimitSet) match(s *identity.Subject, agentID, host string) (r *compiledUserLimit, truncated bool) {
+	r = ls.matchIndexed(s, agentID, host)
+	if s == nil || s.Sub == "" || !s.GroupsTruncated {
+		return r, false
+	}
+	c := ls.truncatedCandidate(s, agentID, host)
+	if c != nil && (r == nil || c.rank < r.rank) {
+		return c, true
+	}
+	return r, false
+}
+
+// truncatedCandidate returns the highest-precedence rule that sets groups,
+// misses on them, and matches on every other field (users for a users rule,
+// agents, domains), or nil. It runs only for a truncated group list, so the
+// linear walk of the groups tier stays off the common path.
+func (ls *userLimitSet) truncatedCandidate(s *identity.Subject, agentID, host string) *compiledUserLimit {
+	var best *compiledUserLimit
+	consider := func(i int32) {
+		r := &ls.rules[i]
+		if r.groups == nil || r.hasGroup(s) || !r.matches(tierGroups, s, agentID, host) {
+			return
+		}
+		if best == nil || r.rank < best.rank {
+			best = r
+		}
+	}
+	for _, i := range ls.bySub[s.Sub] {
+		consider(i)
+	}
+	if s.EmailVerified && s.Email != "" {
+		for _, i := range ls.byEmail[strings.ToLower(s.Email)] {
+			consider(i)
+		}
+	}
+	if best != nil {
+		return best // a users-tier rule outranks every groups-tier one
+	}
+	for _, i := range ls.groupRules {
+		consider(i)
+		if best != nil {
+			return best // ascending: the first one found is the best
+		}
+	}
+	return nil
+}
+
+// matchIndexed is the selection walk over the tier indexes.
+func (ls *userLimitSet) matchIndexed(s *identity.Subject, agentID, host string) *compiledUserLimit {
 	if s == nil || s.Sub == "" {
 		return ls.anon
 	}
@@ -377,7 +455,9 @@ func userBucketKey(rule, sub, agentID string, perAgent, anon bool) string {
 // ChargeUserLimit applies the per-user limit rule that matches rc.Subject,
 // agentID and rc.Domain and consumes one request from its rate budget. Over
 // the limit it returns Deny with user_rate_limited, LimitRule and RetryAfter;
-// otherwise Allow with LimitRule (empty when no rule applies). A rule with no
+// otherwise Allow with LimitRule (empty when no rule applies). A truncated
+// group list that may hide the applicable rule is Deny with
+// identity_groups_truncated and that rule's name. A rule with no
 // rateLimit (cost cap only) always allows here. With no limits configured it
 // takes one read lock and allocates nothing.
 func (e *Evaluator) ChargeUserLimit(rc RequestContext, agentID string) RequestVerdict {
@@ -399,7 +479,10 @@ func (e *Evaluator) userLimit(rc RequestContext, agentID string, peek bool) Requ
 	if ls == nil {
 		return RequestVerdict{Decision: Allow}
 	}
-	r := ls.match(rc.Subject, agentID, NormalizeHost(rc.Domain))
+	r, truncated := ls.match(rc.Subject, agentID, NormalizeHost(rc.Domain))
+	if truncated {
+		return RequestVerdict{Decision: Deny, Reason: denyreason.IdentityGroupsTruncated, LimitRule: r.name}
+	}
 	if r == nil {
 		return RequestVerdict{Decision: Allow}
 	}
@@ -425,7 +508,9 @@ func (e *Evaluator) MatchUserLimit(subj *identity.Subject, agentID, domain strin
 	if e.userLimits == nil {
 		return UserLimitRule{}, false
 	}
-	r := e.userLimits.match(subj, agentID, NormalizeHost(domain))
+	// On a truncated miss this is the skipped rule, so a cost check made
+	// without a charge still applies the stricter rule (fail closed).
+	r, _ := e.userLimits.match(subj, agentID, NormalizeHost(domain))
 	if r == nil {
 		return UserLimitRule{}, false
 	}

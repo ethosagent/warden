@@ -595,3 +595,55 @@ func BenchmarkChargeUserLimit_None(b *testing.B) {
 		e.ChargeUserLimit(rc, "agent-a")
 	}
 }
+
+func wantTruncated(t *testing.T, got RequestVerdict, rule string) {
+	t.Helper()
+	if got.Decision != Deny || got.Reason != denyreason.IdentityGroupsTruncated || got.LimitRule != rule {
+		t.Fatalf("verdict = {%v %q rule=%q}, want {deny %q rule=%q}", got.Decision, got.Reason, got.LimitRule, denyreason.IdentityGroupsTruncated, rule)
+	}
+}
+
+func TestChargeUserLimit_TruncatedGroupsFailClosed(t *testing.T) {
+	e, _ := ulEval(t, config.Policy{
+		UserLimits: []config.UserLimit{
+			{Name: "a-eng", Match: config.UserLimitMatch{Users: []string{"a"}, Groups: []string{"eng"}}, RateLimit: "10/minute"},
+			{Name: "eng-llm", Match: config.UserLimitMatch{Groups: []string{"eng"}, Domains: []string{"api.openai.com"}}, RateLimit: "10/minute"},
+			{Name: "ci-eng", Match: config.UserLimitMatch{Groups: []string{"eng"}, Agents: []string{"agent-ci"}}, RateLimit: "10/minute"},
+			{Name: "ops", Match: config.UserLimitMatch{Groups: []string{"ops"}}, RateLimit: "10/minute"},
+		},
+		DefaultUserLimit: &config.UserLimit{Name: config.UserLimitNameDefault, RateLimit: "100/minute"},
+	})
+	truncated := func(sub string, groups ...string) *identity.Subject {
+		s := user(sub, "", false, groups...)
+		s.GroupsTruncated = true
+		return s
+	}
+	// Groups tier: "eng" may be the group the cut dropped.
+	wantTruncated(t, e.ChargeUserLimit(ulReq("api.openai.com", truncated("b", "sales")), "agent-a"), "eng-llm")
+	wantTruncated(t, e.PeekUserLimit(ulReq("api.openai.com", truncated("b", "sales")), "agent-a"), "eng-llm")
+	if r, ok := e.MatchUserLimit(truncated("b", "sales"), "agent-a", "api.openai.com"); !ok || r.Name != "eng-llm" {
+		t.Fatalf("MatchUserLimit on a truncated miss = %+v %v, want the skipped rule", r, ok)
+	}
+	// Not truncated: falls through to the default as before.
+	wantLimit(t, e.ChargeUserLimit(ulReq("api.openai.com", user("b", "", false, "sales")), "agent-a"), Allow, config.UserLimitNameDefault)
+	// A rule whose other fields miss (domain, agent) is not a candidate.
+	wantLimit(t, e.ChargeUserLimit(ulReq("github.com", truncated("b", "ops")), "agent-a"), Allow, "ops")
+	// Users rule narrowed by groups: alice is named but "eng" is not in her cut list.
+	wantTruncated(t, e.ChargeUserLimit(ulReq("github.com", truncated("a", "sales")), "agent-a"), "a-eng")
+	wantLimit(t, e.ChargeUserLimit(ulReq("github.com", user("a", "", false, "sales")), "agent-a"), Allow, config.UserLimitNameDefault)
+	// A truncated list that does carry the rule's group matches normally.
+	wantLimit(t, e.ChargeUserLimit(ulReq("api.openai.com", truncated("c", "eng")), "agent-a"), Allow, "eng-llm")
+	wantLimit(t, e.ChargeUserLimit(ulReq("github.com", truncated("a", "eng")), "agent-a"), Allow, "a-eng")
+	// An outranking rule that misses on groups still fails closed even when a
+	// later rule matched: ops matched, but eng-llm comes first.
+	wantTruncated(t, e.ChargeUserLimit(ulReq("api.openai.com", truncated("d", "ops")), "agent-a"), "eng-llm")
+	// The agent-narrowed groups rule is a candidate on its agent only; on
+	// another agent the next groups rule that misses (ops) is.
+	wantTruncated(t, e.ChargeUserLimit(ulReq("github.com", truncated("f", "sales")), "agent-ci"), "ci-eng")
+	wantTruncated(t, e.ChargeUserLimit(ulReq("github.com", truncated("f", "sales")), "agent-a"), "ops")
+	// The truncated path allocates nothing either.
+	rc := ulReq("api.openai.com", truncated("b", "sales"))
+	if got := testing.AllocsPerRun(100, func() { e.ChargeUserLimit(rc, "agent-a") }); got != 0 {
+		t.Errorf("truncated ChargeUserLimit allocates %v, want 0", got)
+	}
+}
