@@ -126,6 +126,8 @@ Every recipe also runs a **control-plane** that serves policy and aggregates the
 
 **Group-scoped policy.** An allow entry or an MCP tool `allowWhen` can be limited to IdP `groups` or named `users`; a non-member, or a request with no verified identity, is denied and never sent to the judge. Rules, fail-closed cases, deny reasons, `policy eval` replay and metrics: **[docs/group-policy.md](docs/group-policy.md)**.
 
+**Per-user limits.** A request or daily-cost cap per user, per group or for anonymous traffic, enforced on every worker and totalled fleet-wide by the control plane (`costBlockedUsers`). Rules, deny reasons, the overspend bound and the usage view: **[docs/policy.md](docs/policy.md)**.
+
 #### How a recipe works
 
 Each recipe puts the agent on a Docker `internal: true` network — its only egress

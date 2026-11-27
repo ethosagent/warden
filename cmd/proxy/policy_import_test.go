@@ -685,7 +685,6 @@ func TestPolicyImportApprovals(t *testing.T) {
 // refused without --force (the offline CLI cannot see worker capabilities)
 // and imported with it.
 func TestPolicyImportCostCapNeedsForce(t *testing.T) {
-	config.LiftUserLimitsGuardForTesting(t)
 	stateDir := filepath.Join(t.TempDir(), "state")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)

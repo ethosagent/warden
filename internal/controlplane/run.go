@@ -445,11 +445,16 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			dbPath = "warden-fleet.db"
 		}
 	}
+	var storeNow func() time.Time // nil = time.Now (production)
+	if p.Clock != nil {
+		storeNow = p.Clock.Now
+	}
 	store, err := analytics.NewFleetStore(analytics.FleetConfig{
 		Provider:      p.AnalyticsProvider,
 		SQLitePath:    dbPath,
 		RetentionDays: p.RetentionDays,
 		MaxEvents:     maxEvents,
+		Now:           storeNow,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("control-plane: analytics store: %w", err))

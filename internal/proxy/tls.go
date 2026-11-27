@@ -459,6 +459,16 @@ func (p *Proxy) clock() time.Time {
 	return time.Now()
 }
 
+// eventNow is the timestamp for an analytics event: Config.Now when set, else
+// time.Now. It is separate from clock() (leaf certs) so a test-only leaf clock
+// never shifts event times.
+func (p *Proxy) eventNow() time.Time {
+	if p.evNow != nil {
+		return p.evNow()
+	}
+	return time.Now()
+}
+
 // leafValidity returns the leaf-cert TTL, defaulting to defaultLeafTTL when the
 // injectable leafTTL field is unset (production). Tests shrink it to force
 // expiry within the test's lifetime.

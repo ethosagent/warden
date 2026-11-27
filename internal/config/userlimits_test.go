@@ -196,8 +196,9 @@ func TestDeepCopy_UserLimitsNotAliased(t *testing.T) {
 	}
 }
 
-// Rate limits are enforced (W-P3-PUL-09) and load; a daily cost cap is not
-// enforced until W-P3-PUL-04, so any rule that sets one is still refused.
+// The name is kept from W-P3-PUL-09, whose not-yet-enforced guard refused any
+// rule with dailyCostUSD. W-P3-PUL-04 enforces cost caps in the worker and
+// removed the guard, so a cost cap now loads in every key.
 func TestUserLimitsGuard_NotYetEnforced(t *testing.T) {
 	for name, y := range map[string]string{
 		"userLimits":       "policy:\n  allowlist: [{domain: a.com}]\n  userLimits: [{name: a, match: {groups: [g]}, rateLimit: 1/minute}, {name: b, match: {groups: [h]}, rateLimit: 1/minute, dailyCostUSD: 2}]\n",
@@ -205,9 +206,23 @@ func TestUserLimitsGuard_NotYetEnforced(t *testing.T) {
 		"anonymousLimit":   "policy:\n  allowlist: [{domain: a.com}]\n  anonymousLimit: {dailyCostUSD: 3}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := NewLocalYAMLProvider(writeTemp(t, y))
-			if err == nil || !strings.Contains(err.Error(), "dailyCostUSD: not yet enforced") {
-				t.Fatalf("err = %v, want dailyCostUSD not yet enforced", err)
+			prov, err := NewLocalYAMLProvider(writeTemp(t, y))
+			if err != nil {
+				t.Fatalf("cost cap refused: %v", err)
+			}
+			pol, _ := prov.GetPolicy()
+			var cost float64
+			for _, l := range pol.UserLimits {
+				cost += l.DailyCostUSD
+			}
+			if pol.DefaultUserLimit != nil {
+				cost += pol.DefaultUserLimit.DailyCostUSD
+			}
+			if pol.AnonymousLimit != nil {
+				cost += pol.AnonymousLimit.DailyCostUSD
+			}
+			if cost == 0 {
+				t.Fatalf("dailyCostUSD dropped: %+v", pol)
 			}
 		})
 	}
@@ -236,11 +251,8 @@ func TestUserLimitsGuard_NotYetEnforced(t *testing.T) {
 	}
 }
 
-// With the guard lifted by the test hook, the rules load from YAML and
-// round-trip through the wire decoder.
+// The rules load from YAML and round-trip through the wire decoder.
 func TestUserLimits_LoadAndWireRoundTrip(t *testing.T) {
-	LiftUserLimitsGuardForTesting(t)
-
 	prov, err := NewLocalYAMLProvider(writeTemp(t, `
 policy:
   allowlist: [{domain: a.com}]
@@ -276,16 +288,12 @@ policy:
 	if _, _, err := parseRemotePolicy([]byte(`{"allowlist":[{"domain":"a.com"}],"userLimits":[{"name":"a","match":{"groups":["g"]},"rateLimit":"10/fortnight"}]}`)); err == nil || !strings.Contains(err.Error(), "policy.userLimits[0].rateLimit") {
 		t.Fatalf("err = %v", err)
 	}
-	// With the guard back on, the rate-only wire still loads and a wire that
-	// sets a daily cost cap is refused whole.
-	allowUnenforcedUserLimits.Store(false)
-	if _, _, err := parseRemotePolicy([]byte(wire)); err != nil {
-		t.Fatalf("rate-only wire refused: %v", err)
-	}
+	// A wire that sets a daily cost cap loads too (the worker enforces it).
 	costWire := `{"allowlist":[{"domain":"a.com"}],"denylist":[],` +
 		`"userLimits":[{"name":"eng-llm","match":{"groups":["eng"]},"rateLimit":"60/minute","dailyCostUSD":5}]}`
-	if _, _, err := parseRemotePolicy([]byte(costWire)); err == nil || !strings.Contains(err.Error(), "not yet enforced") {
-		t.Fatalf("guard not applied on the wire: %v", err)
+	cw, _, err := parseRemotePolicy([]byte(costWire))
+	if err != nil || cw.UserLimits[0].DailyCostUSD != 5 {
+		t.Fatalf("cost-cap wire = %+v, %v", cw.UserLimits, err)
 	}
 }
 
@@ -344,7 +352,6 @@ func TestNormalizeUserLimits_DeepCopyThenLoad(t *testing.T) {
 		t.Fatalf("original mutated: %+v", orig.UserLimits[0])
 	}
 	// The YAML loader and the wire decoder both produce the normalized form.
-	LiftUserLimitsGuardForTesting(t)
 	prov, err := NewLocalYAMLProvider(writeTemp(t, "policy:\n  allowlist: [{domain: a.com}]\n  userLimits: [{name: a, rateLimit: 1/second, match: {groups: [b, a, a]}}]\n  anonymousLimit: {rateLimit: 1/second}\n"))
 	if err != nil {
 		t.Fatal(err)

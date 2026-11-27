@@ -143,6 +143,15 @@ type Config struct {
 	// byte sizes — order-of-magnitude visibility, never billing-grade.
 	Cost CostEstimator
 
+	// UserCost is the worker's per-user daily spend ledger (W-P3-PUL-04). Nil
+	// (the default) means no cost cap is enforced: a dailyCostUSD rule is then
+	// never checked. When set together with Cost, a request to a destination
+	// Cost tracks whose per-user limit rule sets dailyCostUSD is refused once
+	// the user's spend under the rule today reaches it (or the control plane
+	// lists the user in costBlockedUsers), and every forwarded request charged
+	// to such a rule adds its estimate here.
+	UserCost UserCostLedger
+
 	// UpstreamResolver is the optional DNS resolver for the proxy's OWN upstream
 	// dials (dns.upstreamResolver): CONNECT tunnels and TLS-terminated upstreams
 	// — which includes the certificate-relevant hostname resolution; SNI itself
@@ -171,6 +180,11 @@ type Config struct {
 	// the system pool. Assembly-only: cmd/proxy never sets it; nil keeps system
 	// roots, byte-identical to before.
 	UpstreamRootCAs *x509.CertPool
+
+	// Now, when set, is the time source for event timestamps (allow, deny and
+	// cut events) so they agree with the injected ledger clock on the UTC day.
+	// nil means time.Now. Assembly-only, like IdentityClock.
+	Now func() time.Time
 
 	// IdentityClock, when set, is the time source for identity validity decisions:
 	// the token exp+skew recheck on each request, and the raw-tunnel lifetime
@@ -312,6 +326,18 @@ type MetricsRecorder interface {
 // hot path guards with `if p.cfg.Cost != nil`).
 type CostEstimator interface {
 	Estimate(domain string, requestBytes, responseBytes int64) *cost.CostEstimate
+	// Tracks reports whether Estimate prices domain at all: only a tracked
+	// destination is subject to a per-user cost cap.
+	Tracks(domain string) (provider string, ok bool)
+}
+
+// UserCostLedger is the consumer-side seam for the worker's per-user daily
+// spend ledger. *cost.Ledger satisfies it. Now is its clock: the cap's UTC
+// day, Retry-After and the fleet block day all come from it.
+type UserCostLedger interface {
+	Add(k cost.LedgerKey, usd float64)
+	Spent(k cost.LedgerKey) (usd float64, tracked bool)
+	Now() time.Time
 }
 
 // nopMetrics is the no-op MetricsRecorder substituted by New when cfg.Metrics is
@@ -369,6 +395,8 @@ type Proxy struct {
 	now func() time.Time
 	// idNow is the validity clock (Config.IdentityClock); nil falls back to clock().
 	idNow func() time.Time
+	// evNow stamps analytics events (Config.Now); nil falls back to time.Now.
+	evNow func() time.Time
 	// idTimer is the expiry loop's timer source (Config.IdentityTimer).
 	idTimer func(d time.Duration) IdentityTimer
 	leafTTL time.Duration
@@ -465,6 +493,9 @@ type Proxy struct {
 	// is process-wide (not per-connection) so a degraded control is visible
 	// without log spam.
 	wsDowngradeOnce sync.Once
+	// ledgerFullOnce guards a single WARN when the per-user cost ledger is
+	// full and a new user is refused (fail closed, W-P3-PUL-04).
+	ledgerFullOnce sync.Once
 
 	// sessions is the open-session registry CloseBlockedSessions cuts from.
 	sessions *sessionRegistry
@@ -711,6 +742,7 @@ func New(cfg Config) (*Proxy, error) {
 	}
 
 	p.idNow = cfg.IdentityClock
+	p.evNow = cfg.Now
 	p.idTimer = cfg.IdentityTimer
 
 	// Upstream dialing. An injected Dialer (assembly-only harness seam) replaces

@@ -456,3 +456,30 @@ func TestUserLimitMetrics(t *testing.T) {
 		t.Errorf("nil Register = %v", err)
 	}
 }
+
+// TestUserCostLedgerMetrics: the cost ledger's refused-key and seed-failure
+// counters are unlabelled observables.
+func TestUserCostLedgerMetrics(t *testing.T) {
+	m, h, shutdown := newWithHandler(t)
+	defer func() { _ = shutdown(context.Background()) }()
+	if err := m.RegisterUserCostLedger(func() int64 { return 4 }, func() int64 { return 1 }); err != nil {
+		t.Fatal(err)
+	}
+	body := scrape(t, h)
+	var refused, seed bool
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "warden_user_cost_ledger_refused_total") && strings.HasSuffix(line, " 4") {
+			refused = true
+		}
+		if strings.HasPrefix(line, "warden_user_cost_seed_failures_total") && strings.HasSuffix(line, " 1") {
+			seed = true
+		}
+	}
+	if !refused || !seed {
+		t.Errorf("refused counter %v, seed counter %v\n%s", refused, seed, body)
+	}
+	var nilM *Metrics
+	if err := nilM.RegisterUserCostLedger(nil, nil); err != nil {
+		t.Errorf("nil Register = %v", err)
+	}
+}

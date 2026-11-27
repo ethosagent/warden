@@ -98,7 +98,7 @@ const CapIdentityChallengeV1 = "identity/challenge-v1"
 // WorkerCaps returns the sorted capabilities this binary implements. Later
 // features append their own constant here.
 func WorkerCaps() []string {
-	caps := []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1, CapIdentityRequireV1, CapUserLimitsV1}
+	caps := []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1, CapIdentityRequireV1, CapUserCostV1, CapUserLimitsV1}
 	sort.Strings(caps)
 	return caps
 }

@@ -196,6 +196,20 @@ var All = slices.Concat(
 		// token-less request uses the anonymous rule, and only the user over the
 		// limit gets 429 user_rate_limited; events carry agent_id and limit_rule.
 		{Name: "user_rate_limit", Opts: userRateLimitOpts(), Run: userRateLimit},
+		// Per-user daily cost caps (W-P3-PUL-04): a streamed LLM answer is
+		// priced from the relayed bytes; over the cap the user gets 403
+		// user_cost_limited, another user keeps his budget, and a worker
+		// restart reseeds the ledger from local events.
+		{Name: "user_cost_cap", Opts: userCostCapOpts(), Run: userCostCap},
+		// Per-user limits end to end (W-P3-PUL-10): two workers and one CP with
+		// the fleet store; rate and cost denies, the anonymous bucket, the
+		// CP-published costBlockedUsers on the second worker, the usage totals
+		// and no judge calls for limit denials.
+		{Name: "user_limits_e2e", Opts: userLimitsOpts(), Run: userLimitsE2E},
+		// The same two scenarios with the fake clock starting at 23:45 UTC, so
+		// the midnight guard's jump and the one-clock UTC day run every CI pass.
+		{Name: "user_cost_cap_near_midnight", Opts: append(userCostCapOpts(), nearMidnightStart()), Run: userCostCap},
+		{Name: "user_limits_e2e_near_midnight", Opts: append(userLimitsOpts(), nearMidnightStart()), Run: userLimitsE2E},
 		// MCP subject seam (W-P1-GPOL-04): the verified subject reaches the MCP
 		// gateway through RequestMeta without changing any verdict.
 		{Name: "mcp_subject_seam_unchanged", Opts: mcpSubjectOpts(), Run: mcpSubjectSeamUnchanged},

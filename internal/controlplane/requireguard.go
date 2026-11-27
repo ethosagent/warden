@@ -71,6 +71,7 @@ func (s *Server) requireGuard(ctx context.Context, live *config.SettingsWire, in
 // rateLimit (live has none) is refused with 409 workers_lack_capability,
 // capability userlimits/v1, while any connected worker lacks the cap, unless
 // an admin forces it (audited). live and next are the docs before and after.
+// The cost-cap guard (costCapGuard) runs after it in rolloutGuards.
 func (s *Server) userLimitsGuard(ctx context.Context, live, next policyWire) error {
 	if !hasRateLimitRule(next) || hasRateLimitRule(live) {
 		return nil

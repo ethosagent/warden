@@ -294,6 +294,23 @@ func TestIsCostBlocked(t *testing.T) {
 	}
 }
 
+// The wire carries subs cut to 255 bytes on a rune boundary; a longer sub
+// still matches its cut entry, a short one is untouched.
+func TestIsCostBlocked_LongSubCut(t *testing.T) {
+	cut := strings.Repeat("a", 254)
+	e, c := ulEval(t, config.Policy{CostBlockedUsers: []config.CostBlockedUser{
+		{Sub: cut, Rule: "eng-llm", Day: "2026-11-27"},
+	}})
+	now := c.now()
+	// 254 bytes then a 2-byte rune: the cut drops the whole rune.
+	if !e.IsCostBlocked(cut+"é-and-more", "eng-llm", now) {
+		t.Error("a sub over 255 bytes does not match its cut wire entry")
+	}
+	if e.IsCostBlocked(cut[:253], "eng-llm", now) {
+		t.Error("a shorter sub matched a longer entry")
+	}
+}
+
 func TestReplace_KeepsUserBuckets(t *testing.T) {
 	base := func() config.Policy {
 		return config.Policy{

@@ -17,6 +17,7 @@ import (
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/auth"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/cost"
 	"github.com/ethosagent/warden/internal/denyreason"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/mcp/gateway"
@@ -83,8 +84,13 @@ type requestScope struct {
 	// upstream conn (upstream + its upstreamBR) is owned by the SESSION, not the
 	// request: handleHTTP carries it across keep-alive iterations for reuse and
 	// closes it exactly once when the session ends, so cleanup never touches it.
-	req        *http.Request
-	resp       *http.Response
+	req  *http.Request
+	resp *http.Response
+	// reqCount and respCount count the request-body bytes forwarded upstream and
+	// the response-body bytes read back, for cost estimates when the message has
+	// no Content-Length (chunked, SSE, gRPC). Counts only; never content.
+	reqCount   countingReadCloser
+	respCount  countingReadCloser
 	upstream   net.Conn
 	upstreamBR *bufio.Reader
 	// reused is true when upstream was carried over from a prior keep-alive
@@ -146,12 +152,23 @@ type requestScope struct {
 	policyAllowed bool
 	chargeLimit   bool
 	limitRule     string
-	judgeReason   string
-	wasMCP        bool
-	mcpTool       string
-	mcpReason     string
-	mcpSessKey    string
-	closeAfter    bool
+	// costCapped marks a request charged under a rule with dailyCostUSD to a
+	// cost-tracked destination; its estimate is added to costKey once
+	// (costCharged) after the response is relayed (W-P3-PUL-04).
+	costCapped  bool
+	costCharged bool
+	costKey     cost.LedgerKey
+	// peekRule and peekCostUSD are the rule userLimitStage peeked and its
+	// dailyCostUSD, so the charge re-checks the cost cap without a match.
+	peekRule    string
+	peekCostUSD float64
+
+	judgeReason string
+	wasMCP      bool
+	mcpTool     string
+	mcpReason   string
+	mcpSessKey  string
+	closeAfter  bool
 
 	// sess is the connection's registry session (nil for none): blockStage binds
 	// the request's identities to it.
@@ -1121,6 +1138,7 @@ func (p *Proxy) applyTransforms(s *requestScope) (endSession bool) {
 // On success s.upstream/s.upstreamBR are the live conn the session carries. On a
 // stale redial they are the fresh conn; the dead one was already closed here.
 func (p *Proxy) forward(s *requestScope) (endSession bool) {
+	s.countRequestBody()
 	if s.rt != nil {
 		return p.forwardH2(s)
 	}
@@ -1208,6 +1226,7 @@ func (p *Proxy) readUpstreamResponse(s *requestScope) (ok bool) {
 		return false
 	}
 	s.resp = resp
+	s.countResponseBody()
 	s.closeAfter = s.req.Close || resp.Close
 	return true
 }
@@ -1374,6 +1393,7 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 	p.beforeTerminal()
 
 	if p.echoStreamDone(s) {
+		p.chargeUserCostCut(s)
 		return true // echo guard cut the stream; its deny is the only event
 	}
 	if errors.Is(scanErr, sse.ErrEventTooLarge) {
@@ -1382,6 +1402,8 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 		s.mcpReason = string(denyreason.MCPSSEEventTooLarge)
 	}
 	if blocked {
+		// Events before the blocked one already reached the agent.
+		usd, provider := p.cutCost(s)
 		// A gateway (or held-event) deny names itself; an empty verdict reason
 		// falls back to the declared mcp_gateway_deny (#409).
 		p.emitDeny(s, gatewayDenyReason(preferEchoReason(s.mcpReason, s.echoMonitorReason)), denyExtra{
@@ -1391,10 +1413,14 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			LatencyMs:      s.latencyMs(),
 			SwappedRefs:    s.swappedNames,
 			Evidence:       s.evidence,
+			CostUSD:        usd,
+			Provider:       provider,
 		})
 	} else {
+		costUSD, provider := p.estimateCost(s)
+		p.chargeUserCost(s, costUSD)
 		p.recordEvent(s.resolved(), analytics.Event{
-			Timestamp:      time.Now(),
+			Timestamp:      p.eventNow(),
 			Domain:         s.domain,
 			Port:           s.port,
 			Protocol:       "mcp",
@@ -1402,6 +1428,8 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			URL:            fullURL,
 			Decision:       "allow",
 			ResponseStatus: s.resp.StatusCode,
+			CostUSD:        costUSD,
+			Provider:       provider,
 			Tool:           s.mcpTool,
 			Reason:         preferEchoReason(s.mcpReason, s.echoMonitorReason),
 			LatencyMs:      s.latencyMs(),
@@ -1438,12 +1466,15 @@ func (p *Proxy) finishResponse(s *requestScope) (endSession bool) {
 	writeErr := s.out.relay(s.resp)
 	if p.echoStreamDone(s) {
 		// The echo guard cut the stream and already recorded the deny: end the
-		// session (closing the conn) and record no allow.
+		// session (closing the conn) and record no allow. What was relayed
+		// before the cut is still charged to a cost cap.
+		p.chargeUserCostCut(s)
 		return true
 	}
 	if s.grpcGuard.Refused() {
 		// A gRPC frame was refused after the response began: its deny is the only
 		// event, and the client leg is finished with the refusal status.
+		p.chargeUserCostCut(s)
 		return true
 	}
 	p.recordAllowEvent(s)
@@ -1502,12 +1533,16 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 	s.addEvidence(dets)
 	if block {
 		// enforce + high leak/injection: replace the body with an error, record a
-		// deny, and return (terminal, mirrors the MCP enforce-deny branch).
+		// deny, and return (terminal, mirrors the MCP enforce-deny branch). The
+		// upstream answered in full: a cost-capped request is charged for it.
+		usd, provider := p.cutCost(s)
 		p.emitDeny(s, reason, denyExtra{
 			ResponseStatus: s.resp.StatusCode,
 			LatencyMs:      s.latencyMs(),
 			SwappedRefs:    s.swappedNames,
 			Evidence:       s.evidence,
+			CostUSD:        usd,
+			Provider:       provider,
 		})
 		s.out.errorResponse(502, "Bad Gateway")
 		return true
@@ -1516,6 +1551,46 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 	// normal write forwards it intact.
 	s.resp.Body = io.NopCloser(bytes.NewReader(body))
 	return false
+}
+
+// countRequestBody wraps the outgoing request body in the byte counter when its
+// length is unknown (chunked upload, gRPC stream). It runs after every stage
+// (and so after the secret swap) has settled the body, immediately before the
+// body is sent upstream. A known length is used as-is and is never wrapped.
+func (s *requestScope) countRequestBody() {
+	if s.req.ContentLength < 0 && s.req.Body != nil && s.req.Body != http.NoBody {
+		s.req.Body = s.reqCount.wrap(s.req.Body)
+	}
+}
+
+// countResponseBody wraps the upstream response body in the byte counter when
+// its length is unknown (chunked, SSE, gRPC, read-to-close).
+func (s *requestScope) countResponseBody() {
+	if s.resp.ContentLength < 0 && s.resp.Body != nil && s.resp.Body != http.NoBody {
+		s.resp.Body = s.respCount.wrap(s.resp.Body)
+	}
+}
+
+// estimateCost prices the request from Content-Length where known and from the
+// bytes actually relayed where it is not, so streamed LLM responses are no
+// longer recorded at $0. Zero when cost tracking is off or the domain is not a
+// known provider.
+func (p *Proxy) estimateCost(s *requestScope) (costUSD float64, provider string) {
+	if p.cfg.Cost == nil || s.resp == nil {
+		return 0, ""
+	}
+	reqBytes := s.req.ContentLength
+	if reqBytes < 0 {
+		reqBytes = s.reqCount.count()
+	}
+	respBytes := s.resp.ContentLength
+	if respBytes < 0 {
+		respBytes = s.respCount.count()
+	}
+	if est := p.cfg.Cost.Estimate(s.domain, reqBytes, respBytes); est != nil {
+		return est.TotalCost, est.Provider
+	}
+	return 0, ""
 }
 
 // recordAllowEvent writes the single allow audit event for a forwarded request:
@@ -1545,24 +1620,10 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 	// Cost estimate (optional). Heuristic dollar figure from observed
 	// request/response Content-Length and the destination provider's pricing;
 	// zero when cost tracking is off or the domain is not a known provider.
-	var costUSD float64
-	var provider string
-	if p.cfg.Cost != nil {
-		reqBytes := s.req.ContentLength
-		if reqBytes < 0 {
-			reqBytes = 0
-		}
-		respBytes := s.resp.ContentLength
-		if respBytes < 0 {
-			respBytes = 0
-		}
-		if est := p.cfg.Cost.Estimate(s.domain, reqBytes, respBytes); est != nil {
-			costUSD = est.TotalCost
-			provider = est.Provider
-		}
-	}
+	costUSD, provider := p.estimateCost(s)
+	p.chargeUserCost(s, costUSD)
 	p.recordEvent(s.resolved(), analytics.Event{
-		Timestamp:      time.Now(),
+		Timestamp:      p.eventNow(),
 		Domain:         s.domain,
 		Port:           s.port,
 		Protocol:       proto,

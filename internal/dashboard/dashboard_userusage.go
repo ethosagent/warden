@@ -22,7 +22,8 @@ import (
 const (
 	// userUsageCacheTTL is how long a computed usage payload is reused. The
 	// rollup moves with ingest and the view refreshes rarely, so 30s keeps a
-	// refresh burst to one aggregation per (window, sort, limit).
+	// refresh burst to one aggregation per window (sort and limit are applied
+	// per request).
 	userUsageCacheTTL = 30 * time.Second
 
 	defaultUsageWindow = "7d"

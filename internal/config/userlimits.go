@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/ethosagent/warden/internal/agentid"
@@ -33,8 +32,8 @@ const (
 
 // UserLimit is one per-user limit rule: a rate limit and/or a daily
 // estimated-cost cap, applied to the requests its Match selects. The worker
-// enforces rateLimit on every request (W-P3-PUL-09); dailyCostUSD is not
-// enforced yet and is refused (see unenforcedUserLimits).
+// enforces rateLimit on every request (W-P3-PUL-09) and dailyCostUSD on every
+// request to a cost-tracked destination (W-P3-PUL-04).
 type UserLimit struct {
 	// Name identifies the rule in buckets, the decision log and cost blocks.
 	// Required and unique in userLimits; empty on defaultUserLimit and
@@ -107,24 +106,6 @@ func copyUserLimits(in []UserLimit) []UserLimit {
 		out[i] = l.DeepCopy()
 	}
 	return out
-}
-
-// allowUnenforcedUserLimits lifts the not-yet-enforced guard on dailyCostUSD.
-// It is false in production; W-P3-PUL-04 replaces the guard with the real
-// enforcement. Tests set it to exercise the wire. It
-// is atomic because a test in another package lifts it while background
-// reloads of earlier tests may still be reading it.
-var allowUnenforcedUserLimits atomic.Bool
-
-// LiftUserLimitsGuardForTesting lifts the not-yet-enforced guard until t's
-// cleanup runs. It is for tests in other packages (the control plane's cost
-// block and capability gate tests, W-P3-PUL-08) that must hold a dailyCostUSD
-// rule before the enforcing tickets remove the guard. PUL-04 deletes this
-// with the guard; never call outside tests. Tests that use it must not run in
-// parallel with tests expecting the guard.
-func LiftUserLimitsGuardForTesting(t interface{ Cleanup(func()) }) {
-	allowUnenforcedUserLimits.Store(true)
-	t.Cleanup(func() { allowUnenforcedUserLimits.Store(false) })
 }
 
 // NormalizeUserLimits normalizes and validates the per-user limit rules in p:
@@ -289,28 +270,6 @@ func sortDedup(in []string) []string {
 		}
 	}
 	return out
-}
-
-// unenforcedUserLimits is the fail-closed guard for daily cost caps: rate
-// limits are enforced (W-P3-PUL-09), but until W-P3-PUL-04 enforces
-// dailyCostUSD a rule that sets one would be silently ignored, so it is
-// refused instead.
-func unenforcedUserLimits(p Policy) error {
-	if allowUnenforcedUserLimits.Load() {
-		return nil
-	}
-	for i, l := range p.UserLimits {
-		if l.DailyCostUSD != 0 {
-			return fmt.Errorf("config: policy.userLimits[%d].dailyCostUSD: not yet enforced; remove it until a release that enforces per-user cost caps", i)
-		}
-	}
-	switch {
-	case p.DefaultUserLimit != nil && p.DefaultUserLimit.DailyCostUSD != 0:
-		return fmt.Errorf("config: policy.defaultUserLimit.dailyCostUSD: not yet enforced; remove it until a release that enforces per-user cost caps")
-	case p.AnonymousLimit != nil && p.AnonymousLimit.DailyCostUSD != 0:
-		return fmt.Errorf("config: policy.anonymousLimit.dailyCostUSD: not yet enforced; remove it until a release that enforces per-user cost caps")
-	}
-	return nil
 }
 
 // ValidateCostBlockedUsers checks the wire-only cost block list: at most
