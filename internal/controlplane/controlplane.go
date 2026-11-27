@@ -171,6 +171,12 @@ type Config struct {
 	// mounted; when set, the settings writers keep identity.issuer equal to
 	// Consent.OIDC.Issuer.
 	Consent *config.ConsentConfig
+	// UserStore is the CP-only user credential store built from consent.store
+	// (NewUserStore, W-P3-CSIG-06), or nil when the block is absent. It holds
+	// the per-user credentials under the reserved namespaces. It is NEVER the
+	// SecretStore above: no route (/central/secrets, the dashboard secret
+	// store) and no worker ever reads it.
+	UserStore secrets.SecretStore
 	// ClientSecret is the console OIDC client secret, read by Run from the
 	// environment variable console.oidc.clientSecretEnv names. It is never logged.
 	ClientSecret string
@@ -1341,10 +1347,7 @@ func (s *Server) writeSettingsChecked(ctx context.Context, in config.SettingsWir
 	if s.versions != nil {
 		return s.publishSettings(ctx, in, meta, check)
 	}
-	if err := s.checkIssuerCollision(in.Identity); err != nil {
-		return err
-	}
-	if err := s.checkConsentIssuer(in.Identity); err != nil {
+	if err := s.checkIssuerBindings(&in); err != nil {
 		return err
 	}
 	s.writeMu.Lock()

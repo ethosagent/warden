@@ -155,6 +155,16 @@ type Params struct {
 	// keys.enabled is true and keys.store.backend is aws, and KeyStore is nil.
 	KeysAWSClient secrets.AWSSecretsClient
 
+	// UserStoreAWSClient, when set, is the AWS Secrets Manager client
+	// consent.store uses instead of one built from the CP environment or
+	// instance role (tests and the harness inject a fake). It is only read when
+	// consent is enabled with consent.store.backend aws.
+	UserStoreAWSClient secrets.AWSSecretsClient
+
+	// Dev (--dev) is development mode. Today it only allows the
+	// non-production echo consent.store backend.
+	Dev bool
+
 	// ErrOut receives the operational log while audit.jsonLog writes to
 	// stdout (the log moves off stdout so it carries only warden.admin.v1
 	// lines). Nil means os.Stderr. Tests pass a buffer.
@@ -179,6 +189,9 @@ func activeTestHooks(p Params) []string {
 	}
 	if p.KeysAWSClient != nil {
 		hooks = append(hooks, "KeysAWSClient")
+	}
+	if p.UserStoreAWSClient != nil {
+		hooks = append(hooks, "UserStoreAWSClient")
 	}
 	return hooks
 }
@@ -499,6 +512,18 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(fmt.Errorf("control-plane: secret store: %w", err))
 	}
+	// The CP-only user credential store (consent.store). It is checked against
+	// the secretStore the CP distributes and is never mounted on a route.
+	var userStore secrets.SecretStore
+	if consentCfg != nil {
+		userStore, err = NewUserStore(consentCfg.Store, UserStoreOptions{
+			Distributed: pol.SecretStore, Keys: keysCfg, Dev: p.Dev,
+			AWSClient: p.UserStoreAWSClient, Logger: logger,
+		})
+		if err != nil {
+			return fail(err)
+		}
+	}
 
 	// clk is the CP's resolved time port (nil = clock.Real(), the production
 	// default). Console sessions, pending logins and ID-token checks read it.
@@ -658,6 +683,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		SecretStore:         secretStore,
 		Console:             consoleCfg,
 		Consent:             consentCfg,
+		UserStore:           userStore,
 		ClientSecret:        clientSecret,
 		Now:                 clk.Now,
 
