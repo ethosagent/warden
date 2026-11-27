@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -37,9 +38,11 @@ func TestGrantEpochAdapter(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("the bump did not wake the long poll within 1s")
 	}
-	resp := h.bundleResp(t)
-	if bytes.Contains(resp.body, []byte("alice-sub")) {
-		t.Error("a subject is in the bundle body")
+	h.bundleResp(t)
+	for name, raw := range h.sections(t) {
+		if bytes.Contains(raw, []byte("alice")) {
+			t.Errorf("a subject is in the decoded %s section", name)
+		}
 	}
 	got := h.epochs(t)
 	if got[alice] <= before.Seq {
@@ -138,7 +141,7 @@ func TestGrantEpochAdapterFailingStore(t *testing.T) {
 	if custom.Status != oauthbroker.EpochFailed || custom.Err == nil || custom.WorkersWithoutCap != nil {
 		t.Errorf("stub outcome = %+v", custom)
 	}
-	if skipped := oauthbroker.BumpGrantEpoch(context.Background(), nil, nil, config.CapUserSecretsV1, "k"); skipped.Status != oauthbroker.EpochSkipped || skipped.Partial() {
+	if skipped := oauthbroker.BumpGrantEpoch(context.Background(), nil, nil, config.CapUserSecretsV1, "k"); skipped.Status != oauthbroker.EpochSkipped || !skipped.Partial() {
 		t.Errorf("nil bumper outcome = %+v, want skipped", skipped)
 	}
 }
@@ -150,8 +153,8 @@ func TestGrantEpochAdapterNoConsent(t *testing.T) {
 	h := newPerUserBundleHarness(t, &puBlock{}, nil, nil)
 	before := h.get(t, "", "")
 	rows := len(h.publishRows(t))
-	if err := h.s.GrantEpochBumper().Bump(context.Background(), puUserKey(t, "alice")); err != nil {
-		t.Fatal(err)
+	if err := h.s.GrantEpochBumper().Bump(context.Background(), puUserKey(t, "alice")); !errors.Is(err, ErrPerUserSecretsOff) {
+		t.Fatalf("Bump with per-user secrets off = %v, want ErrPerUserSecretsOff", err)
 	}
 	_ = h.s.GrantWorkerCaps().WorkersWithoutCap(config.CapUserSecretsV1)
 	after := h.get(t, "", "")
@@ -164,4 +167,58 @@ func TestGrantEpochAdapterNoConsent(t *testing.T) {
 	if _, ok := h.sections(t)[bundle.SectionUserGrantEpochs]; ok {
 		t.Error("the bundle gained a userGrantEpochs section")
 	}
+}
+
+// TestGrantEpochAdapterOffIsSkipped: with bundles on but per-user secrets off
+// the bump publishes nothing, so the revoke reports epoch skipped (partial) and
+// logs no grant_epoch_bumped line.
+func TestGrantEpochAdapterOffIsSkipped(t *testing.T) {
+	h := newPerUserBundleHarness(t, &puBlock{}, nil, nil)
+	out := oauthbroker.BumpGrantEpoch(context.Background(), h.s.GrantEpochBumper(), h.s.GrantWorkerCaps(), config.CapUserSecretsV1, puUserKey(t, "alice"))
+	if out.Status != oauthbroker.EpochSkipped || !out.Partial() || !errors.Is(out.Err, ErrPerUserSecretsOff) {
+		t.Fatalf("outcome = %+v, want skipped, partial", out)
+	}
+	if strings.Contains(h.logs.String(), "grant_epoch_bumped") {
+		t.Error("grant_epoch_bumped logged although nothing was published")
+	}
+}
+
+// TestGrantEpochAdapterFilterBeforeBound: workers_without_cap applies the
+// fleet-flag filter (serves a mapped agent, cap missing) before the registry's
+// bound, so one relevant worker is listed among many irrelevant old ones.
+func TestGrantEpochAdapterFilterBeforeBound(t *testing.T) {
+	h := newPerUserBundleHarness(t, &puBlock{cfg: puOn("agent-a")}, nil, nil)
+	for i := 0; i < maxWorkersWithoutCap+10; i++ {
+		h.s.registry.SeenHeartbeat(fmt.Sprintf("a-other-%03d", i), "x", nil, "agent-other", "attribute", WorkerBundle{})
+	}
+	h.s.registry.SeenHeartbeat("z-relevant", "x", nil, "agent-a", "attribute", WorkerBundle{})
+	h.s.registry.SeenHeartbeat("z-capable", "x", []string{config.CapUserSecretsV1}, "agent-a", "attribute", WorkerBundle{})
+	got := h.s.GrantWorkerCaps().WorkersWithoutCap(config.CapUserSecretsV1)
+	if !slices.Equal(got, []string{"z-relevant"}) {
+		t.Errorf("workers_without_cap = %v, want only z-relevant", got)
+	}
+	off := newPerUserBundleHarness(t, &puBlock{}, nil, nil)
+	off.s.registry.SeenHeartbeat("w", "x", nil, "agent-a", "attribute", WorkerBundle{})
+	if got := off.s.GrantWorkerCaps().WorkersWithoutCap(config.CapUserSecretsV1); len(got) != 0 {
+		t.Errorf("listed %v with per-user secrets off", got)
+	}
+}
+
+// TestGrantEpochAdapterFleetViewDoesNotBlock: the served-agents snapshot is read
+// without refreshMu, so the fleet view never waits behind a refresh or a Bump.
+func TestGrantEpochAdapterFleetViewDoesNotBlock(t *testing.T) {
+	h := newPerUserBundleHarness(t, &puBlock{cfg: puOn("agent-a")}, nil, nil)
+	h.ps.refreshMu.Lock()
+	done := make(chan map[string]bool, 1)
+	go func() { done <- h.ps.servedPerUserAgents() }()
+	select {
+	case got := <-done:
+		if !got["agent-a"] {
+			t.Errorf("served agents = %v", got)
+		}
+	case <-time.After(5 * time.Second):
+		h.ps.refreshMu.Unlock()
+		t.Fatal("servedPerUserAgents blocked behind refreshMu")
+	}
+	h.ps.refreshMu.Unlock()
 }

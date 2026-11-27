@@ -88,8 +88,10 @@ func grantEpochRevokeReport(t *testing.T, h *harness.H) {
 	if err != nil || epochs[alice] == 0 || epochs[alice] != got.Seq {
 		t.Fatalf("userGrantEpochs = %v (err %v), bundle seq %d", epochs, err, got.Seq)
 	}
-	if strings.Contains(woke.Body, "alice-sub") {
-		t.Error("a subject is on the wire")
+	for name, raw := range got.Bundle.Sections {
+		if strings.Contains(string(raw), "alice") {
+			t.Errorf("a subject is in the decoded %s section", name)
+		}
 	}
 	logs := h.Logs()
 	if !strings.Contains(logs, "grant_epoch_bumped") || !strings.Contains(logs, alice[:8]) || strings.Contains(logs, alice) || strings.Contains(logs, "alice-sub") {

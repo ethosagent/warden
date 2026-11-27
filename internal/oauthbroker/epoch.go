@@ -1,6 +1,14 @@
 package oauthbroker
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrEpochSkipped is what an EpochBumper returns (or wraps) when it published
+// nothing: per-user secrets are off, so no bundle carries the epoch. The revoke
+// reports it as skipped and partial, never as delivered.
+var ErrEpochSkipped = errors.New("oauthbroker: grant epoch not published")
 
 // EpochBumper records that a user's cached per-user tokens must be dropped:
 // the control plane implements it over its epoch store (W-P3-PUS-08) so this
@@ -22,7 +30,7 @@ type WorkerCapsReader interface {
 const (
 	EpochOK      = "ok"
 	EpochFailed  = "failed"
-	EpochSkipped = "skipped" // no bumper wired: nothing could tell a worker
+	EpochSkipped = "skipped" // nothing published: no bumper, or per-user secrets off
 )
 
 // EpochOutcome is the epoch step of a revoke: its status, the error (never
@@ -34,15 +42,16 @@ type EpochOutcome struct {
 	WorkersWithoutCap []string
 }
 
-// Partial reports whether the revoke is only partly delivered: the epoch bump
-// failed, so a worker may serve a cached token until its cache TTL ends.
-func (o EpochOutcome) Partial() bool { return o.Status == EpochFailed }
+// Partial reports whether the revoke is only partly delivered: only a published
+// epoch is ok, so after a failed or skipped step a worker may serve a cached
+// token until its cache TTL ends.
+func (o EpochOutcome) Partial() bool { return o.Status != EpochOK }
 
 // BumpGrantEpoch runs the epoch step of a revoke for userKey: it bumps the
 // user's epoch through b and lists, through caps, the workers lacking
 // capUserSecretsV1. The error is returned in the outcome, never swallowed; the
 // revoke continues with the provider step either way (the secret is already
-// deleted, so a later mint finds nothing). A nil b is skipped; a nil caps
+// deleted, so a later mint finds nothing). A nil b, or a bump that published nothing (ErrEpochSkipped), is skipped and counts as partial; a nil caps
 // leaves the worker list empty.
 func BumpGrantEpoch(ctx context.Context, b EpochBumper, caps WorkerCapsReader, capUserSecretsV1, userKey string) EpochOutcome {
 	var out EpochOutcome
@@ -55,6 +64,9 @@ func BumpGrantEpoch(ctx context.Context, b EpochBumper, caps WorkerCapsReader, c
 	}
 	if err := b.Bump(ctx, userKey); err != nil {
 		out.Status, out.Err = EpochFailed, err
+		if errors.Is(err, ErrEpochSkipped) {
+			out.Status = EpochSkipped
+		}
 		return out
 	}
 	out.Status = EpochOK

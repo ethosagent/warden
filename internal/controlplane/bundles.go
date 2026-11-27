@@ -296,7 +296,10 @@ type bundlePublisher struct {
 	// puPairs are the (agent, placeholder) pairs pu serves; pustale is set while
 	// the block in the config is not being served (see resolvePerUser).
 	puPairs map[string]map[string]bool
-	pustale atomic.Bool
+	// puAgents is a lock-free snapshot of the agents puPairs names (nil = off),
+	// stored whenever puPairs changes, for the fleet view.
+	puAgents atomic.Pointer[map[string]bool]
+	pustale  atomic.Bool
 	// frozenSeq and frozenEpochs are the userGrantEpochs bytes signed for that
 	// seq (see epochsFor).
 	frozenSeq    int64

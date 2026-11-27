@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/ethosagent/warden/internal/config"
@@ -14,6 +15,11 @@ import (
 // plane serves no signed bundles: nothing could carry the epoch to a worker, so
 // a revoke must not report it as delivered.
 var ErrGrantEpochsUnavailable = errors.New("controlplane: user grant epochs need signed bundles")
+
+// ErrPerUserSecretsOff is returned by the epoch adapter when per-user secrets
+// are off: EpochStore.Bump published nothing (epoch 0), so no worker was told.
+// It wraps oauthbroker.ErrEpochSkipped, which the revoke reports as skipped.
+var ErrPerUserSecretsOff = fmt.Errorf("controlplane: per-user secrets are off, no epoch was published: %w", oauthbroker.ErrEpochSkipped)
 
 // grantEpochBumper implements oauthbroker.EpochBumper over EpochStore.Bump
 // (W-P3-PORT-05). oauthbroker never imports controlplane; the control plane
@@ -43,6 +49,9 @@ func (b grantEpochBumper) Bump(ctx context.Context, userKey string) error {
 	if err != nil {
 		return err
 	}
+	if epoch == 0 {
+		return ErrPerUserSecretsOff
+	}
 	b.srv.cfg.Logger.Info("grant_epoch_bumped", "key_prefix", keyPrefix(userKey), "epoch", epoch)
 	return nil
 }
@@ -60,6 +69,7 @@ func keyPrefix(userKey string) string {
 // caps the worker registry stores (W-P1-BLOCK-10).
 type grantWorkerCaps struct {
 	registry *WorkerRegistry
+	agents   func() map[string]bool
 }
 
 var _ oauthbroker.WorkerCapsReader = grantWorkerCaps{}
@@ -67,31 +77,36 @@ var _ oauthbroker.WorkerCapsReader = grantWorkerCaps{}
 // GrantWorkerCaps returns the reader RevokeUserGrant lists workers_without_cap
 // from: the online workers lacking the capability, sorted, at most 50.
 func (s *Server) GrantWorkerCaps() oauthbroker.WorkerCapsReader {
-	return grantWorkerCaps{registry: s.registry}
+	return grantWorkerCaps{registry: s.registry, agents: s.policy.servedPerUserAgents}
 }
 
-// WorkersWithoutCap lists the online workers that do not advertise cap.
+// WorkersWithoutCap lists the online workers that do not advertise cap and
+// serve an agent with a per-user mapping in the served bundle: the same filter
+// as FlagNoUserSecrets, applied before the registry's bound. Nothing is listed
+// while per-user secrets are off (no worker caches a token then).
 func (w grantWorkerCaps) WorkersWithoutCap(cap string) []string {
 	if w.registry == nil {
 		return nil
 	}
-	return w.registry.WorkersWithoutCap(cap)
+	agents := w.agents()
+	if len(agents) == 0 {
+		return nil
+	}
+	ids, _ := w.registry.WorkersLackingCap(cap, func(agentID string) bool { return agents[agentID] })
+	return ids
 }
 
 // servedPerUserAgents returns the agents the served bundle carries a per-user
-// mapping for, nil while the feature is off. It reads the pairs the publisher
-// resolved, never the config file.
+// mapping for, nil while the feature is off. It reads a snapshot the publisher
+// updates under refreshMu, so it never waits behind a refresh or a Bump.
 func (ps *policyServer) servedPerUserAgents() map[string]bool {
-	ps.refreshMu.Lock()
-	defer ps.refreshMu.Unlock()
-	if ps.bundles == nil || ps.bundles.pu.raw == nil {
+	if ps.bundles == nil {
 		return nil
 	}
-	out := make(map[string]bool, len(ps.bundles.puPairs))
-	for agent := range ps.bundles.puPairs {
-		out[agent] = true
+	if m := ps.bundles.puAgents.Load(); m != nil {
+		return *m
 	}
-	return out
+	return nil
 }
 
 // FlagNoUserSecrets sets NoUserSecrets on every online view whose caps lack

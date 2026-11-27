@@ -3,6 +3,7 @@ package oauthbroker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 )
@@ -33,7 +34,8 @@ func TestBumpGrantEpoch(t *testing.T) {
 	}{
 		{"ok", &fakeBumper{}, &fakeCaps{}, EpochOK, false, []string{"w1"}},
 		{"failed is partial and keeps the worker list", &fakeBumper{err: boom}, &fakeCaps{}, EpochFailed, true, []string{"w1"}},
-		{"no bumper is skipped", nil, &fakeCaps{}, EpochSkipped, false, []string{"w1"}},
+		{"no bumper is skipped and partial", nil, &fakeCaps{}, EpochSkipped, true, []string{"w1"}},
+		{"a bump that published nothing is skipped and partial", &fakeBumper{err: fmt.Errorf("off: %w", ErrEpochSkipped)}, &fakeCaps{}, EpochSkipped, true, []string{"w1"}},
 		{"no caps reader", &fakeBumper{}, nil, EpochOK, false, nil},
 	}
 	for _, c := range cases {
@@ -42,7 +44,7 @@ func TestBumpGrantEpoch(t *testing.T) {
 			if out.Status != c.status || out.Partial() != c.partial || !slices.Equal(out.WorkersWithoutCap, c.workers) {
 				t.Errorf("outcome = %+v", out)
 			}
-			if c.partial && !errors.Is(out.Err, boom) {
+			if c.name == "failed is partial and keeps the worker list" && !errors.Is(out.Err, boom) {
 				t.Errorf("error = %v, want boom", out.Err)
 			}
 			if fb, ok := c.b.(*fakeBumper); ok && !slices.Equal(fb.keys, []string{"userkey"}) {
