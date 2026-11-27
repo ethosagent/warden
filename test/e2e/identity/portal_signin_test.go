@@ -437,7 +437,7 @@ func TestPortalSignIn(t *testing.T) {
 
 	t.Run("idp_links holds only the reference, generation and dates", func(t *testing.T) {
 		if firstToken == "" {
-			t.Skip("no stored token from the previous step")
+			t.Fatal("no stored token from the previous step (it failed)")
 		}
 		path, raw := copyStateDB(t)
 		rows, cols := readIdPLinks(t, path)
@@ -488,7 +488,7 @@ func TestPortalSignIn(t *testing.T) {
 
 	t.Run("the worker verifier rejects an ID token minted for warden-portal", func(t *testing.T) {
 		if portalIDTok == "" {
-			t.Skip("no warden-portal ID token from the refresh step")
+			t.Fatal("no warden-portal ID token from the refresh step (it failed)")
 		}
 		before := wrongAudEvents(t, allowedHost)
 		status, res := routedCurl(t, portalIDTok, allowedHost)
