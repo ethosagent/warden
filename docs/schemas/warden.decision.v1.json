@@ -84,7 +84,8 @@
           "transparent_no_sni",
           "unspecified",
           "unsupported_protocol",
-          "user_blocked"
+          "user_blocked",
+          "user_rate_limited"
           ]
         },
         { "pattern": "^mcp_chain_[a-z0-9_]+$" }
