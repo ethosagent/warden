@@ -9,6 +9,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"github.com/ethosagent/warden/internal/config"
 )
@@ -42,6 +45,10 @@ type SecretResolver interface {
 	ResolveSecret(ctx context.Context, key string) (string, error)
 }
 
+// secretFailCache is how long a failed consent.store read is remembered, so an
+// outage costs one store call per window rather than one per request.
+const secretFailCache = 5 * time.Second
+
 // Options are the injected dependencies of NewRegistry.
 type Options struct {
 	// LookupEnv reads a clientSecretEnv variable at startup (os.LookupEnv in
@@ -54,7 +61,8 @@ type Options struct {
 }
 
 // Provider is one configured OAuth provider with its endpoint defaults applied.
-// It is immutable after NewRegistry. It prints only non-secret fields under
+// It is immutable after NewRegistry: callers must not mutate its exported
+// slices or maps (they are shared by every request). It prints only non-secret fields under
 // every formatting verb and in slog.
 type Provider struct {
 	ID       string
@@ -79,8 +87,12 @@ type Provider struct {
 	secretKey string // logical consent.store key, when the secret is not from env
 	resolver  SecretResolver
 
-	mu     sync.Mutex
-	secret Secret
+	mu      sync.Mutex
+	secret  Secret
+	sf      singleflight.Group
+	failErr error // last read failure, served for secretFailCache
+	failAt  time.Time
+	failTTL time.Duration
 }
 
 // RevokeEndpoint returns RevokeURL with {client_id} replaced by the
@@ -103,21 +115,40 @@ func (p *Provider) CapScopes(requested []string) (capped, rejected []string) {
 // error is wrapped for the operator log but never carries the secret.
 func (p *Provider) ClientSecret(ctx context.Context) (Secret, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if !p.secret.IsZero() {
-		return p.secret, nil
+		s := p.secret
+		p.mu.Unlock()
+		return s, nil
 	}
 	if p.secretKey == "" || p.resolver == nil {
+		p.mu.Unlock()
 		return Secret{}, fmt.Errorf("%w: provider %s", ErrProviderUnavailable, p.ID)
 	}
-	v, err := p.resolver.ResolveSecret(ctx, p.secretKey)
-	if err != nil || v == "" {
-		if err == nil {
+	if p.failErr != nil && time.Since(p.failAt) < p.failTTL {
+		err := p.failErr
+		p.mu.Unlock()
+		return Secret{}, err
+	}
+	p.mu.Unlock()
+
+	// The store is called without p.mu held, and concurrent callers share one
+	// read, so an outage does not queue every connect behind a slow call.
+	v, err, _ := p.sf.Do("secret", func() (any, error) {
+		val, err := p.resolver.ResolveSecret(context.WithoutCancel(ctx), p.secretKey)
+		if err == nil && val == "" {
 			err = errors.New("empty secret")
 		}
-		return Secret{}, fmt.Errorf("%w: provider %s: %w", ErrProviderUnavailable, p.ID, err)
+		return val, err
+	})
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err != nil {
+		p.failErr = fmt.Errorf("%w: provider %s: %w", ErrProviderUnavailable, p.ID, err)
+		p.failAt = time.Now()
+		return Secret{}, p.failErr
 	}
-	p.secret = NewSecret(v)
+	p.secret = NewSecret(v.(string))
+	p.failErr = nil
 	return p.secret, nil
 }
 
@@ -195,6 +226,7 @@ func buildProvider(c config.OAuthProviderConfig, opts Options, logger *slog.Logg
 		AllowedAccountDomains: append([]string(nil), c.AllowedAccountDomains...),
 		RequireEmailMatch:     c.RequireEmailMatch,
 		resolver:              opts.Resolver,
+		failTTL:               secretFailCache,
 	}
 	switch c.Type {
 	case config.OAuthProviderGoogle:

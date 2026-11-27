@@ -1,6 +1,7 @@
 package oauthbroker
 
 import (
+	"slices"
 	"sort"
 	"strings"
 )
@@ -64,5 +65,5 @@ func normalizeScopes(in []string) []string {
 		return nil
 	}
 	sort.Strings(out)
-	return out
+	return slices.Clip(out)
 }

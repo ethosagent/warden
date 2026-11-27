@@ -2,6 +2,7 @@ package oauthbroker
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -106,5 +107,32 @@ func TestTokenRecordRedaction(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), `"grant_id":"g-123"`) || !strings.Contains(logs.String(), `"has_refresh_token":true`) {
 		t.Errorf("slog output lacks the safe fields: %s", logs.String())
+	}
+}
+
+func TestTokenRecordRedactionInsideWrapper(t *testing.T) {
+	type wrap struct {
+		Rec  TokenRecord
+		Ptr  *TokenRecord
+		Map  map[string]TokenRecord
+		Name string
+	}
+	r := sampleRecord()
+	w := wrap{Rec: r, Ptr: &r, Map: map[string]TokenRecord{"k": r}, Name: "n"}
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	slog.New(slog.NewJSONHandler(&logs, nil)).Info("w", "wrap", w, "ptr", &w)
+	for _, o := range []string{string(b), logs.String(), fmt.Sprintf("%+v", w), fmt.Sprintf("%#v", w)} {
+		if strings.Contains(o, "ACCESS-TOKEN-VALUE") || strings.Contains(o, "REFRESH-TOKEN-VALUE") {
+			t.Errorf("wrapper output leaks a token: %s", o)
+		}
+	}
+	// The stored format is unaffected.
+	stored, err := r.Marshal()
+	if err != nil || !bytes.Contains(stored, []byte("ACCESS-TOKEN-VALUE")) {
+		t.Errorf("Marshal must still carry the token: %s, %v", stored, err)
 	}
 }

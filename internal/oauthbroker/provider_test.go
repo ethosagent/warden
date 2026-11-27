@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -192,6 +193,7 @@ func TestRegistryKeySecretRetry(t *testing.T) {
 	if _, err := p.ClientSecret(context.Background()); !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
 	}
+	p.failTTL = 0 // the failure window is covered by TestClientSecretSingleflightAndFailureCache
 	// An empty stored value is also unavailable.
 	res.mu.Lock()
 	res.err = nil
@@ -280,5 +282,111 @@ func TestRegistryDoesNotAliasConfig(t *testing.T) {
 	p, _ := r.Get("g")
 	if p.AllowedScopes[0] != "a" || p.AllowedAccountDomains[0] != "example.com" {
 		t.Errorf("registry aliases the config slices: %+v", p)
+	}
+}
+
+// Secret must not leak when held in an unexported field of a printed struct
+// (fmt cannot call methods on unexported fields).
+func TestSecretInUnexportedField(t *testing.T) {
+	type holder struct{ s Secret }
+	h := holder{s: NewSecret("HIDDEN-VALUE")}
+	for _, o := range []string{fmt.Sprintf("%v", h), fmt.Sprintf("%+v", h), fmt.Sprintf("%#v", h)} {
+		if strings.Contains(o, "HIDDEN-VALUE") {
+			t.Errorf("leak: %s", o)
+		}
+	}
+	if NewSecret("x").Reveal() != "x" || !(Secret{}).IsZero() || (Secret{}).Reveal() != "" {
+		t.Error("Secret accessors broken")
+	}
+}
+
+type countingResolver struct {
+	mu    sync.Mutex
+	calls int
+	gate  chan struct{}
+	err   error
+}
+
+func (c *countingResolver) ResolveSecret(context.Context, string) (string, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	if c.gate != nil {
+		<-c.gate
+	}
+	if c.err != nil {
+		return "", c.err
+	}
+	return "v", nil
+}
+
+func TestClientSecretSingleflightAndFailureCache(t *testing.T) {
+	cfg := []config.OAuthProviderConfig{{ID: "g", Type: "google", ClientID: "c", ClientSecretKey: "oauth-clients/g"}}
+	// Failure cache: an outage costs one store call within the window.
+	res := &countingResolver{err: errors.New("down")}
+	r, _ := newReg(t, cfg, Options{Resolver: res})
+	p, _ := r.Get("g")
+	base := res.calls // startup read
+	for i := 0; i < 5; i++ {
+		if _, err := p.ClientSecret(context.Background()); !errors.Is(err, ErrProviderUnavailable) {
+			t.Fatalf("err = %v", err)
+		}
+	}
+	if res.calls != base {
+		t.Errorf("store called %d extra times during the failure window, want 0", res.calls-base)
+	}
+	// Singleflight: concurrent first reads share one store call, and the lock is not held across it.
+	gate := make(chan struct{})
+	res2 := &countingResolver{gate: gate}
+	r2, _ := NewRegistry(cfg, Options{LookupEnv: noEnv, Logger: slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))})
+	p2, _ := r2.Get("g")
+	p2.resolver = res2
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if s, err := p2.ClientSecret(context.Background()); err != nil || s.Reveal() != "v" {
+				t.Errorf("secret = %v, %v", s, err)
+			}
+		}()
+	}
+	for { // wait until the leader is inside the store call
+		res2.mu.Lock()
+		n := res2.calls
+		res2.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		runtime.Gosched()
+	}
+	close(gate)
+	wg.Wait()
+	if res2.calls != 1 {
+		t.Errorf("store calls = %d, want 1 (singleflight)", res2.calls)
+	}
+}
+
+func TestRegistryDoesNotAliasExtraParams(t *testing.T) {
+	cfg := []config.OAuthProviderConfig{{ID: "g", Type: "google", ClientID: "c", ClientSecretKey: "oauth-clients/g",
+		ExtraAuthParams: map[string]string{"hd": "example.com", "prompt": "select_account"}}}
+	r, _ := newReg(t, cfg, Options{})
+	cfg[0].ExtraAuthParams["hd"] = "evil.com"
+	delete(cfg[0].ExtraAuthParams, "prompt")
+	p, _ := r.Get("g")
+	want := map[string]string{"access_type": "offline", "prompt": "select_account", "hd": "example.com"}
+	if !reflect.DeepEqual(p.ExtraAuthParams, want) {
+		t.Errorf("params after config mutation = %v, want %v", p.ExtraAuthParams, want)
+	}
+	// A second registry from pristine google config is unaffected by the first's map.
+	r2, _ := newReg(t, []config.OAuthProviderConfig{{ID: "g", Type: "google", ClientID: "c", ClientSecretKey: "oauth-clients/g"}}, Options{})
+	p.ExtraAuthParams["access_type"] = "online"
+	p2, _ := r2.Get("g")
+	if p2.ExtraAuthParams["access_type"] != "offline" {
+		t.Errorf("registries share default maps: %v", p2.ExtraAuthParams)
+	}
+	// Scope slices carry no spare capacity to append into.
+	if s := normalizeScopes([]string{"a", "b", "a"}); cap(s) != len(s) {
+		t.Errorf("cap %d != len %d", cap(s), len(s))
 	}
 }

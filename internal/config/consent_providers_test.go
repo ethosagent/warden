@@ -78,7 +78,17 @@ func TestConsentProvidersValidate(t *testing.T) {
 		{"ttl ok", googleOK + "  connect:\n    pendingTTL: 1h\n", ""},
 		{"redirect wrong path", googleOK + "  connect:\n    redirectURL: https://warden.example.com/portal/callback\n", "exactly /connect/callback"},
 		{"redirect http non-loopback", googleOK + "  connect:\n    redirectURL: http://warden.example.com/connect/callback\n", "https unless"},
-		{"redirect ok", googleOK + "  connect:\n    redirectURL: https://other.example.com/connect/callback\n", ""},
+		{"redirect other origin", googleOK + "  connect:\n    redirectURL: https://other.example.com/connect/callback\n", "same origin"},
+		{"redirect same origin explicit", googleOK + "  connect:\n    redirectURL: https://warden.example.com/connect/callback\n", ""},
+		{"authURL with query", prov("      type: generic\n      authURL: https://a.example.com/auth?redirect_uri=https://evil\n      tokenURL: https://a.example.com/token\n"), "authURL"},
+		{"tokenURL with query", prov("      type: generic\n      authURL: https://a.example.com/auth\n      tokenURL: https://a.example.com/token?x=1\n"), "tokenURL"},
+		{"authURL empty query", prov("      type: generic\n      authURL: https://a.example.com/auth?\n      tokenURL: https://a.example.com/token\n"), "authURL"},
+		{"empty host", prov("      type: github\n      tokenURL: https://:443/x\n"), "tokenURL"},
+		{"empty fragment", prov("      type: github\n      userinfoURL: https://a.example.com/u#\n"), "userinfoURL"},
+		{"request param", prov("      type: github\n      extraAuthParams:\n        request: x\n"), "extraAuthParams.request"},
+		{"request_uri param", prov("      type: github\n      extraAuthParams:\n        Request_URI: x\n"), "extraAuthParams.Request_URI"},
+		{"response_mode param", prov("      type: github\n      extraAuthParams:\n        response_mode: fragment\n"), "extraAuthParams.response_mode"},
+		{"claims param", prov("      type: github\n      extraAuthParams:\n        claims: x\n"), "extraAuthParams.claims"},
 		{"unknown connect key", googleOK + "  connect:\n    bogus: 1\n", "bogus"},
 	}
 	for _, tc := range cases {

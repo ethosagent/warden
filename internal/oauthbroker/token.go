@@ -29,8 +29,9 @@ var ErrTokenRecord = errors.New("oauthbroker: invalid token record")
 // record does not.) Scope is the granted scopes, space separated and sorted.
 //
 // The type redacts itself: String, GoString and LogValue never print the
-// tokens, so a record passed to a logger or %v stays safe. A plain
-// json.Marshal of the struct does include the tokens, so go through Marshal.
+// tokens, so a record passed to a logger or %v stays safe. MarshalJSON is
+// redacted too (also inside wrapper structs); only Marshal yields the stored
+// bytes.
 type TokenRecord struct {
 	V             int    `json:"v"`
 	GrantID       string `json:"grant_id"`
@@ -94,6 +95,18 @@ func ParseTokenRecord(data []byte) (TokenRecord, error) {
 		return TokenRecord{}, err
 	}
 	return r, nil
+}
+
+// MarshalJSON redacts: any json.Marshal or slog JSON of a value holding a
+// record (as a field of a wrapper, in a map, behind a pointer) prints the
+// non-secret fields and a placeholder for the tokens. The stored format is
+// produced by Marshal, which encodes the method-less plain type.
+func (r TokenRecord) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"v": r.V, "grant_id": r.GrantID, "provider": r.Provider, "scope": r.Scope,
+		"expiry": r.Expiry, "has_refresh_token": r.RefreshToken != "",
+		"access_token": redacted,
+	})
 }
 
 // Scopes returns the granted scopes (sorted, de-duplicated).

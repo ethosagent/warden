@@ -148,7 +148,7 @@ func parseConsentConnect(r rawConsentConnect, oidcRedirect string) (ConsentConne
 }
 
 // providerIDRE mirrors secrets.ValidProviderID (internal/secrets imports this
-// package, so it cannot be called here); a test in oauthbroker pins the two.
+// package, so it cannot be called here); a test in internal/secrets/userkey_test.go pins the two.
 var providerIDRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // ValidOAuthProviderID reports whether id is a valid provider id.
@@ -159,6 +159,7 @@ var forbiddenExtraAuthParams = map[string]bool{
 	"client_id": true, "redirect_uri": true, "response_type": true, "scope": true,
 	"state": true, "code_challenge": true, "code_challenge_method": true,
 	"nonce": true, "include_granted_scopes": true,
+	"request": true, "request_uri": true, "response_mode": true, "claims": true,
 }
 
 // ForbiddenExtraAuthParam reports whether name (case-insensitive) may not be set
@@ -171,13 +172,16 @@ var domainRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-
 
 // validateProviderURL requires an absolute https URL (plain http only for a
 // loopback host), with no userinfo or fragment.
-func validateProviderURL(field, raw string) error {
+func validateProviderURL(field, raw string, noQuery bool) error {
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return fmt.Errorf("config: %s %q must be an absolute https URL", field, raw)
+	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("config: %s %q must be an absolute https URL with a host", field, raw)
 	}
-	if u.User != nil || u.Fragment != "" {
+	if u.User != nil || u.Fragment != "" || strings.Contains(raw, "#") {
 		return fmt.Errorf("config: %s %q must not carry userinfo or a fragment", field, raw)
+	}
+	if noQuery && (u.RawQuery != "" || u.ForceQuery) {
+		return fmt.Errorf("config: %s %q must not carry a query string (the broker owns the request parameters; use extraAuthParams)", field, raw)
 	}
 	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("config: %s %q must be https unless its host is loopback", field, raw)
@@ -234,7 +238,7 @@ func validateOAuthProvider(i int, p OAuthProviderConfig) error {
 			continue
 		}
 		v := strings.ReplaceAll(u.v, "{client_id}", "client")
-		if err := validateProviderURL(f(u.k), v); err != nil {
+		if err := validateProviderURL(f(u.k), v, u.k == "authURL" || u.k == "tokenURL"); err != nil {
 			return err
 		}
 	}
@@ -315,6 +319,9 @@ func validateConsentProviders(c ConsentConfig) error {
 	}
 	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("config: consent.connect.redirectURL %q must be https unless its host is loopback", raw)
+	}
+	if o, err := url.Parse(c.OIDC.RedirectURL); err == nil && (u.Scheme != o.Scheme || !strings.EqualFold(u.Host, o.Host)) {
+		return fmt.Errorf("config: consent.connect.redirectURL %q must have the same origin as consent.oidc.redirectURL (the callback needs the portal session cookie)", raw)
 	}
 	return nil
 }
