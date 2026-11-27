@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -36,6 +37,11 @@ import (
 // portalSecretStoreUnavailable answers a callback whose IdP link could not be
 // stored: no session, no row (fail closed).
 const portalSecretStoreUnavailable = "secret_store_unavailable"
+
+// portalSessionStoreUnavailable answers a callback whose portal_sessions
+// insert failed (503, no session). An IdP link stored just before may exist
+// without a session in that case.
+const portalSessionStoreUnavailable = "session_store_unavailable"
 
 // portalService is the portal's front door. A service whose flow could not be
 // built (a bad issuer, say) stays mounted and answers 503 idp_unavailable.
@@ -207,7 +213,7 @@ func (p *portalService) handleCallback(w http.ResponseWriter, r *http.Request) {
 	switch res.reason {
 	case "":
 		http.Redirect(w, r, next, http.StatusFound)
-	case portal.CodeOfflineAccessNotGranted, loginBlockUnavailable, portalSecretStoreUnavailable:
+	case portal.CodeOfflineAccessNotGranted, loginBlockUnavailable, portalSecretStoreUnavailable, portalSessionStoreUnavailable:
 		writeAuthError(w, res.status, res.reason)
 	default:
 		http.Redirect(w, r, portal.Home+"?login_error="+url.QueryEscape(res.reason), http.StatusFound)
@@ -253,7 +259,9 @@ func (p *portalService) finishLogin(w http.ResponseWriter, r *http.Request, logi
 	}
 	if p.links != nil && p.cfg.IdPLink.Enabled {
 		if err := p.links.StoreLink(ctx, portal.Link{Iss: claims.Issuer, Sub: claims.Sub, Email: claims.Email, RefreshToken: login.RefreshToken}); err != nil {
-			p.logger.Error("portal login: idp link store failed", "sub", claims.Sub, "error", err)
+			// Only the error's type is logged: a store error could echo what
+			// it was asked to write.
+			p.logger.Error("portal login: idp link store failed", "sub", claims.Sub, "reason", "idp_link_store_failed", "error_type", fmt.Sprintf("%T", err))
 			res.reason, res.status = portalSecretStoreUnavailable, http.StatusServiceUnavailable
 			return "", res
 		}
@@ -262,8 +270,10 @@ func (p *portalService) finishLogin(w http.ResponseWriter, r *http.Request, logi
 		Iss: claims.Issuer, Sub: claims.Sub, Email: claims.Email, Groups: groups,
 	})
 	if err != nil {
-		p.logger.Error("portal login: session create failed", "error", err)
-		res.reason = loginExchangeFailed
+		// The IdP link, when one was written above, stays: it is the same
+		// link the user's next successful login writes again.
+		p.logger.Error("portal login: session create failed", "reason", "session_store_failed", "error", err)
+		res.reason, res.status = portalSessionStoreUnavailable, http.StatusServiceUnavailable
 		return "", res
 	}
 	// A portal cookie the request carried is never reused: its row is dropped
@@ -280,7 +290,8 @@ func (p *portalService) finishLogin(w http.ResponseWriter, r *http.Request, logi
 
 // session returns the live portal session the request's portal cookie names,
 // with its raw id. Only the portal cookie and portal_sessions are read; a
-// blocked principal has no session. Activity is recorded at most once a
+// blocked principal, or any principal while no block list has loaded, has no
+// session. Activity is recorded at most once a
 // minute. W-P3-CSIG-04's RequireSession builds on it.
 func (p *portalService) session(r *http.Request) (webauth.Session, string, bool) {
 	if p.sessions == nil {
@@ -298,7 +309,9 @@ func (p *portalService) session(r *http.Request) (webauth.Session, string, bool)
 	if !live {
 		return webauth.Session{}, "", false
 	}
-	if p.blocks != nil && p.blocks.IsBlocked(sess.Sub, sess.Email) {
+	// Without a loaded block list nobody can be told apart from a blocked
+	// user, so no session authenticates (fail closed).
+	if p.blocks != nil && (!p.blocks.Ready() || p.blocks.IsBlocked(sess.Sub, sess.Email)) {
 		return webauth.Session{}, "", false
 	}
 	if webauth.TouchDue(sess, p.sessions.Now()) {
@@ -363,8 +376,9 @@ func (p *portalService) handleHome(w http.ResponseWriter, r *http.Request) {
 }
 
 // recordPortalLogin records the outcome of one portal callback: portal.login
-// for a success, portal.login_failed (rate-limited per address, like the
-// console's) for a failure that consumed a portal state.
+// for a success, portal.login_failed (rate-limited per address with its own
+// limiter, separate from the console's) for a failure that consumed a portal
+// state.
 func (s *Server) recordPortalLogin(r *http.Request, res portalLoginResult) {
 	a := s.audit
 	in := adminaudit.Input{
@@ -376,8 +390,11 @@ func (s *Server) recordPortalLogin(r *http.Request, res portalLoginResult) {
 		in.Action, in.Outcome = actionPortalLogin, adminaudit.OutcomeOK
 		in.TargetRef = shortHash(res.sessionHash)
 	} else {
-		if !a.loginFailed.allow(in.ClientIP) {
-			a.noteLoginFailedDropped(in.ClientIP)
+		if !a.portalLoginFailed.allow(in.ClientIP) {
+			n := a.portalLoginFailedDropped.Add(1)
+			if a.loginFailedLog.allow(in.ClientIP) {
+				a.logger.Warn("admin_audit_portal_login_failed_rate_limited", "client_ip", in.ClientIP, "limit_per_minute", loginFailedPerMinute, "dropped", n)
+			}
 			return
 		}
 		in.Action, in.Outcome = actionPortalLoginFailed, portalLoginOutcome(res.reason)

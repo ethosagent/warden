@@ -645,3 +645,95 @@ func TestRestoreClearsPortalSessions(t *testing.T) {
 		}
 	}
 }
+
+// TestPortalBlockListUnloaded: while no block list has loaded the portal
+// cannot tell who is blocked, so login, callback and existing sessions all
+// fail closed.
+func TestPortalBlockListUnloaded(t *testing.T) {
+	links := &fakeLinkWriter{}
+	r := newPortalRig(t, portalRigOpts{links: links})
+	r.ready()
+	c := r.login("")
+	links.links = nil
+	f := r.start("") // state stored while the list was loaded
+	r.srv.blocks.snap.Store(nil)
+
+	if rec := r.serve(http.MethodGet, "/portal/login"); rec.Code != http.StatusServiceUnavailable || errBody(t, rec) != loginBlockUnavailable {
+		t.Fatalf("/portal/login = %d %s, want 503 block_list_unavailable", rec.Code, rec.Body)
+	}
+	res := r.finish(f)
+	if res.Code != http.StatusServiceUnavailable || errBody(t, res) != loginBlockUnavailable {
+		t.Fatalf("callback = %d %s, want 503 block_list_unavailable", res.Code, res.Body)
+	}
+	if cookieNamed(res, portalCookie) != nil || r.count("portal_sessions") != 1 || len(links.links) != 0 {
+		t.Fatalf("an unloaded block list let a login write (rows %d, links %d)", r.count("portal_sessions"), len(links.links))
+	}
+	if r.count("oidc_pending") != 0 {
+		t.Fatal("the callback did not consume its state")
+	}
+	if r.signedIn(c, fakes.DefaultLoginSub+"@example.com") {
+		t.Fatal("an existing session authenticates while no block list has loaded")
+	}
+}
+
+// TestPortalSessionStoreFailure: a failed portal_sessions insert is 503
+// session_store_unavailable, not a login_error redirect.
+func TestPortalSessionStoreFailure(t *testing.T) {
+	r := newPortalRig(t, portalRigOpts{})
+	r.ready()
+	f := r.start("")
+	if _, err := r.db.SQL().Exec(`DROP TABLE portal_sessions`); err != nil {
+		t.Fatal(err)
+	}
+	res := r.finish(f)
+	if res.Code != http.StatusServiceUnavailable || errBody(t, res) != portalSessionStoreUnavailable || cookieNamed(res, portalCookie) != nil {
+		t.Fatalf("callback = %d %s, want 503 session_store_unavailable and no cookie", res.Code, res.Body)
+	}
+	if !strings.Contains(r.logs.String(), `"reason":"session_store_failed"`) {
+		t.Fatal("no session_store_failed log line")
+	}
+}
+
+// tokenEchoErr is a store error that (wrongly) carries what it was given.
+type tokenEchoErr struct{ tok string }
+
+func (e tokenEchoErr) Error() string { return "put failed for " + e.tok }
+
+// TestPortalLinkErrorNotLogged: a LinkWriter error is logged by type only.
+func TestPortalLinkErrorNotLogged(t *testing.T) {
+	links := &fakeLinkWriter{err: tokenEchoErr{tok: portalRefreshToken}}
+	r := newPortalRig(t, portalRigOpts{links: links})
+	r.ready()
+	if res := r.finish(r.start("")); res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("callback = %d, want 503", res.Code)
+	}
+	logs := r.logs.String()
+	if strings.Contains(logs, portalRefreshToken) {
+		t.Fatal("the logs hold the refresh token from the link error")
+	}
+	if !strings.Contains(logs, `"reason":"idp_link_store_failed"`) || !strings.Contains(logs, "tokenEchoErr") {
+		t.Fatalf("link failure not logged by reason and type:\n%s", logs)
+	}
+}
+
+// TestPortalLoginFailedOwnBudget: portal.login_failed rows have their own
+// per-address limit, so a portal flood leaves the console's budget intact.
+func TestPortalLoginFailedOwnBudget(t *testing.T) {
+	r := newPortalRig(t, portalRigOpts{})
+	rec := &fakeRecorder{}
+	r.srv.enableAdminAudit(rec, rec.probe, fakeMAC)
+	req := httptest.NewRequest(http.MethodGet, "/portal/callback", nil)
+	for range loginFailedPerMinute + 5 {
+		r.srv.recordPortalLogin(req, portalLoginResult{reason: portal.CodeBlocked, consumed: true, status: http.StatusFound})
+	}
+	if n := len(rowsByAction(rec, actionPortalLoginFailed)); n != loginFailedPerMinute {
+		t.Fatalf("portal.login_failed rows = %d, want the cap %d", n, loginFailedPerMinute)
+	}
+	if n := r.srv.audit.portalLoginFailedDropped.Load(); n != 5 {
+		t.Fatalf("portal dropped = %d, want 5", n)
+	}
+	r.srv.recordLogin(req, loginResult{reason: loginNoRole, consumed: true})
+	if n := len(rowsByAction(rec, actionLoginFailed)); n != 1 || r.srv.audit.loginFailedDropped.Load() != 0 {
+		t.Fatalf("console auth.login_failed rows = %d after a portal flood, want 1", n)
+	}
+}

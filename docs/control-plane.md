@@ -966,7 +966,10 @@ With the block enabled and `--state-dir` set the control plane mounts:
   user block list (`login_error=blocked`), when `allowedGroups` is set and none of the
   user's groups (first 256) matches (`not_allowed`), or when `idpLink` is enabled and
   the token response has no refresh token (502 `{"error":"offline_access_not_granted"}`).
-  While no block list has loaded both routes refuse with 503 `block_list_unavailable`.
+  While no block list has loaded both routes refuse with 503 `block_list_unavailable`
+  and no existing portal session authenticates. A failed `portal_sessions` insert is
+  503 `session_store_unavailable` (an IdP link stored just before may then exist
+  without a session).
 - Other failures redirect to `/portal?login_error=<code>` with a code from
   `state_invalid`, `nonce_mismatch`, `token_invalid`, `exchange_failed`, `idp_error`,
   `idp_unavailable`; IdP error text is never echoed. Until discovery succeeds both
@@ -984,7 +987,8 @@ With the block enabled and `--state-dir` set the control plane mounts:
   `duration_ms`); with admin audit on it records `portal.login` (target
   `portal_session`, `target_ref` the session's short hash) or, after a portal state
   was consumed, `portal.login_failed` with `{reason: <login_error code>}`, rate-limited
-  per address like `auth.login_failed`. No code, state, verifier, nonce, token or
+  to 20 rows per address per minute by its own limiter (a portal flood does not use up
+  the `auth.login_failed` budget). No code, state, verifier, nonce, token or
   cookie value is logged or recorded.
 
 ## API keys (`console.apiKeys`)

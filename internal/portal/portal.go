@@ -132,7 +132,9 @@ func (l Link) LogValue() slog.Value {
 // LinkWriter stores a login's IdP link (W-P3-CSIG-03: the refresh token in the
 // CP-only consent.store, its Reference in idp_links). The callback calls it
 // after admission and before it creates the session; an error means no
-// session (fail closed).
+// session (fail closed). An error must never carry the token (or any part of
+// it): the caller logs only the error's type, but implementations must not
+// rely on that.
 type LinkWriter interface {
 	StoreLink(ctx context.Context, l Link) error
 }
