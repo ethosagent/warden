@@ -46,6 +46,10 @@ type ConsentConfig struct {
 	AllowedGroups []string
 	Session       ConsentSession
 	IdPLink       ConsentIdPLink
+	// Store is the CP-only user credential store (`consent.store`,
+	// W-P3-CSIG-06), or nil when the block is absent. No worker ever holds a
+	// credential for it; see ConsentStore.
+	Store *ConsentStore
 }
 
 // ConsentOIDC is the portal's OIDC client registration. Scopes are not
@@ -104,6 +108,8 @@ type rawConsent struct {
 		Enabled         *bool  `yaml:"enabled"`
 		RefreshLifetime string `yaml:"refreshLifetime"`
 	} `yaml:"idpLink"`
+	// A pointer tells an absent store (no CP-only store) from a configured one.
+	Store *rawConsentStore `yaml:"store"`
 }
 
 // defaultConsent is the block with every default applied (disabled).
@@ -156,6 +162,7 @@ func parseConsent(r *rawConsent) (ConsentConfig, error) {
 	if r.IdPLink.Enabled != nil {
 		c.IdPLink.Enabled = *r.IdPLink.Enabled
 	}
+	c.Store = parseConsentStore(r.Store)
 	return c, nil
 }
 
@@ -202,7 +209,7 @@ func validateConsent(c ConsentConfig, consoleRedirect string) error {
 	if c.IdPLink.RefreshLifetime <= 0 {
 		return fmt.Errorf("config: consent.idpLink.refreshLifetime (%s) must be > 0", c.IdPLink.RefreshLifetime)
 	}
-	return nil
+	return validateConsentStore(c.Store)
 }
 
 func sameURL(a, b string) bool {

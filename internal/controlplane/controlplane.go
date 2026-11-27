@@ -171,6 +171,12 @@ type Config struct {
 	// mounted; when set, the settings writers keep identity.issuer equal to
 	// Consent.OIDC.Issuer.
 	Consent *config.ConsentConfig
+	// UserStore is the CP-only user credential store built from consent.store
+	// (NewUserStore, W-P3-CSIG-06), or nil when the block is absent. It holds
+	// the per-user credentials under the reserved namespaces. It is NEVER the
+	// SecretStore above: no route (/central/secrets, the dashboard secret
+	// store) and no worker ever reads it.
+	UserStore secrets.SecretStore
 	// ClientSecret is the console OIDC client secret, read by Run from the
 	// environment variable console.oidc.clientSecretEnv names. It is never logged.
 	ClientSecret string
@@ -1207,11 +1213,23 @@ func validateDocAgainst(rootPath, tmpDir string, doc policyWire) error {
 // renames it into place. Callers refresh the watch afterward. The caller MUST
 // hold s.writeMu.
 func (s *Server) atomicWriteConfig(root map[string]yaml.Node) error {
-	tmpName, err := s.writeValidatedTemp(root)
+	return s.atomicWriteConfigChecked(root, nil)
+}
+
+// atomicWriteConfigChecked is atomicWriteConfig with an optional check on the
+// loaded candidate policy (the parsed, normalized document) that runs before
+// the rename; a check error leaves the served file unchanged.
+func (s *Server) atomicWriteConfigChecked(root map[string]yaml.Node, check func(config.Policy) error) error {
+	tmpName, pol, err := s.writeCheckedTemp(root)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(tmpName) }() // no-op once renamed
+	if check != nil {
+		if err := check(pol); err != nil {
+			return err
+		}
+	}
 	// The bytes just validated, hashed by persist as this CP's own write so the
 	// file-mode re-read does not audit it as an external edit (W-P1-AAUD-08).
 	data, err := os.ReadFile(tmpName)
@@ -1341,10 +1359,7 @@ func (s *Server) writeSettingsChecked(ctx context.Context, in config.SettingsWir
 	if s.versions != nil {
 		return s.publishSettings(ctx, in, meta, check)
 	}
-	if err := s.checkIssuerCollision(in.Identity); err != nil {
-		return err
-	}
-	if err := s.checkConsentIssuer(in.Identity); err != nil {
+	if err := s.checkIssuerBindings(&in); err != nil {
 		return err
 	}
 	s.writeMu.Lock()
@@ -1382,7 +1397,13 @@ func (s *Server) writeSettingsChecked(ctx context.Context, in config.SettingsWir
 		return err
 	}
 
-	if err := s.atomicWriteConfig(root); err != nil {
+	// The bindings are checked again on the document as workers will be served
+	// it (encoded, re-parsed and normalized), not only on the input wire: the
+	// encoders trim and default-fill values, so a raw-wire check alone could
+	// pass a value that normalizes into a refused one.
+	if err := s.atomicWriteConfigChecked(root, func(p config.Policy) error {
+		return s.checkIssuerBindings(config.SettingsWireFromPolicy(p))
+	}); err != nil {
 		return err
 	}
 	// Wake long-poll waiters with the new settings now, like writePolicy.
