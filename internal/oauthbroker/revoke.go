@@ -119,6 +119,8 @@ type Request struct {
 	// BasicUser and BasicPass, when BasicUser is set, become the HTTP Basic
 	// Authorization header. Callers form-urlencode them for RFC 6749 clients.
 	BasicUser, BasicPass string
+	// Bearer, when set, becomes the Authorization: Bearer header (userinfo).
+	Bearer string
 	// MaxBytes bounds the response read (the adapter reads at most MaxBytes+1
 	// bytes); 0 means the adapter default, MaxProviderResponseBytes.
 	MaxBytes int

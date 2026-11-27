@@ -321,11 +321,13 @@ func buildProvider(c config.OAuthProviderConfig, opts Options, logger *slog.Logg
 	return p, nil
 }
 
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
+func firstNonEmpty(vs ...string) string {
+	for _, v := range vs {
+		if v != "" {
+			return v
+		}
 	}
-	return b
+	return ""
 }
 
 // Get returns the provider id or ErrUnknownProvider.

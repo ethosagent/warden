@@ -117,3 +117,16 @@ func TestDoHonoursMaxBytes(t *testing.T) {
 		t.Fatalf("read must stop at MaxBytes+1: len=%d err=%v", len(b), err)
 	}
 }
+
+func TestDoSendsBearer(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = r.Header.Get("Authorization") }))
+	defer srv.Close()
+	c, err := New([]string{"127.0.0.0/8"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.Do(t.Context(), oauthbroker.Request{Method: "GET", URL: srv.URL, Bearer: "tok-1"}); err != nil || got != "Bearer tok-1" {
+		t.Fatalf("Authorization = %q, %v", got, err)
+	}
+}

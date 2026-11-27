@@ -151,7 +151,7 @@ func connectCallback(t *testing.T, h *harness.H) {
 		t.Fatalf("no token at %s: %v", ccKey(f3.userKey), err)
 	}
 	grants := h.OAuthGrants()
-	if len(grants) != 1 || grants[0].State != "active" || grants[0].UserKey != f3.userKey || len(grants[0].Scopes) != 1 || grants[0].Scopes[0] != "drive.readonly" {
+	if len(grants) != 1 || grants[0].State != "active" || grants[0].UserKey != f3.userKey || strings.Join(grants[0].Scopes, " ") != "drive.readonly email openid" {
 		t.Fatalf("grants = %+v", grants)
 	}
 	for _, want := range []string{prov.AccessToken(1), prov.RefreshToken(1), `"grant_id":"` + grants[0].GrantID + `"`, `"v":1`} {

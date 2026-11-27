@@ -102,6 +102,11 @@ var All = slices.Concat(
 		// start in a minute write nothing.
 		{Name: "connect_start", Opts: connectOpts(), Run: connectStart},
 		{Name: "connect_callback", Opts: connectCallbackOpts(), Run: connectCallback},
+		// OAuth broker account rules (W-P3-BRKR-08): the connected provider
+		// account is recorded on the grant; one outside allowedAccountDomains or
+		// not matching the signed-in user's email is refused, revoked at the
+		// provider and stored nowhere, without touching a working grant.
+		{Name: "connect_account", Opts: connectAccountOpts(), Run: connectAccount},
 
 		// Break-glass login (W-P1-OPS1-08): a real argon2id login opens a Secure
 		// admin session with a signed row, an ERROR line and a Finding per

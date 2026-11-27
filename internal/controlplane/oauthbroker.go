@@ -201,6 +201,9 @@ func (a brokerAudit) Record(ctx context.Context, ev oauthbroker.AuditEvent) erro
 	if ev.PendingID != "" {
 		details["pending_id"] = ev.PendingID
 	}
+	if ev.AccountID != "" {
+		details["provider_account_id"] = fitDetail(ev.AccountID)
+	}
 	if ev.Reason != "" {
 		details["reason"] = ev.Reason
 	}

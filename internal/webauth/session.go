@@ -55,6 +55,12 @@ type SessionTable struct {
 	// breakglass). Without it every session has an idle timeout and
 	// Session.AuthMethod reads back empty.
 	AuthMethod bool
+	// EmailVerifiedMigrationID, when set, adds the email_verified column (a
+	// second migration with that id) that records whether the IdP vouched for
+	// the session's email. Without it Session.EmailVerified reads back false.
+	// Rows written before the column existed read false: nothing that needs a
+	// verified email trusts them until the user signs in again.
+	EmailVerifiedMigrationID string
 }
 
 func (t SessionTable) check() {
@@ -71,7 +77,7 @@ func (t SessionTable) Migrations() []cpstate.Migration {
 	if t.AuthMethod {
 		authMethod = "\n  auth_method  TEXT NOT NULL,"
 	}
-	return []cpstate.Migration{{
+	migs := []cpstate.Migration{{
 		ID: t.MigrationID,
 		SQL: `CREATE TABLE ` + t.Name + ` (
   id_hash      TEXT PRIMARY KEY,
@@ -86,19 +92,29 @@ func (t SessionTable) Migrations() []cpstate.Migration {
 CREATE INDEX ` + t.Name + `_expires_at ON ` + t.Name + ` (expires_at);
 CREATE INDEX ` + t.Name + `_sub ON ` + t.Name + ` (sub);`,
 	}}
+	if t.EmailVerifiedMigrationID != "" {
+		migs = append(migs, cpstate.Migration{
+			ID:  t.EmailVerifiedMigrationID,
+			SQL: `ALTER TABLE ` + t.Name + ` ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0;`,
+		})
+	}
+	return migs
 }
 
 // Session is one stored session. It never holds the raw id: IDHash is the hex
 // sha256 of it.
 type Session struct {
-	IDHash     string
-	Iss, Sub   string
-	Email      string
-	Groups     []string
-	AuthMethod string
-	CreatedAt  time.Time
-	LastSeenAt time.Time
-	ExpiresAt  time.Time
+	IDHash   string
+	Iss, Sub string
+	Email    string
+	// EmailVerified is the IdP's email_verified claim at sign-in (false when the
+	// table has no such column).
+	EmailVerified bool
+	Groups        []string
+	AuthMethod    string
+	CreatedAt     time.Time
+	LastSeenAt    time.Time
+	ExpiresAt     time.Time
 }
 
 // CreateOptions tune one Create call. The zero value is the store's defaults.
@@ -112,6 +128,7 @@ type CreateOptions struct {
 // stored only in a table with an auth_method column.
 type SessionInput struct {
 	Iss, Sub, Email string
+	EmailVerified   bool
 	Groups          []string
 	AuthMethod      string
 }
@@ -142,9 +159,13 @@ func NewSessionStore(db *sql.DB, table SessionTable, idle, absolute time.Duratio
 	if table.AuthMethod {
 		am = "auth_method"
 	}
+	ev := "0"
+	if table.EmailVerifiedMigrationID != "" {
+		ev = "email_verified"
+	}
 	return &SessionStore{
 		db: db, table: table, idle: idle, absolute: absolute, now: now,
-		cols: "id_hash, iss, sub, email, groups_json, " + am + ", created_at, last_seen_at, expires_at",
+		cols: "id_hash, iss, sub, email, groups_json, " + am + ", " + ev + ", created_at, last_seen_at, expires_at",
 	}
 }
 
@@ -204,19 +225,24 @@ func (s *SessionStore) Create(ctx context.Context, in SessionInput, opts ...Crea
 		Groups: groups, AuthMethod: authMethod,
 		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(absolute),
 	}
+	sess.EmailVerified = in.EmailVerified && s.table.EmailVerifiedMigrationID != ""
+	cols := []string{"id_hash", "iss", "sub", "email", "groups_json"}
+	args := []any{sess.IDHash, sess.Iss, sess.Sub, sess.Email, string(gj)}
 	if s.table.AuthMethod {
-		_, err = s.db.ExecContext(ctx,
-			`INSERT INTO `+s.table.Name+` (id_hash, iss, sub, email, groups_json, auth_method, created_at, last_seen_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			sess.IDHash, sess.Iss, sess.Sub, sess.Email, string(gj), sess.AuthMethod,
-			now.Unix(), now.Unix(), sess.ExpiresAt.Unix())
-	} else {
-		_, err = s.db.ExecContext(ctx,
-			`INSERT INTO `+s.table.Name+` (id_hash, iss, sub, email, groups_json, created_at, last_seen_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			sess.IDHash, sess.Iss, sess.Sub, sess.Email, string(gj),
-			now.Unix(), now.Unix(), sess.ExpiresAt.Unix())
+		cols, args = append(cols, "auth_method"), append(args, sess.AuthMethod)
 	}
+	if s.table.EmailVerifiedMigrationID != "" {
+		ev := 0
+		if sess.EmailVerified {
+			ev = 1
+		}
+		cols, args = append(cols, "email_verified"), append(args, ev)
+	}
+	cols = append(cols, "created_at", "last_seen_at", "expires_at")
+	args = append(args, now.Unix(), now.Unix(), sess.ExpiresAt.Unix())
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO `+s.table.Name+` (`+strings.Join(cols, ", ")+`) VALUES (?`+strings.Repeat(", ?", len(cols)-1)+`)`,
+		args...)
 	if err != nil {
 		return "", Session{}, fmt.Errorf("sessions: insert: %w", err)
 	}
@@ -271,11 +297,13 @@ func scanSession(r rowScanner) (Session, error) {
 	var (
 		sess                      Session
 		gj                        string
+		ev                        int
 		created, lastSeen, expiry int64
 	)
-	if err := r.Scan(&sess.IDHash, &sess.Iss, &sess.Sub, &sess.Email, &gj, &sess.AuthMethod, &created, &lastSeen, &expiry); err != nil {
+	if err := r.Scan(&sess.IDHash, &sess.Iss, &sess.Sub, &sess.Email, &gj, &sess.AuthMethod, &ev, &created, &lastSeen, &expiry); err != nil {
 		return Session{}, err
 	}
+	sess.EmailVerified = ev != 0
 	if err := json.Unmarshal([]byte(gj), &sess.Groups); err != nil {
 		return Session{}, fmt.Errorf("sessions: decode groups: %w", err)
 	}

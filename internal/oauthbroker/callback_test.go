@@ -18,6 +18,7 @@ import (
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/oauthbroker"
 	"github.com/ethosagent/warden/internal/oauthbroker/adapters/exchange"
+	"github.com/ethosagent/warden/internal/oauthbroker/adapters/httpclient"
 	"github.com/ethosagent/warden/internal/oauthbroker/oauthbrokertest"
 	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/test/fakes"
@@ -87,20 +88,32 @@ type cbEnv struct {
 
 const cbSub = "alice"
 
-func newCBEnv(t *testing.T) *cbEnv {
+func newCBEnv(t *testing.T) *cbEnv { return newCBEnvWith(t, nil) }
+
+// newCBEnvWith is newCBEnv with tweak applied to the google (index 0) and
+// github (index 1) provider configs before the registry is built.
+func newCBEnvWith(t *testing.T, tweak func(cfgs []config.OAuthProviderConfig)) *cbEnv {
 	t.Helper()
 	prov := fakes.NewOAuthProvider(t)
 	logs := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	reg, err := oauthbroker.NewRegistry([]config.OAuthProviderConfig{
+	hc, err := httpclient.New([]string{"127.0.0.0/8"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgs := []config.OAuthProviderConfig{
 		{ID: "google", Type: config.OAuthProviderGoogle, ClientID: fakes.OAuthDefaultClientID, ClientSecretEnv: "CB_SECRET",
-			AuthURL: prov.AuthURL(), TokenURL: prov.TokenURL(),
+			AuthURL: prov.AuthURL(), TokenURL: prov.TokenURL(), RevokeURL: prov.RevokeURL(), UserinfoURL: prov.UserinfoURL(),
 			AllowedScopes: []string{"calendar.readonly", "drive.readonly", "email"}, DefaultScopes: []string{"drive.readonly"}},
 		{ID: "github", Type: config.OAuthProviderGitHub, ClientID: fakes.OAuthDefaultClientID, ClientSecretEnv: "CB_SECRET",
-			AuthURL: prov.AuthURL(), TokenURL: prov.TokenURL(),
+			AuthURL: prov.AuthURL(), TokenURL: prov.TokenURL(), RevokeURL: prov.GitHubRevokeURL(), UserinfoURL: prov.UserinfoURL(),
 			AllowedScopes: []string{"read:user", "repo"}, DefaultScopes: []string{"read:user"}},
-	}, oauthbroker.Options{
-		LookupEnv: func(string) (string, bool) { return fakes.OAuthDefaultSecret, true }, Logger: logger,
+	}
+	if tweak != nil {
+		tweak(cfgs)
+	}
+	reg, err := oauthbroker.NewRegistry(cfgs, oauthbroker.Options{
+		LookupEnv: func(string) (string, bool) { return fakes.OAuthDefaultSecret, true }, Logger: logger, HTTPClient: hc,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -234,11 +247,11 @@ func TestConnectCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rec.AccessToken != e.prov.AccessToken(1) || rec.RefreshToken != e.prov.RefreshToken(1) || rec.GrantID != g.GrantID ||
-		g.State != oauthbroker.GrantActive || rec.ClientID != fakes.OAuthDefaultClientID || rec.Scope != "drive.readonly" ||
+		g.State != oauthbroker.GrantActive || rec.ClientID != fakes.OAuthDefaultClientID || rec.Scope != "drive.readonly email openid" ||
 		rec.TokenType != "Bearer" || rec.ObtainedAt != oauthbrokertest.Start.Unix() || rec.Expiry <= rec.ObtainedAt-1 {
 		t.Fatalf("record %v, grant %+v", rec, g)
 	}
-	if !slices.Equal(g.Scopes, []string{"drive.readonly"}) {
+	if !slices.Equal(g.Scopes, []string{"drive.readonly", "email", "openid"}) {
 		t.Fatalf("grant scopes = %v", g.Scopes)
 	}
 	if got := oauthbrokertest.Received(t, ch); got != oauthbroker.StatusGranted {

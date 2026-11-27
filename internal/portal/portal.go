@@ -84,10 +84,13 @@ func Scopes(idpLink bool) []string {
 // Email is for display only. SessionHash is the session id's hash, never the
 // raw id.
 type Principal struct {
-	Iss, Sub    string
-	Email       string
-	Groups      []string
-	SessionHash string
+	Iss, Sub string
+	Email    string
+	// EmailVerified is the IdP's email_verified claim at sign-in. Email alone is
+	// display data; anything that compares it needs this too.
+	EmailVerified bool
+	Groups        []string
+	SessionHash   string
 }
 
 type principalKey struct{}

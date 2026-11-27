@@ -147,3 +147,32 @@ func TestSessionBreakglassIdleExempt(t *testing.T) {
 		t.Fatal("a break-glass session is not live past the idle limit")
 	}
 }
+
+// TestSessionEmailVerified: a table with the email_verified migration records
+// the IdP's claim; one without it, and rows from before the migration, read
+// false (nothing that needs a verified email trusts them).
+func TestSessionEmailVerified(t *testing.T) {
+	ctx := context.Background()
+	verified := webauth.SessionTable{Name: "portal_sessions", MigrationID: "portal_sessions/0001", EmailVerifiedMigrationID: "portal_sessions/0002"}
+	db := openDB(t, verified.Migrations())
+	st := webauth.NewSessionStore(db.SQL(), verified, time.Hour, 8*time.Hour, nil)
+	for want, in := range map[bool]webauth.SessionInput{
+		true:  {Iss: "i", Sub: "a", Email: "a@example.com", EmailVerified: true},
+		false: {Iss: "i", Sub: "b", Email: "b@example.com"},
+	} {
+		raw, _, err := st.Create(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, live, err := st.Lookup(ctx, raw)
+		if err != nil || !live || got.EmailVerified != want {
+			t.Fatalf("lookup = %+v %v %v, want EmailVerified=%v", got, live, err, want)
+		}
+	}
+	// A table without the column ignores the input.
+	plain := openDB(t, portalTable.Migrations())
+	ps := webauth.NewSessionStore(plain.SQL(), portalTable, time.Hour, 8*time.Hour, nil)
+	if _, sess, err := ps.Create(ctx, webauth.SessionInput{Iss: "i", Sub: "a", Email: "a@example.com", EmailVerified: true}); err != nil || sess.EmailVerified {
+		t.Fatalf("plain table session = %+v %v, want EmailVerified=false", sess, err)
+	}
+}

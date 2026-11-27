@@ -98,6 +98,9 @@ func (p *Poster) Do(ctx context.Context, r oauthbroker.Request) (int, []byte, er
 	if r.BasicUser != "" {
 		req.SetBasicAuth(r.BasicUser, r.BasicPass)
 	}
+	if r.Bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+r.Bearer)
+	}
 	resp, err := p.rt.RoundTrip(req)
 	if err != nil {
 		var ssrf *proxy.SSRFError

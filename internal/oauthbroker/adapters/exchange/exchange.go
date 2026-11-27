@@ -105,7 +105,7 @@ func (e *Exchanger) Exchange(ctx context.Context, r oauthbroker.ExchangeRequest)
 		return oauthbroker.TokenResponse{}, rejected("invalid_response")
 	}
 	out := oauthbroker.TokenResponse{
-		AccessToken: f.accessToken, RefreshToken: f.refreshToken, TokenType: f.tokenType, Scope: f.scope,
+		AccessToken: f.accessToken, RefreshToken: f.refreshToken, IDToken: f.idToken, TokenType: f.tokenType, Scope: f.scope,
 	}
 	if out.TokenType == "" {
 		out.TokenType = "Bearer" // RFC 6749 requires it; x/oauth2 also defaults
@@ -122,8 +122,8 @@ func (e *Exchanger) Exchange(ctx context.Context, r oauthbroker.ExchangeRequest)
 
 // fields are the members of a token endpoint response the broker reads.
 type fields struct {
-	accessToken, refreshToken, tokenType, scope, errCode string
-	expiresIn, refreshExpiresIn                          int64
+	accessToken, refreshToken, idToken, tokenType, scope, errCode string
+	expiresIn, refreshExpiresIn                                   int64
 }
 
 // parseBody reads a JSON body (the normal case) or a form-encoded one (GitHub
@@ -136,7 +136,7 @@ func parseBody(contentType string, body []byte) (fields, bool) {
 			return fields{}, false
 		}
 		f := fields{
-			accessToken: str(m["access_token"]), refreshToken: str(m["refresh_token"]),
+			accessToken: str(m["access_token"]), refreshToken: str(m["refresh_token"]), idToken: str(m["id_token"]),
 			tokenType: str(m["token_type"]), scope: str(m["scope"]),
 			expiresIn: num(m["expires_in"]), refreshExpiresIn: num(m["refresh_token_expires_in"]),
 		}
@@ -155,7 +155,7 @@ func parseBody(contentType string, body []byte) (fields, bool) {
 	}
 	n := func(k string) int64 { i, _ := strconv.ParseInt(v.Get(k), 10, 64); return i }
 	return fields{
-		accessToken: v.Get("access_token"), refreshToken: v.Get("refresh_token"), tokenType: v.Get("token_type"),
+		accessToken: v.Get("access_token"), refreshToken: v.Get("refresh_token"), idToken: v.Get("id_token"), tokenType: v.Get("token_type"),
 		scope: v.Get("scope"), errCode: v.Get("error"), expiresIn: n("expires_in"), refreshExpiresIn: n("refresh_token_expires_in"),
 	}, true
 }

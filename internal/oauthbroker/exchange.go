@@ -43,8 +43,11 @@ func (r ExchangeRequest) LogValue() slog.Value {
 // times; zero means the provider sent none. It redacts itself like
 // TokenRecord.
 type TokenResponse struct {
-	AccessToken   string
-	RefreshToken  string
+	AccessToken  string
+	RefreshToken string
+	// IDToken is the OIDC id_token a Google token response carries; Identify
+	// reads the account from it and it is never stored.
+	IDToken       string
 	TokenType     string
 	Scope         string
 	Expiry        time.Time
@@ -52,8 +55,8 @@ type TokenResponse struct {
 }
 
 func (r TokenResponse) String() string {
-	return fmt.Sprintf("TokenResponse{token_type=%s scope=%q expiry=%s access_token=%s has_refresh_token=%t}",
-		r.TokenType, r.Scope, r.Expiry.UTC().Format(time.RFC3339), redacted, r.RefreshToken != "")
+	return fmt.Sprintf("TokenResponse{token_type=%s scope=%q expiry=%s access_token=%s has_refresh_token=%t has_id_token=%t}",
+		r.TokenType, r.Scope, r.Expiry.UTC().Format(time.RFC3339), redacted, r.RefreshToken != "", r.IDToken != "")
 }
 
 // GoString keeps %#v from printing the tokens.
