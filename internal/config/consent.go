@@ -14,8 +14,8 @@ import (
 // Consent defaults and bounds. The session defaults are SHORTER than the
 // console's (1h idle / 12h absolute) on purpose: a portal session can approve
 // third-party access for agents, so a stolen or forgotten browser session must
-// stop being useful sooner. refreshLifetime matches the Dex absoluteLifetime of
-// the reference stack (deploy/compose/dex/config.yaml, 720h).
+// stop being useful sooner. refreshLifetime matches the absolute refresh lifetime of
+// the reference IdP recipe (720h).
 const (
 	DefaultConsentClientID        = "warden-portal"
 	DefaultConsentIdle            = 30 * time.Minute
@@ -78,8 +78,8 @@ type ConsentSession struct {
 // keeps the user's refresh token (default true).
 type ConsentIdPLink struct {
 	Enabled bool
-	// RefreshLifetime is how long the IdP keeps a refresh token alive (Dex
-	// absoluteLifetime); it dates relink_due_at.
+	// RefreshLifetime is how long the IdP keeps a refresh token alive (the IdP
+	// absolute refresh lifetime); it dates relink_due_at.
 	RefreshLifetime time.Duration
 }
 
