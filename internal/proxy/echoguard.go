@@ -815,12 +815,16 @@ func (p *Proxy) echoDeny(s *requestScope, secret int, reason string) {
 		}
 		refs = append(refs, secrets.Ref(sec.value).String())
 	}
+	// The upstream answered: a cost-capped request is charged what was read.
+	usd, provider := p.cutCost(s)
 	// reason is one of the local aliases of the declared echo reasons (above).
 	p.emitDeny(s, denyreason.Reason(reason), denyExtra{
 		ResponseStatus: s.resp.StatusCode,
 		SecretRef:      strings.Join(refs, ","),
 		LatencyMs:      s.latencyMs(),
 		SwappedRefs:    names,
+		CostUSD:        usd,
+		Provider:       provider,
 	})
 }
 

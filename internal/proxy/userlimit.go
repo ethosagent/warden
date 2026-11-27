@@ -175,16 +175,29 @@ func (p *Proxy) chargeUserCost(s *requestScope, usd float64) {
 	p.cfg.UserCost.Add(s.costKey, usd)
 }
 
-// chargeUserCostCut charges a request whose response a deny cut after bytes
-// reached the agent (echo guard stream cut, MCP SSE gateway deny, gRPC frame
-// refused after the headers): the upstream did the work, so the user pays
-// for what was relayed. Called only once the relay has finished.
-func (p *Proxy) chargeUserCostCut(s *requestScope) {
-	if !s.costCapped || s.costCharged {
-		return
+// cutCost charges a request whose response a deny refused or cut after the
+// upstream answered (echo guard, MCP SSE gateway deny, response scanner
+// block): the upstream did the work, so the user pays for what was read. It
+// returns the charged estimate for the deny event, so the local reseed
+// (CostByUserSince) and the fleet rollup count it too; zero when no cost cap
+// applies or the request was already charged. Called on the relay goroutine
+// once reading has stopped.
+func (p *Proxy) cutCost(s *requestScope) (usd float64, provider string) {
+	if !s.costCapped || s.costCharged || s.resp == nil {
+		return 0, ""
 	}
-	usd, _ := p.estimateCost(s)
+	usd, provider = p.estimateCost(s)
 	p.chargeUserCost(s, usd)
+	return usd, provider
+}
+
+// chargeUserCostCut charges a cut request whose deny event was recorded
+// elsewhere: a gRPC frame refused after the headers, whose deny the body guard
+// records on the transport goroutine while the response may still be
+// relaying, so its event carries no cost. A no-op when the deny already
+// charged (cutCost).
+func (p *Proxy) chargeUserCostCut(s *requestScope) {
+	_, _ = p.cutCost(s)
 }
 
 // userLimitStage is the pre-check: it runs after constraintGate and before

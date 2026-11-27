@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cost"
 	"github.com/ethosagent/warden/internal/denyreason"
@@ -427,6 +428,38 @@ func TestUserCostCap_EchoCutCharged(t *testing.T) {
 		t.Errorf("echo deny limit_rule = %q", d[0].LimitRule)
 	}
 	e.waitSpent("alice", costPerRequest)
+	// The deny event carries the charge, so a reseed and the rollup count it.
+	if math.Abs(d[0].CostUSD-costPerRequest) > 1e-12 || d[0].Provider != "openai" {
+		t.Errorf("echo deny cost = %v by %q, want %v by openai", d[0].CostUSD, d[0].Provider, costPerRequest)
+	}
+}
+
+// A buffered response the response scanner blocks (enforce) was still
+// answered by the upstream: the capped user is charged its exact estimate, and
+// the deny event carries it.
+func TestUserCostCap_ScannerBlockCharged(t *testing.T) {
+	e := newCostEnv(t, config.Policy{UserLimits: []config.UserLimit{costEngRule(5)}}, func(c *Config) {
+		c.ResponseScan = NewResponseScanner("enforce", 1<<20, false, false)
+	})
+	e.handler = func(w http.ResponseWriter, _ *http.Request) {
+		body := leakBody + strings.Repeat(" ", costBodyBytes-len(leakBody))
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = io.WriteString(w, body)
+	}
+	resp, _ := e.h1To(costHost, "").get(aliceHdr)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (scanner block)", resp.StatusCode)
+	}
+	e.waitSpent("alice", costPerRequest)
+	var deny []analytics.Event
+	waitFor(t, "the scanner deny", func() bool {
+		deny = limitDenies(e.store)
+		return len(deny) == 1
+	})
+	if math.Abs(deny[0].CostUSD-costPerRequest) > 1e-12 || deny[0].Provider != "openai" || deny[0].LimitRule != "eng-llm" {
+		t.Errorf("scanner deny = %+v, want cost %v by openai under eng-llm", deny[0], costPerRequest)
+	}
 }
 
 // With no ledger configured a dailyCostUSD rule is never checked.

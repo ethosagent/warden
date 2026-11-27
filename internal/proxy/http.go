@@ -1399,7 +1399,7 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 	}
 	if blocked {
 		// Events before the blocked one already reached the agent.
-		p.chargeUserCostCut(s)
+		usd, provider := p.cutCost(s)
 		// A gateway (or held-event) deny names itself; an empty verdict reason
 		// falls back to the declared mcp_gateway_deny (#409).
 		p.emitDeny(s, gatewayDenyReason(preferEchoReason(s.mcpReason, s.echoMonitorReason)), denyExtra{
@@ -1409,6 +1409,8 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			LatencyMs:      s.latencyMs(),
 			SwappedRefs:    s.swappedNames,
 			Evidence:       s.evidence,
+			CostUSD:        usd,
+			Provider:       provider,
 		})
 	} else {
 		costUSD, provider := p.estimateCost(s)
@@ -1527,12 +1529,16 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 	s.addEvidence(dets)
 	if block {
 		// enforce + high leak/injection: replace the body with an error, record a
-		// deny, and return (terminal, mirrors the MCP enforce-deny branch).
+		// deny, and return (terminal, mirrors the MCP enforce-deny branch). The
+		// upstream answered in full: a cost-capped request is charged for it.
+		usd, provider := p.cutCost(s)
 		p.emitDeny(s, reason, denyExtra{
 			ResponseStatus: s.resp.StatusCode,
 			LatencyMs:      s.latencyMs(),
 			SwappedRefs:    s.swappedNames,
 			Evidence:       s.evidence,
+			CostUSD:        usd,
+			Provider:       provider,
 		})
 		s.out.errorResponse(502, "Bad Gateway")
 		return true
