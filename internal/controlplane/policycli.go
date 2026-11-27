@@ -48,11 +48,7 @@ func ValidatePolicyDocFile(path string) (PolicyDoc, error) {
 	if err != nil {
 		return PolicyDoc{}, fmt.Errorf("policy file %s: %w", path, err)
 	}
-	doc := RedactCredentials(policyWire{
-		Allowlist: p.Allowlist,
-		Denylist:  p.Denylist,
-		Settings:  config.SettingsWireFromPolicy(p),
-	})
+	doc := RedactCredentials(policyWireOfPolicy(p))
 	if err := validateDocAgainst(path, "", doc); err != nil {
 		return PolicyDoc{}, fmt.Errorf("policy file %s: %w", path, err)
 	}

@@ -270,6 +270,9 @@ func (st *sqlitePolicyStore) Create(ctx context.Context, doc policyWire, author 
 	// versioned: a rollback must not restore (or drop) them.
 	red.BlockedUsers = nil
 	red.RegisteredAgents = nil
+	// The cost blocks are computed state (W-P3-PUL-08): a rollback must not
+	// restore, and a version must not hold, a stale list.
+	red.CostBlockedUsers = nil
 	docJSON, err := json.Marshal(red)
 	if err != nil {
 		return 0, false, fmt.Errorf("policy store: encode doc: %w", err)
@@ -1088,7 +1091,7 @@ func servedBlocksHash(path string) (string, error) {
 	if err != nil {
 		return sha256Hex(string(raw)), nil
 	}
-	w := policyWire{Allowlist: p.Allowlist, Denylist: p.Denylist, Settings: config.SettingsWireFromPolicy(p)}
+	w := policyWireOfPolicy(p)
 	if w.Settings != nil && w.Settings.Secrets != nil {
 		settings := *w.Settings
 		secrets := *settings.Secrets

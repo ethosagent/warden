@@ -226,6 +226,14 @@ type policyWire struct {
 	// BlockedUsers is the user block list (sub and email only; reason and actor
 	// stay on the CP). Omitempty keeps the wire and ETag unchanged when empty.
 	BlockedUsers []config.BlockedUser `json:"blockedUsers,omitempty"`
+	// UserLimits, DefaultUserLimit and AnonymousLimit are the per-user limit
+	// rules (W-P3-PUL-01); CostBlockedUsers is the computed fleet cost block
+	// list, set on the served wire only (never stored in a policy version).
+	// All omitempty, so a policy without them keeps its body and ETag.
+	UserLimits       []config.UserLimit       `json:"userLimits,omitempty"`
+	DefaultUserLimit *config.UserLimit        `json:"defaultUserLimit,omitempty"`
+	AnonymousLimit   *config.UserLimit        `json:"anonymousLimit,omitempty"`
+	CostBlockedUsers []config.CostBlockedUser `json:"costBlockedUsers,omitempty"`
 	// RegisteredAgents is the agent registry as workers need it: id, status and
 	// key thumbprints only (W-P2-AREG-04). Omitempty keeps the wire and ETag
 	// byte-identical when the registry is empty or absent.
@@ -725,7 +733,7 @@ func (s *Server) Handler() http.Handler {
 	// secret-free policy view; the dashboard's secrets panel is naturally empty.
 	emptySecrets, _ := secrets.NewCache(secrets.NewEnvFetcher(map[string]string{}), 0, nil)
 	wire, _, _, _ := s.policy.snapshot()
-	dashPolicy := config.Policy{Allowlist: wire.Allowlist, Denylist: wire.Denylist}
+	dashPolicy := policyOfWire(wire)
 	dash := dashboard.NewServer(s.central, dashPolicy, emptySecrets)
 	// Retain the dashboard so a settings / llmProviders edit can re-inject the
 	// Explore NL→SQL generator live (see injectExploreLLM). Set before serving.
@@ -734,7 +742,7 @@ func (s *Server) Handler() http.Handler {
 	// immediately rather than a startup snapshot.
 	dash.SetLivePolicy(func() config.Policy {
 		w, _, _, _ := s.policy.snapshot()
-		return config.Policy{Allowlist: w.Allowlist, Denylist: w.Denylist}
+		return policyOfWire(w)
 	})
 	// Editing is a control-plane-only capability, sourced from the ConfigEditor
 	// seam: persist edits to the served config file so workers pull them on their
@@ -1060,6 +1068,11 @@ type policyYAML struct {
 	Denylist  []config.DenylistEntry  `yaml:"denylist"`
 	// BlockedUsers keeps policy.blockedUsers in the file across an edit.
 	BlockedUsers []config.BlockedUser `yaml:"blockedUsers,omitempty"`
+	// UserLimits, DefaultUserLimit and AnonymousLimit keep the per-user limit
+	// keys in the file across an edit (W-P3-PUL-01).
+	UserLimits       []config.UserLimit `yaml:"userLimits,omitempty"`
+	DefaultUserLimit *config.UserLimit  `yaml:"defaultUserLimit,omitempty"`
+	AnonymousLimit   *config.UserLimit  `yaml:"anonymousLimit,omitempty"`
 }
 
 // writePolicy validates and atomically persists an edited allow/deny policy to
@@ -1094,7 +1107,7 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 		_ = yaml.Unmarshal(cur, &root)
 	}
 
-	if err := renderPolicyBlock(root, p.Allowlist, p.Denylist, p.BlockedUsers); err != nil {
+	if err := renderPolicyBlock(root, policyYAMLOfPolicy(p)); err != nil {
 		return err
 	}
 
@@ -1112,9 +1125,9 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 // renderPolicyBlock replaces root's policy block with allow/deny and makes sure
 // a logging block exists (kept from the current file when present, otherwise
 // info/json). It is the policy half of WritePolicy and renderDocToRoot.
-func renderPolicyBlock(root map[string]yaml.Node, allow []config.AllowlistEntry, deny []config.DenylistEntry, blocked []config.BlockedUser) error {
+func renderPolicyBlock(root map[string]yaml.Node, py policyYAML) error {
 	var policyNode yaml.Node
-	if err := policyNode.Encode(policyYAML{Allowlist: allow, Denylist: deny, BlockedUsers: blocked}); err != nil {
+	if err := policyNode.Encode(py); err != nil {
 		return fmt.Errorf("controlplane: encode policy block: %w", err)
 	}
 	root["policy"] = policyNode
@@ -1152,7 +1165,7 @@ func readRoot(path string) map[string]yaml.Node {
 // live value (the preserve-on-empty rule). Blocks no dashboard writer owns
 // (dlp, advisory) are left as the served file has them.
 func renderDocToRoot(root map[string]yaml.Node, doc policyWire) error {
-	if err := renderPolicyBlock(root, doc.Allowlist, doc.Denylist, nil); err != nil {
+	if err := renderPolicyBlock(root, policyYAMLOfWire(doc)); err != nil {
 		return err
 	}
 	var settings config.SettingsWire
@@ -1981,4 +1994,41 @@ func observabilitySettingsNode(s *config.ObservabilitySettings) (*yaml.Node, err
 		return nil, err
 	}
 	return &node, nil
+}
+
+// policyYAMLOfPolicy is the policy block a dashboard edit writes: allow/deny,
+// the block list and the per-user limit rules of p.
+func policyYAMLOfPolicy(p config.Policy) policyYAML {
+	return policyYAML{
+		Allowlist: p.Allowlist, Denylist: p.Denylist, BlockedUsers: p.BlockedUsers,
+		UserLimits: p.UserLimits, DefaultUserLimit: p.DefaultUserLimit, AnonymousLimit: p.AnonymousLimit,
+	}
+}
+
+// policyYAMLOfWire is the policy block of a stored doc. The block list is a
+// CP-store overlay and the cost blocks are computed, so neither is written.
+func policyYAMLOfWire(w policyWire) policyYAML {
+	return policyYAML{
+		Allowlist: w.Allowlist, Denylist: w.Denylist,
+		UserLimits: w.UserLimits, DefaultUserLimit: w.DefaultUserLimit, AnonymousLimit: w.AnonymousLimit,
+	}
+}
+
+// policyWireOfPolicy projects a loaded policy to the served wire: allow/deny,
+// the per-user limit rules and the secret-free settings. The block list, the
+// agent registry and the cost blocks are overlays, never taken from a file.
+func policyWireOfPolicy(p config.Policy) policyWire {
+	return policyWire{
+		Allowlist: p.Allowlist, Denylist: p.Denylist,
+		UserLimits: p.UserLimits, DefaultUserLimit: p.DefaultUserLimit, AnonymousLimit: p.AnonymousLimit,
+		Settings: config.SettingsWireFromPolicy(p),
+	}
+}
+
+// policyOfWire is the secret-free policy view the dashboard shows and edits.
+func policyOfWire(w policyWire) config.Policy {
+	return config.Policy{
+		Allowlist: w.Allowlist, Denylist: w.Denylist,
+		UserLimits: w.UserLimits, DefaultUserLimit: w.DefaultUserLimit, AnonymousLimit: w.AnonymousLimit,
+	}
 }

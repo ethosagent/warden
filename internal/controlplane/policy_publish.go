@@ -413,7 +413,7 @@ func (s *Server) candidateWire(head policyWire, render func(root map[string]yaml
 		return policyWire{}, err
 	}
 	_ = os.Remove(tmpName)
-	return policyWire{Allowlist: p.Allowlist, Denylist: p.Denylist, Settings: config.SettingsWireFromPolicy(p)}, nil
+	return policyWireOfPolicy(p), nil
 }
 
 // publishPolicy is WritePolicy in versioned mode: allow/deny from the edit,
@@ -421,12 +421,13 @@ func (s *Server) candidateWire(head policyWire, render func(root map[string]yaml
 func (s *Server) publishPolicy(ctx context.Context, p config.Policy, meta dashboard.WriteMeta) error {
 	return s.writeEdit(ctx, func(w *policyWire) error {
 		cand, err := s.candidateWire(*w, func(root map[string]yaml.Node) error {
-			return renderPolicyBlock(root, p.Allowlist, p.Denylist, p.BlockedUsers)
+			return renderPolicyBlock(root, policyYAMLOfPolicy(p))
 		})
 		if err != nil {
 			return err
 		}
 		w.Allowlist, w.Denylist = cand.Allowlist, cand.Denylist
+		w.UserLimits, w.DefaultUserLimit, w.AnonymousLimit = cand.UserLimits, cand.DefaultUserLimit, cand.AnonymousLimit
 		return nil
 	}, meta, SourcePolicy)
 }
