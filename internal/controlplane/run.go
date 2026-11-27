@@ -523,6 +523,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		if err != nil {
 			return fail(err)
 		}
+		if err := checkUserStorePersistent(consentCfg, userStore); err != nil {
+			return fail(err)
+		}
 	}
 
 	// clk is the CP's resolved time port (nil = clock.Real(), the production

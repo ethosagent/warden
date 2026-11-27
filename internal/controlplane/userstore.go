@@ -90,6 +90,25 @@ func NewUserStore(cfg *config.ConsentStore, opts UserStoreOptions) (secrets.Secr
 	}
 }
 
+// checkUserStorePersistent refuses to start with consent and its IdP link
+// enabled unless the user credential store keeps values: the CP would sign
+// users in and then lose the refresh token offboarding relies on. No store
+// (consent.store absent) and the echo store are both refused; the error names
+// both keys. A nil consent block (consent off) passes.
+func checkUserStorePersistent(consent *config.ConsentConfig, st secrets.SecretStore) error {
+	if consent == nil || !consent.Enabled || !consent.IdPLink.Enabled {
+		return nil
+	}
+	if st != nil && secrets.IsPersistent(st) {
+		return nil
+	}
+	backend := "(none: consent.store is not configured)"
+	if consent.Store != nil {
+		backend = consent.Store.Backend
+	}
+	return fmt.Errorf("control-plane: consent.idpLink.enabled needs a persistent consent.store, but consent.store.backend is %s; configure consent.store with backend aws, or set consent.idpLink.enabled: false", backend)
+}
+
 // storeNamespace is one backend namespace: the backend, the identity of the
 // backend instance a single credential can span, and the name prefix in it.
 type storeNamespace struct {
@@ -144,24 +163,35 @@ func vaultIdentity(addr, namespace, mount string) string {
 // gives workers a credential for: today only an aws secretStore has one (env
 // is a local env-var map, echo keeps nothing). When the distributed store
 // gains another shared backend it must be added here with its identity.
+//
+// It normalizes the way parseSecretStore and EncodeSecretStoreNode do (backend
+// trimmed and lowercased, namePrefix trimmed and default-filled), so a value
+// that only normalizes into an overlap is refused too.
 func distributedNamespaces(ss config.SecretStoreConfig) []storeNamespace {
-	if ss.ResolvedBackend() != config.SecretBackendAWS {
+	if strings.ToLower(strings.TrimSpace(ss.ResolvedBackend())) != config.SecretBackendAWS {
 		return nil
 	}
 	prefix := secrets.DefaultAWSNamePrefix
-	if ss.AWS != nil && ss.AWS.NamePrefix != "" {
-		prefix = ss.AWS.NamePrefix
+	if ss.AWS != nil {
+		if p := strings.TrimSpace(ss.AWS.NamePrefix); p != "" {
+			prefix = p
+		}
 	}
 	return []storeNamespace{{backend: config.SecretBackendAWS, identity: awsIdentity, prefix: prefix, key: "secretStore.aws.namePrefix"}}
 }
 
 // overlaps reports whether a and b are the same backend instance and one
-// prefix nests the other (an empty prefix nests everything).
+// prefix nests the other (an empty prefix nests everything). Prefixes are
+// compared trimmed and case-insensitively: a backend or an IAM pattern that
+// folds case must not turn two "different" prefixes into one namespace, so
+// this fails closed.
 func (a storeNamespace) overlaps(b storeNamespace) bool {
 	if a.backend != b.backend || a.identity != b.identity {
 		return false
 	}
-	return strings.HasPrefix(a.prefix, b.prefix) || strings.HasPrefix(b.prefix, a.prefix)
+	ap := strings.ToLower(strings.TrimSpace(a.prefix))
+	bp := strings.ToLower(strings.TrimSpace(b.prefix))
+	return strings.HasPrefix(ap, bp) || strings.HasPrefix(bp, ap)
 }
 
 // checkUserStoreOverlap refuses a distributed secretStore that shares a

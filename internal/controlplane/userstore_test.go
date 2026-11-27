@@ -14,6 +14,7 @@ import (
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/dashboard"
 	"github.com/ethosagent/warden/internal/secrets"
+	"github.com/ethosagent/warden/test/fakes"
 )
 
 // The distributed secretStore's default namespace and two prefixes nested in
@@ -276,4 +277,112 @@ func TestUserStoreOverlapStartup(t *testing.T) {
 			t.Fatalf("head = %d after a refused import, want 0", h)
 		}
 	})
+}
+
+// TestUserStoreOverlapNormalized: a secretStore prefix that only normalizes
+// into the consent.store namespace (surrounding whitespace, case) is refused
+// in file and versioned mode, and nothing is written.
+func TestUserStoreOverlapNormalized(t *testing.T) {
+	prefixes := []string{" " + config.DefaultConsentStoreNamePrefix, "\t" + config.DefaultConsentStoreNamePrefix + "idp/", strings.ToUpper(config.DefaultConsentStoreNamePrefix)}
+	for _, pfx := range prefixes {
+		sec := &config.SecretsSettings{Backend: config.SecretBackendAWS, Region: "us-east-1", NamePrefix: pfx}
+		if err := checkUserStoreOverlap(userStoreConsent().Store, config.SecretStoreConfigFromSettings(sec)); err == nil {
+			t.Errorf("checkUserStoreOverlap(%q) = nil, want an overlap", pfx)
+		}
+		if err := checkUserStoreOverlap(userStoreConsent().Store, config.SecretStoreConfig{Backend: " AWS ", AWS: &config.SecretStoreAWS{NamePrefix: pfx}}); err == nil {
+			t.Errorf("unnormalized backend with %q = nil, want an overlap", pfx)
+		}
+	}
+
+	t.Run("file mode", func(t *testing.T) {
+		cfg := detectionEditorConfig(t)
+		cfg.Consent = userStoreConsent()
+		srv := New(cfg)
+		before := readFile(t, cfg.PolicyPath)
+		for _, pfx := range prefixes {
+			err := srv.writeSettings(config.SettingsWire{Identity: matchingIdentity(), Secrets: &config.SecretsSettings{Backend: config.SecretBackendAWS, Region: "us-east-1", NamePrefix: pfx}})
+			var uo *dashboard.UserStoreOverlapError
+			if !errors.As(err, &uo) {
+				t.Fatalf("prefix %q: err = %v, want *dashboard.UserStoreOverlapError", pfx, err)
+			}
+			if after := readFile(t, cfg.PolicyPath); after != before {
+				t.Fatalf("prefix %q: served file changed by a refused write", pfx)
+			}
+		}
+	})
+	t.Run("versioned HTTP", func(t *testing.T) {
+		path := consentPolicyFile(t, "")
+		srv := New(Config{PolicyPath: path, Token: dashTestToken, State: openPolicyState(t), PolicyStore: PolicyStoreVersioned, Consent: userStoreConsent()})
+		if err := srv.importInitialVersion(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		before := readFile(t, path)
+		e := &contractEnv{srv: srv, h: srv.Handler()}
+		for _, pfx := range prefixes {
+			sec, err := json.Marshal(map[string]string{"backend": "aws", "region": "us-east-1", "namePrefix": pfx})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := `{"identity":{"defaultMode":"attribute","issuer":"` + consentIssuer + `","audience":"warden"},"secrets":` + string(sec) + `}`
+			rec := e.send("", http.MethodPut, "/dashboard/api/settings", body, ifMatch(1))
+			m := map[string]string{}
+			_ = json.Unmarshal(rec.Body.Bytes(), &m)
+			if rec.Code != http.StatusBadRequest || m["error"] != "user_store_overlap" {
+				t.Fatalf("prefix %q: settings PUT = %d %s, want 400 user_store_overlap", pfx, rec.Code, rec.Body.String())
+			}
+		}
+		if h := mustHead(t, srv.versions); h != 1 {
+			t.Fatalf("head = %d after refused writes, want 1", h)
+		}
+		if after := readFile(t, path); after != before {
+			t.Fatal("served file changed by a refused write")
+		}
+	})
+}
+
+// TestUserStorePersistent: with consent and idpLink enabled the CP refuses to
+// start without a persistent consent.store (absent or echo), naming both keys.
+func TestUserStorePersistent(t *testing.T) {
+	on := userStoreConsent()
+	echoCfg := userStoreConsent()
+	echoCfg.Store = &config.ConsentStore{Backend: config.ConsentStoreBackendEcho, NamePrefix: config.DefaultConsentStoreNamePrefix}
+	noStore := userStoreConsent()
+	noStore.Store = nil
+	off := userStoreConsent()
+	off.IdPLink.Enabled = false
+	for name, c := range map[string]struct {
+		consent *config.ConsentConfig
+		store   secrets.SecretStore
+		ok      bool
+	}{
+		"persistent":       {on, fakes.NewMemorySecretStore(), true},
+		"no store":         {noStore, nil, false},
+		"echo":             {echoCfg, secrets.NewEchoStore(), false},
+		"idpLink disabled": {off, nil, true},
+		"consent off":      {nil, nil, true},
+	} {
+		err := checkUserStorePersistent(c.consent, c.store)
+		if c.ok != (err == nil) {
+			t.Errorf("%s: err = %v, want ok=%v", name, err, c.ok)
+		}
+		if err != nil && (!strings.Contains(err.Error(), "consent.idpLink.enabled") || !strings.Contains(err.Error(), "consent.store.backend")) {
+			t.Errorf("%s: err = %v, want it to name both keys", name, err)
+		}
+	}
+
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfg, []byte(basePolicy+identityBlockYAML+consoleBlock+consentBlockYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WARDEN_CONSOLE_SECRET", "console-secret")
+	t.Setenv("WARDEN_PORTAL_DEX_CLIENT_SECRET", "portal-secret")
+	err := bootErr(t, Params{ConfigPath: cfg, StateDir: stateDir})
+	if err == nil || !strings.Contains(err.Error(), "consent.idpLink.enabled") || !strings.Contains(err.Error(), "consent.store.backend") {
+		t.Fatalf("Run err = %v, want the persistent-store refusal", err)
+	}
 }
