@@ -34,6 +34,8 @@ func TestTracks(t *testing.T) {
 	}{
 		{"api.openai.com", "openai", true},
 		{" API.Anthropic.com ", "anthropic", true},
+		{"api.openai.com.", "openai", true},
+		{"API.OPENAI.COM..", "openai", true},
 		{"generativelanguage.googleapis.com", "google", true},
 		{"api.cohere.com", "cohere", true},
 		{"example.com", "", false},

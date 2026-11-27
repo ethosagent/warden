@@ -63,8 +63,16 @@ func (e *Estimator) Tracks(domain string) (provider string, ok bool) {
 	return "", false
 }
 
+// normalizeDomain is policy.NormalizeHost (lowercase, trailing dots dropped)
+// plus a space trim, so every host spelling the policy admits for a provider
+// ("API.OpenAI.com.", the FQDN form) is tracked and priced as that provider
+// (TestEstimatorNormalizesLikePolicy pins the two together).
+func normalizeDomain(domain string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(domain), "."))
+}
+
 func (e *Estimator) match(domain string) *Provider {
-	domain = strings.ToLower(strings.TrimSpace(domain))
+	domain = normalizeDomain(domain)
 	for i := range e.providers {
 		if e.providers[i].DomainPattern == domain {
 			return &e.providers[i]

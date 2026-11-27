@@ -461,3 +461,66 @@ func TestUserLimitResponse_Cost(t *testing.T) {
 		t.Errorf("unmeasurable = %d %q %d", st, body, retry)
 	}
 }
+
+// The estimator tracks every spelling of a provider host that the policy
+// normalizes to it: a cost cap cannot be dodged with a trailing dot or case.
+func TestEstimatorNormalizesLikePolicy(t *testing.T) {
+	est := cost.NewEstimator()
+	for _, h := range []string{"api.openai.com", "api.openai.com.", "API.OPENAI.COM.", "Api.OpenAI.Com..", "api.anthropic.com."} {
+		n := policy.NormalizeHost(h)
+		_, want := est.Tracks(n)
+		if _, got := est.Tracks(h); got != want || !want {
+			t.Errorf("Tracks(%q) = %v, Tracks(NormalizeHost) = %v; want both true", h, got, want)
+		}
+		if est.Estimate(h, 4000, 0) == nil {
+			t.Errorf("Estimate(%q) = nil", h)
+		}
+	}
+}
+
+// A raw tunnel to a provider host spelled with a trailing dot or in upper
+// case is still unmeasurable under a cost cap.
+func TestUserCostCap_RawTunnelHostSpellings(t *testing.T) {
+	for _, host := range []string{"api.openai.com.", "API.OPENAI.COM."} {
+		t.Run(host, func(t *testing.T) {
+			e := newCostEnv(t, config.Policy{UserLimits: []config.UserLimit{costEngRule(5)}}, noCA)
+			conn, err := net.Dial("tcp", e.p.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+			_, _ = io.WriteString(conn, "CONNECT "+host+":443 HTTP/1.1\r\nHost: "+host+":443\r\nProxy-Authorization: "+basicAuth("tok-alice")+"\r\n\r\n")
+			resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusForbidden || string(body) != `{"error":"user_cost_unmeasurable"}` {
+				t.Fatalf("CONNECT %s = %d %q, want 403 user_cost_unmeasurable", host, resp.StatusCode, body)
+			}
+			if n := e.dials.Load(); n != 0 {
+				t.Errorf("dials = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// A terminated tunnel to such a spelling is priced and capped like the plain
+// host.
+func TestUserCostCap_TerminatedHostSpellings(t *testing.T) {
+	for _, host := range []string{"api.openai.com.", "API.OPENAI.COM."} {
+		t.Run(host, func(t *testing.T) {
+			e := newCostEnv(t, config.Policy{UserLimits: []config.UserLimit{costEngRule(0.01)}})
+			c := e.h1To(host, "")
+			for i := 1; i <= 2; i++ {
+				if resp, _ := c.get(aliceHdr); resp.StatusCode != http.StatusOK {
+					t.Fatalf("request %d = %d, want 200", i, resp.StatusCode)
+				}
+				e.waitSpent("alice", float64(i)*costPerRequest)
+			}
+			resp, body := c.get(aliceHdr)
+			assertCostLimited(t, e, resp, body)
+		})
+	}
+}
