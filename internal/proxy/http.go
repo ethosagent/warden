@@ -542,9 +542,11 @@ func (p *Proxy) recordSSRFDeny(s *requestScope, err error) {
 // and never carries a real secret. The path matched is the RAW request target
 // component — req.URL.EscapedPath() — which is byte-for-byte the path req.Write
 // sends upstream (RequestURI renders EscapedPath); URL.Path (decoded) would not
-// be what the origin sees. A NoMatch falls through unchanged (judge-eligible
-// exactly as before); an explicit Deny is terminal — a constraint violation is
-// never judge-eligible, by construction of the evaluator.
+// be what the origin sees. A NoMatch falls through to the judge only on a
+// deferJudge connection; on any other connection (the entry that admitted it
+// was removed by a reload) it is the policy_no_match default-deny. An explicit
+// Deny is terminal — a constraint violation is never judge-eligible, by
+// construction of the evaluator.
 //
 // W-P1-GPOL-10: the same single evaluation carries the request's verified
 // subject (s.subject, nil unless identityStage found status valid), so an
@@ -558,8 +560,22 @@ func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
 	})
 	p.recordScoped(verdict)
 	switch verdict.Decision {
-	case policy.Allow, policy.NoMatch:
+	case policy.Allow:
 		return false
+	case policy.NoMatch:
+		// A per-request NoMatch is judge-eligible ONLY on a connection the
+		// admission gate deferred to the judge. On a deferNone / deferIdentity
+		// connection the destination matched an entry at admission, so a
+		// NoMatch now means a hot policy reload removed that entry while the
+		// tunnel was open; judgeGate skips a non-deferJudge request, so passing
+		// it on would forward it with no decision at all. It is the
+		// default-deny, named here.
+		if s.deferred == deferJudge {
+			return false
+		}
+		p.emitDeny(s, denyreason.PolicyNoMatch, denyExtra{LatencyMs: s.latencyMs()})
+		s.out.errorResponse(403, "Forbidden")
+		return true
 	}
 	// Deny and Conditional are terminal, and anything else fails closed here.
 	// Every explicit Deny names itself from the declared set (#409): a

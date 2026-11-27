@@ -214,6 +214,33 @@ func TestGroupPolicy_PolicySwapMidSession(t *testing.T) {
 	e.lastDeny(t, denyreason.GroupNotAllowed)
 }
 
+// A reload that removes the scoped entry entirely leaves the open
+// deferIdentity tunnel with a per-request NoMatch: that is the policy_no_match
+// default-deny, never a forward (the judge was never deferred to it).
+func TestGroupPolicy_ReloadRemovingEntryDefaultDenies(t *testing.T) {
+	e := gpEnv(t, nil)
+	c := e.h1("")
+	if got := c.get(hdrAlice); got != http.StatusOK {
+		t.Fatalf("before the reload = %d, want 200", got)
+	}
+	e.be.mu.Lock()
+	before := e.be.reqs
+	e.be.mu.Unlock()
+	e.p.cfg.Policy.Replace(config.Policy{Allowlist: []config.AllowlistEntry{
+		{Domain: "other.test", Port: 443},
+	}})
+	if got := c.get(hdrAlice); got != http.StatusForbidden {
+		t.Fatalf("after the entry was removed = %d, want 403 on the same tunnel", got)
+	}
+	e.lastDeny(t, denyreason.PolicyNoMatch)
+	e.be.mu.Lock()
+	after := e.be.reqs
+	e.be.mu.Unlock()
+	if after != before {
+		t.Fatalf("upstream served %d requests after the reload, want 0", after-before)
+	}
+}
+
 func TestGroupPolicy_RateChargedOnce(t *testing.T) {
 	e := gpEnv(t, func(c *Config) {
 		c.Policy = policy.NewEvaluator(config.Policy{Allowlist: []config.AllowlistEntry{

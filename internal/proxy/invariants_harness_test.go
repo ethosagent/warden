@@ -643,7 +643,7 @@ func (e *invEnv) doHTTP1(r invReq) (view string, status int, err error) {
 	return e.doHTTP1On(tc, r)
 }
 
-func (e *invEnv) doHTTP1On(tc *tls.Conn, r invReq) (string, int, error) {
+func (e *invEnv) doHTTP1On(tc net.Conn, r invReq) (string, int, error) {
 	req := r.build()
 	if err := req.Write(tc); err != nil {
 		return "", 0, err
