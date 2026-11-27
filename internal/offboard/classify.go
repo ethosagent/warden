@@ -8,9 +8,10 @@ import (
 	"strings"
 )
 
-// Class is the verdict on one refresh, pinned to the Dex v2.41.1 refresh
-// responses (server/refreshhandlers.go). Only ClassUpstreamRefused can ever
-// become an offboarding signal, and only after W-P3-OFFB-05 confirms it.
+// Class is the verdict on one refresh, pinned to the refresh responses of
+// the reference IdP recipe (v2.41.1) by a contract test. Only
+// ClassUpstreamRefused can ever become an offboarding signal, and only after
+// W-P3-OFFB-05 confirms it.
 type Class string
 
 // Classes.
@@ -25,10 +26,10 @@ const (
 	ClassExpired Class = "expired"
 	// ClassTokenLost: 400 "Refresh token is invalid or has already been
 	// claimed by another client." or any 400 invalid_grant: storage loss, a
-	// newer login (Dex invalidates the earlier chain) or a lost rotation.
+	// newer login (the reference IdP invalidates the earlier chain) or a lost rotation.
 	// Re-auth and alert; never offboard.
 	ClassTokenLost Class = "token_lost"
-	// ClassUpstreamRefused: 500 invalid_request with no description, Dex's
+	// ClassUpstreamRefused: 500 invalid_request with no description, the reference IdP's
 	// answer when the connector refuses the refresh (for LDAP: userSearch no
 	// longer finds the user). Recorded only in observe mode.
 	ClassUpstreamRefused Class = "upstream_refused"
@@ -39,10 +40,10 @@ const (
 	ClassSuspect Class = "suspect"
 )
 
-// Dex's refresh error descriptions (v2.41.1).
+// The reference IdP's refresh error descriptions (v2.41.1).
 const (
-	dexExpiredDescription = "Refresh token expired."
-	dexClaimedFragment    = "invalid or has already been claimed"
+	refExpiredDescription = "Refresh token expired."
+	refClaimedFragment    = "invalid or has already been claimed"
 )
 
 // HTTP statuses the table names (net/http is not imported by a domain).
@@ -94,9 +95,9 @@ func classifyResponse(r Result, err error) (Class, string) {
 		return ClassOK, ""
 	case r.Status == statusUnauthorized && r.ErrorCode == "invalid_client":
 		return ClassConfigError, "invalid_client"
-	case r.Status == statusBadRequest && r.ErrorCode == "invalid_request" && r.Description == dexExpiredDescription:
+	case r.Status == statusBadRequest && r.ErrorCode == "invalid_request" && r.Description == refExpiredDescription:
 		return ClassExpired, "refresh_expired"
-	case r.Status == statusBadRequest && (r.ErrorCode == "invalid_grant" || strings.Contains(r.Description, dexClaimedFragment)):
+	case r.Status == statusBadRequest && (r.ErrorCode == "invalid_grant" || strings.Contains(r.Description, refClaimedFragment)):
 		return ClassTokenLost, "refresh_invalid"
 	case r.Status == statusInternalServerError && r.ErrorCode == "invalid_request" && r.Description == "":
 		return ClassUpstreamRefused, "upstream_refused"

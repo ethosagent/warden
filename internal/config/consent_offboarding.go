@@ -26,7 +26,7 @@ const (
 )
 
 // consent.offboarding defaults and bounds. The interval must stay well below
-// the IdP's idle refresh lifetime (Dex validIfNotUsedFor, 168h in the
+// the IdP's idle refresh lifetime (validIfNotUsedFor, 168h in the
 // reference recipe), so a chain that is refreshed never idles out.
 const (
 	DefaultOffboardingInterval       = time.Hour
