@@ -347,7 +347,7 @@ func clearOfUTCMidnight(t *testing.T, h *harness.H) {
 	}
 	t.Logf("within %s of UTC midnight: waiting for the new day before starting", midnightGuard)
 	time.Sleep(time.Until(next) + 2*time.Second)
-	if d := time.Now().Sub(h.Clock().Now()); d > 0 {
+	if d := time.Since(h.Clock().Now()); d > 0 {
 		h.Clock().Advance(d)
 	}
 }
