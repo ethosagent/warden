@@ -55,6 +55,17 @@ type Policy struct {
 	// still rides the wire through remoteWire.BlockedUsers (worker decode) and
 	// controlplane.policyWire.BlockedUsers (CP encode).
 	BlockedUsers []BlockedUser `json:"-"`
+	// UserLimits, DefaultUserLimit and AnonymousLimit are the per-user limit
+	// rules (W-P3-PUL-01), normalized and validated at load. json:"-" for rule
+	// X2 like BlockedUsers; they ride the wire through remoteWire and
+	// controlplane.policyWire. Not yet enforced: validate refuses them.
+	UserLimits       []UserLimit `json:"-"`
+	DefaultUserLimit *UserLimit  `json:"-"`
+	AnonymousLimit   *UserLimit  `json:"-"`
+	// CostBlockedUsers is the fleet cost block list the control plane computes
+	// and serves. Wire only: never read from YAML, never stored in a policy
+	// version. json:"-" for rule X2; remoteWire carries it.
+	CostBlockedUsers []CostBlockedUser `json:"-"`
 	// RegisteredAgents is the control plane's agent registry as workers see it
 	// (id, status, key thumbprints), sorted by id. Never set from YAML. json:"-"
 	// for rule X2 like BlockedUsers; it rides the wire through
@@ -188,6 +199,10 @@ func (p Policy) DeepCopy() Policy {
 	}
 	cp.Denylist = append([]DenylistEntry(nil), p.Denylist...)
 	cp.BlockedUsers = append([]BlockedUser(nil), p.BlockedUsers...)
+	cp.UserLimits = copyUserLimits(p.UserLimits)
+	cp.DefaultUserLimit = copyUserLimitPtr(p.DefaultUserLimit)
+	cp.AnonymousLimit = copyUserLimitPtr(p.AnonymousLimit)
+	cp.CostBlockedUsers = append([]CostBlockedUser(nil), p.CostBlockedUsers...)
 	if p.RegisteredAgents != nil {
 		cp.RegisteredAgents = make([]RegisteredAgent, len(p.RegisteredAgents))
 		for i, a := range p.RegisteredAgents {
@@ -370,6 +385,11 @@ type rawConfig struct {
 		Denylist  []DenylistEntry  `yaml:"denylist"`
 		// BlockedUsers: the user block list (see BlockedUser).
 		BlockedUsers []BlockedUser `yaml:"blockedUsers"`
+		// UserLimits, DefaultUserLimit, AnonymousLimit: per-user limits (see
+		// UserLimit). costBlockedUsers is wire only and has no key here.
+		UserLimits       []UserLimit `yaml:"userLimits"`
+		DefaultUserLimit *UserLimit  `yaml:"defaultUserLimit"`
+		AnonymousLimit   *UserLimit  `yaml:"anonymousLimit"`
 	} `yaml:"policy"`
 	Secrets     []SecretMapping `yaml:"secrets"`
 	SecretStore *rawSecretStore `yaml:"secretStore"`
@@ -438,14 +458,17 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	}
 
 	policy := Policy{
-		Allowlist:       raw.Policy.Allowlist,
-		Denylist:        raw.Policy.Denylist,
-		BlockedUsers:    normalizeBlockedUsers(raw.Policy.BlockedUsers),
-		Secrets:         raw.Secrets,
-		SecretStore:     parseSecretStore(raw.SecretStore),
-		CacheTTLSeconds: raw.Cache.TTL,
-		LogLevel:        raw.Logging.Level,
-		LogFormat:       raw.Logging.Format,
+		Allowlist:        raw.Policy.Allowlist,
+		Denylist:         raw.Policy.Denylist,
+		BlockedUsers:     normalizeBlockedUsers(raw.Policy.BlockedUsers),
+		UserLimits:       raw.Policy.UserLimits,
+		DefaultUserLimit: raw.Policy.DefaultUserLimit,
+		AnonymousLimit:   raw.Policy.AnonymousLimit,
+		Secrets:          raw.Secrets,
+		SecretStore:      parseSecretStore(raw.SecretStore),
+		CacheTTLSeconds:  raw.Cache.TTL,
+		LogLevel:         raw.Logging.Level,
+		LogFormat:        raw.Logging.Format,
 	}
 	policy.Listen = raw.Listen
 	policy.AdminListen = raw.AdminListen
@@ -554,6 +577,9 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 	policy.Upstream = parseUpstream(raw.Upstream)
 	policy.Proxy = parseProxy(raw.Proxy)
 
+	if err := NormalizeUserLimits(&policy); err != nil {
+		return nil, err
+	}
 	if err := validate(policy); err != nil {
 		return nil, err
 	}
@@ -588,6 +614,15 @@ func parseDurationField(name, raw string, dst *time.Duration) error {
 // validate helper (defined alongside that domain's types).
 func validate(p Policy) error {
 	if err := ValidateBlockedUsers(p.BlockedUsers); err != nil {
+		return err
+	}
+	if err := ValidateCostBlockedUsers(p.CostBlockedUsers); err != nil {
+		return err
+	}
+	if err := ValidateUserLimits(p); err != nil {
+		return err
+	}
+	if err := unenforcedUserLimits(p); err != nil {
 		return err
 	}
 	// A control-plane-managed worker (controlPlane configured, not local-only)

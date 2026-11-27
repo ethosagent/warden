@@ -85,6 +85,10 @@ type Config struct {
 	Bundles BundlesConfig
 	// bundleKeys replaces Keys' KeySet as the publisher's key source (tests).
 	bundleKeys bundleKeys
+	// userCostStartupBackoff replaces the waits between the fleet cost
+	// aggregator's startup attempts without a state DB (tests); nil uses
+	// defaultUserCostStartupBackoff.
+	userCostStartupBackoff []time.Duration
 	// WorkerCA is the worker intermediate CA (workerCA.enabled). Nil with
 	// WorkerCAEnabled false is the disabled default; nil with WorkerCAEnabled
 	// true is the degraded state (the key backend was unreachable at start): the
@@ -226,6 +230,14 @@ type policyWire struct {
 	// BlockedUsers is the user block list (sub and email only; reason and actor
 	// stay on the CP). Omitempty keeps the wire and ETag unchanged when empty.
 	BlockedUsers []config.BlockedUser `json:"blockedUsers,omitempty"`
+	// UserLimits, DefaultUserLimit and AnonymousLimit are the per-user limit
+	// rules (W-P3-PUL-01); CostBlockedUsers is the computed fleet cost block
+	// list, set on the served wire only (never stored in a policy version).
+	// All omitempty, so a policy without them keeps its body and ETag.
+	UserLimits       []config.UserLimit       `json:"userLimits,omitempty"`
+	DefaultUserLimit *config.UserLimit        `json:"defaultUserLimit,omitempty"`
+	AnonymousLimit   *config.UserLimit        `json:"anonymousLimit,omitempty"`
+	CostBlockedUsers []config.CostBlockedUser `json:"costBlockedUsers,omitempty"`
 	// RegisteredAgents is the agent registry as workers need it: id, status and
 	// key thumbprints only (W-P2-AREG-04). Omitempty keeps the wire and ETag
 	// byte-identical when the registry is empty or absent.
@@ -292,6 +304,11 @@ type Server struct {
 	// blocks is the user block list store; nil without State (and then no
 	// blocked_users overlay is registered).
 	blocks *BlockStore
+	// userCost publishes fleet cost blocks (W-P3-PUL-08); nil with the memory
+	// analytics provider.
+	userCost *userCostAggregator
+	// userCostOffWarn makes the memory-provider warning one line per process.
+	userCostOffWarn sync.Once
 	// agents is the agent registry; nil without State or Config.AgentStore, in
 	// which case the agent routes answer 503 state_dir_required.
 	agents       agentreg.Store
@@ -465,6 +482,7 @@ func New(cfg Config) *Server {
 	s.initBlockStore()
 	s.initAgentStore()
 	s.registerAgentOverlay()
+	s.initUserCost() // last overlay: it sizes the list against the rest of the body
 	s.initApprovals()
 	s.gate = approvals.NewGate(s.cfg.Console.Approvals.Enabled, s.approvals)
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
@@ -531,6 +549,9 @@ func New(cfg Config) *Server {
 // policy file (editor edits refresh synchronously). It also starts the retention
 // prune loop when the store supports it. It returns when ctx is done.
 func (s *Server) Start(ctx context.Context) {
+	// Fleet cost blocks are rebuilt from the rollup before Start returns, so
+	// the first long-poll after a restart carries them (Run serves after).
+	s.startUserCost(ctx)
 	if s.approvals != nil {
 		go s.sweepApprovals(ctx)
 	}
@@ -699,9 +720,20 @@ func (s *Server) Handler() http.Handler {
 	// publishes), and (2) the event→Finding bridge publishes immediate block/reason
 	// Findings onto the CURRENT manager's bus (a reload may have swapped it). Both
 	// nil-safe; fail-open.
+	// The fleet cost aggregator (W-P3-PUL-08) schedules a debounced recompute
+	// from the same hook.
+	var onEvents []func(string, []analytics.Event)
 	if s.integrationsStore != nil {
+		onEvents = append(onEvents, s.pipeline.Observe)
+	}
+	if s.userCost != nil {
+		onEvents = append(onEvents, s.userCost.onEvents)
+	}
+	if len(onEvents) > 0 {
 		ingest.SetOnEvents(func(proxyID string, events []analytics.Event) {
-			s.pipeline.Observe(proxyID, events)
+			for _, fn := range onEvents {
+				fn(proxyID, events)
+			}
 		})
 	}
 	mux.Handle("/central/ingest", ingestAuthErrors(ingest))
@@ -725,7 +757,7 @@ func (s *Server) Handler() http.Handler {
 	// secret-free policy view; the dashboard's secrets panel is naturally empty.
 	emptySecrets, _ := secrets.NewCache(secrets.NewEnvFetcher(map[string]string{}), 0, nil)
 	wire, _, _, _ := s.policy.snapshot()
-	dashPolicy := config.Policy{Allowlist: wire.Allowlist, Denylist: wire.Denylist}
+	dashPolicy := policyOfWire(wire)
 	dash := dashboard.NewServer(s.central, dashPolicy, emptySecrets)
 	// Retain the dashboard so a settings / llmProviders edit can re-inject the
 	// Explore NL→SQL generator live (see injectExploreLLM). Set before serving.
@@ -734,7 +766,7 @@ func (s *Server) Handler() http.Handler {
 	// immediately rather than a startup snapshot.
 	dash.SetLivePolicy(func() config.Policy {
 		w, _, _, _ := s.policy.snapshot()
-		return config.Policy{Allowlist: w.Allowlist, Denylist: w.Denylist}
+		return policyOfWire(w)
 	})
 	// Editing is a control-plane-only capability, sourced from the ConfigEditor
 	// seam: persist edits to the served config file so workers pull them on their
@@ -1060,6 +1092,11 @@ type policyYAML struct {
 	Denylist  []config.DenylistEntry  `yaml:"denylist"`
 	// BlockedUsers keeps policy.blockedUsers in the file across an edit.
 	BlockedUsers []config.BlockedUser `yaml:"blockedUsers,omitempty"`
+	// UserLimits, DefaultUserLimit and AnonymousLimit keep the per-user limit
+	// keys in the file across an edit (W-P3-PUL-01).
+	UserLimits       []config.UserLimit `yaml:"userLimits,omitempty"`
+	DefaultUserLimit *config.UserLimit  `yaml:"defaultUserLimit,omitempty"`
+	AnonymousLimit   *config.UserLimit  `yaml:"anonymousLimit,omitempty"`
 }
 
 // writePolicy validates and atomically persists an edited allow/deny policy to
@@ -1094,7 +1131,14 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 		_ = yaml.Unmarshal(cur, &root)
 	}
 
-	if err := renderPolicyBlock(root, p.Allowlist, p.Denylist, p.BlockedUsers); err != nil {
+	prev := policyYAMLFromRoot(root)
+	if err := renderPolicyEdit(root, p); err != nil {
+		return err
+	}
+	next := policyYAMLFromRoot(root)
+	if err := s.costCapGuard(ctx,
+		userLimitCaps(prev.UserLimits, prev.DefaultUserLimit, prev.AnonymousLimit),
+		userLimitCaps(next.UserLimits, next.DefaultUserLimit, next.AnonymousLimit)); err != nil {
 		return err
 	}
 
@@ -1112,9 +1156,9 @@ func (s *Server) WritePolicy(ctx context.Context, p config.Policy, meta dashboar
 // renderPolicyBlock replaces root's policy block with allow/deny and makes sure
 // a logging block exists (kept from the current file when present, otherwise
 // info/json). It is the policy half of WritePolicy and renderDocToRoot.
-func renderPolicyBlock(root map[string]yaml.Node, allow []config.AllowlistEntry, deny []config.DenylistEntry, blocked []config.BlockedUser) error {
+func renderPolicyBlock(root map[string]yaml.Node, py policyYAML) error {
 	var policyNode yaml.Node
-	if err := policyNode.Encode(policyYAML{Allowlist: allow, Denylist: deny, BlockedUsers: blocked}); err != nil {
+	if err := policyNode.Encode(py); err != nil {
 		return fmt.Errorf("controlplane: encode policy block: %w", err)
 	}
 	root["policy"] = policyNode
@@ -1152,7 +1196,7 @@ func readRoot(path string) map[string]yaml.Node {
 // live value (the preserve-on-empty rule). Blocks no dashboard writer owns
 // (dlp, advisory) are left as the served file has them.
 func renderDocToRoot(root map[string]yaml.Node, doc policyWire) error {
-	if err := renderPolicyBlock(root, doc.Allowlist, doc.Denylist, nil); err != nil {
+	if err := renderPolicyBlock(root, policyYAMLOfWire(doc)); err != nil {
 		return err
 	}
 	var settings config.SettingsWire
@@ -1981,4 +2025,69 @@ func observabilitySettingsNode(s *config.ObservabilitySettings) (*yaml.Node, err
 		return nil, err
 	}
 	return &node, nil
+}
+
+// policyYAMLOfPolicy is the policy block a dashboard edit writes: allow/deny,
+// the block list and the per-user limit rules of p.
+func policyYAMLOfPolicy(p config.Policy) policyYAML {
+	return policyYAML{
+		Allowlist: p.Allowlist, Denylist: p.Denylist, BlockedUsers: p.BlockedUsers,
+		UserLimits: p.UserLimits, DefaultUserLimit: p.DefaultUserLimit, AnonymousLimit: p.AnonymousLimit,
+	}
+}
+
+// policyYAMLOfWire is the policy block of a stored doc. The block list is a
+// CP-store overlay and the cost blocks are computed, so neither is written.
+func policyYAMLOfWire(w policyWire) policyYAML {
+	return policyYAML{
+		Allowlist: w.Allowlist, Denylist: w.Denylist,
+		UserLimits: w.UserLimits, DefaultUserLimit: w.DefaultUserLimit, AnonymousLimit: w.AnonymousLimit,
+	}
+}
+
+// policyWireOfPolicy projects a loaded policy to the served wire: allow/deny,
+// the per-user limit rules and the secret-free settings. The block list, the
+// agent registry and the cost blocks are overlays, never taken from a file.
+func policyWireOfPolicy(p config.Policy) policyWire {
+	return policyWire{
+		Allowlist: p.Allowlist, Denylist: p.Denylist,
+		UserLimits: p.UserLimits, DefaultUserLimit: p.DefaultUserLimit, AnonymousLimit: p.AnonymousLimit,
+		Settings: config.SettingsWireFromPolicy(p),
+	}
+}
+
+// policyOfWire is the secret-free policy view the dashboard shows and edits.
+func policyOfWire(w policyWire) config.Policy {
+	return config.Policy{
+		Allowlist: w.Allowlist, Denylist: w.Denylist,
+		UserLimits: w.UserLimits, DefaultUserLimit: w.DefaultUserLimit, AnonymousLimit: w.AnonymousLimit,
+	}
+}
+
+// hasUserLimits reports whether py carries any of the three per-user limit keys.
+func (py policyYAML) hasUserLimits() bool {
+	return len(py.UserLimits) > 0 || py.DefaultUserLimit != nil || py.AnonymousLimit != nil
+}
+
+// policyYAMLFromRoot reads the per-user limit keys of root's current policy
+// block. A missing or unreadable block yields none.
+func policyYAMLFromRoot(root map[string]yaml.Node) policyYAML {
+	var cur policyYAML
+	if node, ok := root["policy"]; ok {
+		_ = node.Decode(&cur)
+	}
+	return cur
+}
+
+// renderPolicyEdit writes a dashboard policy edit into root's policy block.
+// The editors own allow/deny only: an edit whose Policy carries no per-user
+// limit keys keeps the ones already in root (the file's, or the head doc's in
+// versioned mode), so saving an allowlist never deletes a limit rule.
+func renderPolicyEdit(root map[string]yaml.Node, p config.Policy) error {
+	py := policyYAMLOfPolicy(p)
+	if !py.hasUserLimits() {
+		cur := policyYAMLFromRoot(root)
+		py.UserLimits, py.DefaultUserLimit, py.AnonymousLimit = cur.UserLimits, cur.DefaultUserLimit, cur.AnonymousLimit
+	}
+	return renderPolicyBlock(root, py)
 }

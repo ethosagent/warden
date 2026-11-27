@@ -21,6 +21,11 @@ import (
 // maxPolicyBytes caps a policy response body (defense against a runaway CP).
 const maxPolicyBytes = 1 << 20 // 1 MiB
 
+// MaxPolicyBytes is the largest unsigned /policy body a worker reads. The
+// control plane keeps the computed parts of the wire (costBlockedUsers) small
+// enough that the served body stays under it.
+const MaxPolicyBytes = maxPolicyBytes
+
 // RemoteProvider pulls policy from a control-plane HTTP endpoint. It implements
 // ConfigProvider.
 type RemoteProvider struct {
@@ -106,6 +111,13 @@ func WorkerCaps() []string {
 // must be gated on this cap, because a worker rejects the whole policy wire on
 // a list it cannot validate and would freeze on its last-known-good policy.
 const CapAgentRegV1 = "agentreg/v1"
+
+// CapUserCostV1 is the capability a worker advertises when it enforces
+// dailyCostUSD per-user cost caps and costBlockedUsers (W-P3-PUL-04). An old
+// worker fails open on cost caps, so a policy save that adds or sets a
+// dailyCostUSD rule is refused (409, unless an admin forces it) while a
+// connected worker lacks it (W-P3-PUL-08). W-P3-PUL-04 adds it to WorkerCaps.
+const CapUserCostV1 = "usercost/v1"
 
 // CapIdentityRequireV1 is the capability a worker advertises when it enforces
 // identity require mode (W-P2-WBND-03). An old worker ignores a mode it does
@@ -540,6 +552,13 @@ type remoteWire struct {
 	// BlockedUsers is decoded here, not through Policy (whose field is
 	// json:"-" for rule X2), then copied onto the policy in parseRemotePolicy.
 	BlockedUsers []BlockedUser `json:"blockedUsers,omitempty"`
+	// UserLimits, DefaultUserLimit, AnonymousLimit and CostBlockedUsers
+	// (W-P3-PUL-01) likewise: copied onto the policy and validated in
+	// parseRemotePolicy.
+	UserLimits       []UserLimit       `json:"userLimits,omitempty"`
+	DefaultUserLimit *UserLimit        `json:"defaultUserLimit,omitempty"`
+	AnonymousLimit   *UserLimit        `json:"anonymousLimit,omitempty"`
+	CostBlockedUsers []CostBlockedUser `json:"costBlockedUsers,omitempty"`
 	// RegisteredAgents likewise (W-P2-AREG-04): decoded here, sorted and
 	// validated in parseRemotePolicy.
 	RegisteredAgents []RegisteredAgent `json:"registeredAgents,omitempty"`
@@ -575,6 +594,11 @@ func parseRemotePolicy(body []byte) (*Policy, *SettingsWire, error) {
 		p.Denylist[i].Domain = strings.ToLower(p.Denylist[i].Domain)
 	}
 	p.BlockedUsers = normalizeBlockedUsers(w.BlockedUsers)
+	p.UserLimits, p.DefaultUserLimit, p.AnonymousLimit = w.UserLimits, w.DefaultUserLimit, w.AnonymousLimit
+	p.CostBlockedUsers = w.CostBlockedUsers
+	if err := NormalizeUserLimits(&p); err != nil {
+		return nil, nil, err
+	}
 	if len(w.RegisteredAgents) > 0 {
 		agents := append([]RegisteredAgent(nil), w.RegisteredAgents...)
 		SortRegisteredAgents(agents)

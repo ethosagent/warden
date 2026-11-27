@@ -107,6 +107,25 @@ policy:
   #   - sub: "CgUxMjM0NRIFbG9jYWw"
   #   - email: former.employee@corp.example
 
+  # Per-user limits (phase 3, NOT YET ENFORCED: a non-empty userLimits,
+  # defaultUserLimit or anonymousLimit fails to load until enforcement ships).
+  # Off when absent; /policy and its ETag are then unchanged. Exactly one rule
+  # applies per request: rules matching by users, then groups, then agents-only
+  # rules (first in list order wins within a tier), then defaultUserLimit. A
+  # request with no valid identity uses only anonymousLimit. name is required,
+  # unique, and not "default" or "anonymous"; each rule needs rateLimit
+  # (N/second|minute|hour) and/or dailyCostUSD (estimated spend per UTC day,
+  # at most 1e6). defaultUserLimit and anonymousLimit take no match. At most 256
+  # rules. A strict per-user guarantee needs identity mode require.
+  # userLimits:
+  #   - name: eng-llm
+  #     match: {groups: [eng], domains: [api.openai.com]}
+  #     perAgent: false
+  #     rateLimit: 60/minute
+  #     dailyCostUSD: 5
+  # defaultUserLimit: {rateLimit: 600/hour}
+  # anonymousLimit: {rateLimit: 5/minute}
+
 # Placeholder -> environment variable mapping for the phase-1 ENV secret
 # provider. The agent only ever holds the placeholder (e.g. openai_secret_001);
 # Warden swaps it for the real value of OPENAI_API_KEY at the edge.

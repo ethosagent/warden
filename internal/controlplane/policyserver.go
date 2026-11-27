@@ -41,6 +41,9 @@ type policyServer struct {
 	logger     *slog.Logger
 	registry   *WorkerRegistry
 	watch      *policyWatch
+	// lintWarned holds the per-user limit lint warnings already logged, so a
+	// reload logs each distinct one once.
+	lintWarned sync.Map
 
 	// overlays are applied in order by loadPolicy after the base wire is built.
 	// overlayMu guards appends; sealed is set by the first Refresh or ServePolicy,
@@ -80,6 +83,10 @@ type policyServer struct {
 	lastWire  policyWire
 	lastETag  string
 	lastHead  int64
+	// onLoaded, when set (at wiring time, before the first Refresh), runs
+	// after every successful load with the wire just served. It must not
+	// call Refresh.
+	onLoaded func(policyWire)
 }
 
 // Publish-log values of an ETag change without a new version.
@@ -274,6 +281,9 @@ func (ps *policyServer) refresh(resign bool) {
 	ps.watch.set(wire, etag, fps)
 	ps.loaded, ps.lastWire, ps.lastETag, ps.lastHead = true, wire, etag, head
 	ps.publishBundle(ctx, wire, etag, head, resign)
+	if ps.onLoaded != nil {
+		ps.onLoaded(wire)
+	}
 }
 
 // recordPublish appends a publish-log row when the served ETag of head (0 =
@@ -495,14 +505,15 @@ func (ps *policyServer) loadFile() (policyWire, error) {
 		ps.logger.Warn("control plane: policy file contains blockedUsers; ignored (manage the block list from the console)",
 			"entries", len(p.BlockedUsers))
 	}
+	for _, msg := range config.LintUserLimits(p) {
+		if _, dup := ps.lintWarned.LoadOrStore(msg, struct{}{}); !dup {
+			ps.logger.Warn("control plane: " + msg)
+		}
+	}
 	// SettingsWireFromPolicy projects only the secret-free behavioral blocks and
 	// returns nil when the config is pure allow/deny, so the "settings" key stays
 	// absent in that case (back-compat).
-	return policyWire{
-		Allowlist: p.Allowlist,
-		Denylist:  p.Denylist,
-		Settings:  config.SettingsWireFromPolicy(p),
-	}, nil
+	return policyWireOfPolicy(p), nil
 }
 
 // ServePolicy serves the current allow/deny policy with ETag-based long-poll.

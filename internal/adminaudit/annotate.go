@@ -74,6 +74,10 @@ const (
 const (
 	DetailForce          = "force"
 	DetailWorkersLacking = "workersLacking"
+	// DetailCapability names the capability a forced guard found missing
+	// (usercost/v1 for the cost-cap guard, W-P3-PUL-08). The require guard,
+	// which predates it, records none.
+	DetailCapability = "capability"
 )
 
 // DetailSource is where a change came from (for example approval).
@@ -87,7 +91,7 @@ var annotationKeys = func() map[string]bool {
 		DetailWorkerID: true, DetailCount: true, DetailEnrollTokens: true,
 		DetailBaseVersion: true, DetailAppliedVersion: true, DetailWidening: true,
 		DetailReasons: true, DetailReplayStatus: true, DetailAckNoReplay: true, DetailSource: true,
-		DetailForce: true, DetailChanged: true, DetailStatusFrom: true, DetailStatusTo: true, DetailTruncated: true,
+		DetailForce: true, DetailCapability: true, DetailChanged: true, DetailStatusFrom: true, DetailStatusTo: true, DetailTruncated: true,
 	}
 	for _, k := range []string{DetailWorkersLacking, DetailKidsAdded, DetailKidsRemoved, DetailJktsAdded, DetailJktsRemoved, DetailGroupsAdded, DetailGroupsRemoved} {
 		m[k] = true

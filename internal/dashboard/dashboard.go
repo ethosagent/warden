@@ -1054,7 +1054,9 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pol := config.Policy{Allowlist: req.Allowlist, Denylist: req.Denylist}
-	if err := s.policyWriter(r.Context(), pol, meta); err != nil {
+	// ?force=true reaches the writer, as for settings: the cost-cap rollout
+	// guard (W-P3-PUL-08) honours it for an admin once limits are editable here.
+	if err := s.policyWriter(withForce(r.Context(), r), pol, meta); err != nil {
 		writeWriterError(w, err)
 		return
 	}
