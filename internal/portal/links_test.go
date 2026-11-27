@@ -482,7 +482,7 @@ func newStoreOver(t *testing.T, r *linkRig, repo portal.LinkRepo, st portal.Link
 		Repo: repo, Secrets: st,
 		Keys:            portal.LinkKeys{UserKey: secrets.UserKey, SecretKey: secrets.IdPLinkKey, Ref: func(tok string) string { return secrets.Ref(tok).String() }},
 		RefreshLifetime: linkLifetime, Now: r.clock,
-		Logger:          slog.New(slog.NewJSONHandler(r.logs, nil)),
+		Logger: slog.New(slog.NewJSONHandler(r.logs, nil)),
 	})
 	if err != nil {
 		t.Fatal(err)
