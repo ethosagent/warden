@@ -69,6 +69,7 @@ func userLimitsTinyLLM(w http.ResponseWriter, r *http.Request) {
 }
 
 func userLimitsE2E(t *testing.T, h *harness.H) {
+	clearOfUTCMidnight(t, h)
 	h.Upstream(limitedHost)
 	llm := h.Upstream(costCapHost)
 	llm.SetNext(http.HandlerFunc(userLimitsTinyLLM))
@@ -284,6 +285,9 @@ func userLimitsAssertUsage(t *testing.T, h *harness.H) {
 			Requests int64 `json:"requests"`
 		} `json:"unattributed"`
 	}
+	// Query usage/users only once the final state is reached: the response is
+	// cached for 30s on the real clock, which outlasts the 10s deadline, so an
+	// early poll that read a partial total would keep serving it.
 	h.Eventually("the usage view to total alice's activity", func() bool {
 		got.Users = nil
 		if err := h.CP().GetJSON("/dashboard/api/usage/users?window=7d", &got); err != nil {
@@ -321,4 +325,29 @@ func advanceUntil(h *harness.H, step time.Duration, desc string, cond func() boo
 		time.Sleep(20 * time.Millisecond)
 		return false
 	})
+}
+
+// midnightGuard is how close to the next UTC midnight a run may start. The
+// scenarios assert per-UTC-day ledgers and the dashboard usage window reads the
+// real clock (day-granular), so the fake day and the real day must agree and
+// neither may roll over mid-run. The fake clock starts at the real time and the
+// workers verify bundles against it with a small skew, so it cannot simply be
+// jumped past midnight: instead the run waits (in real time) until the real
+// clock is past midnight and re-syncs the fake clock to it.
+const midnightGuard = 10 * time.Minute
+
+// clearOfUTCMidnight makes the scenario correct at any wall-clock time. It is
+// a no-op except within midnightGuard before a UTC midnight.
+func clearOfUTCMidnight(t *testing.T, h *harness.H) {
+	t.Helper()
+	now := time.Now().UTC()
+	next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
+	if next.Sub(now) >= midnightGuard {
+		return
+	}
+	t.Logf("within %s of UTC midnight: waiting for the new day before starting", midnightGuard)
+	time.Sleep(time.Until(next) + 2*time.Second)
+	if d := time.Now().Sub(h.Clock().Now()); d > 0 {
+		h.Clock().Advance(d)
+	}
 }

@@ -3737,15 +3737,17 @@ reason (`user_rate_limited`, `user_cost_limited`, ...), estimated cost, top
 agents, the matched rule, its cap, today's spend and whether the user is
 cost-blocked, plus the anonymous (unattributed) totals. It reads the fleet rollup,
 so it answers `404 usage_unavailable` when the control plane's analytics store
-cannot produce it. Responses are cached for 30 s per (window, sort, limit). Claims are
+cannot produce it. Responses are cached for 30 s per window (sort and limit are applied per request). Claims are
 rendered with text, never HTML, and no metric label carries a sub or email.
 Drill down with `?user=` on the traffic view.
 
 ### Known limits
 
 - Costs are estimates (bytes/4 at the built-in prices), not invoices.
-- A gRPC call refused after its response headers is not charged to the ledger
-  (see policy.md); a follow-up closes it.
+- A gRPC call refused after its response headers is charged to the worker's live
+  ledger, but its deny event carries no cost, so a worker restart (reseed) and the
+  fleet rollup (`costBlockedUsers`, the usage view) do not count it (see
+  policy.md); a follow-up closes it.
 - With `--analytics-provider memory` the control plane publishes no cost blocks: each
   worker's own ledger is the only cap.
 

@@ -124,9 +124,10 @@ At or over the cap the agent gets `403 {"error":"user_cost_limited"}` with
   control plane totals the fleet spend and publishes users at or over the cap as
   `costBlockedUsers` (see the control plane doc): the lag is the ingest batch
   interval plus the 30 s recompute debounce plus one policy long-poll. The
-  worst-case overshoot is therefore about (workers x cap) plus what a user can
-  spend on each worker in that lag, and a deployment with one worker has only the
-  in-flight overshoot. With the in-memory fleet store the control plane publishes
+  worst-case overshoot is therefore roughly min(workers x cap, cap + what the
+  user spends across the fleet during that lag) plus the requests in flight;
+  workers x cap applies when the control plane is down. A deployment with one
+  worker has only the in-flight overshoot. With the in-memory fleet store the control plane publishes
   nothing and the per-worker ledgers are the only cap.
 - **Restart.** A worker rebuilds its ledger at boot from the day's cost in its
   local event store, so a restart keeps a user's spend. If the seed read fails,
@@ -141,11 +142,14 @@ At or over the cap the agent gets `403 {"error":"user_cost_limited"}` with
   is refused with `user_cost_limited` (fail closed).
 - **Known gap: a gRPC call refused after response headers.** When a gRPC stream
   is refused after the upstream has already answered (a message that fails the
-  frame guard), the bytes relayed before the refusal are not charged to the
-  ledger. Every other deny that fires after response bytes reached the agent (the
-  echo guard, an MCP gateway deny, a scanner block) is charged and carries its
-  cost on the deny event. A capped user can therefore get a bounded amount of
-  uncounted gRPC output; a follow-up closes it.
+  frame guard), the bytes relayed before the refusal are charged to the worker's
+  live ledger, but the deny event carries no cost. A worker restart (which
+  reseeds from the event store) and the fleet rollup (`costBlockedUsers`, the
+  usage view) therefore do not count them. Every other deny that fires after
+  response bytes reached the agent (the echo guard, an MCP gateway deny, a
+  scanner block) carries its cost on the deny event. A capped user can get a
+  bounded amount of gRPC output that only the live ledger sees; a follow-up
+  closes it.
 
 ## Observability
 
