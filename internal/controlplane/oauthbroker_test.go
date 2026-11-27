@@ -85,3 +85,62 @@ func TestStartRunsBrokerSweeper(t *testing.T) {
 		t.Fatalf("waiter got %q, want expired from the startup sweep", st)
 	}
 }
+
+// TestRestoreClearsConnectAttempts: a restored backup keeps no in-flight
+// broker attempt (its PKCE verifier and browser binding), but keeps pendings
+// and grants; a set without the broker tables restores fine.
+func TestRestoreClearsConnectAttempts(t *testing.T) {
+	ctx := context.Background()
+	clk := clocktest.NewFake(oauthbrokertest.Start)
+	staged := filepath.Join(t.TempDir(), "warden-cp.db")
+	db, err := cpstate.Open(ctx, staged, stateMigrationsWithBroker(StateMigrations(), true))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	store := oauthbrokersqlite.New(db, oauthbrokersqlite.Options{Clock: clk})
+	p, err := store.CreatePending(ctx, oauthbrokertest.NewPending("alice", "google"), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if _, err := store.CreateAttempt(ctx, oauthbrokertest.NewAttempt("alice", "google", p.ID, i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.BeginGrant(ctx, oauthbroker.GrantRef{UserKey: oauthbrokertest.UserKey("alice"), Iss: "i", Sub: "alice", Provider: "google"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	if _, err := prepareRestoredState(ctx, staged, false, clk); err != nil {
+		t.Fatalf("prepareRestoredState: %v", err)
+	}
+	db, err = cpstate.Open(ctx, staged, StateMigrations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	count := func(table string) int {
+		var n int
+		if err := db.SQL().QueryRow("SELECT count(*) FROM " + table).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := count("connect_attempts"); n != 0 {
+		t.Fatalf("restored state holds %d connect attempts, want 0", n)
+	}
+	if count("pending_authorizations") != 1 || count("oauth_grants") != 1 {
+		t.Fatal("restore dropped pendings or grants; only attempts are cleared")
+	}
+
+	off := filepath.Join(t.TempDir(), "warden-cp.db")
+	db2, err := cpstate.Open(ctx, off, StateMigrations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db2.Close()
+	if _, err := prepareRestoredState(ctx, off, false, clk); err != nil {
+		t.Fatalf("prepareRestoredState without broker tables: %v", err)
+	}
+}
