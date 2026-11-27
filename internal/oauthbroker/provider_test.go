@@ -400,7 +400,7 @@ func TestClientSecretFailureCacheExpires(t *testing.T) {
 	r, _ := newReg(t, cfg, Options{Resolver: res, Now: clock})
 	p, _ := r.Get("g")
 	base := res.calls
-	p.ClientSecret(context.Background()) //nolint:errcheck // cached failure
+	_, _ = p.ClientSecret(context.Background())
 	if res.calls != base {
 		t.Fatalf("failure inside the window re-read the store (%d calls)", res.calls-base)
 	}
