@@ -90,6 +90,12 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			return
 		}
 		p.reach(PathTunnel)
+		// An opaque passthrough shows no requests: charge the per-user limit
+		// once, before the dial (d is deferNone here, a policy Allow).
+		limitRule, denied := p.passthroughUserLimit(ci, domain, port)
+		if denied {
+			return
+		}
 		// Only an attributed tunnel registers (see tunnel): a block-list cut must
 		// reach this opaque passthrough, the form a CONNECT takes on a worker
 		// with TLS termination, as well as the CA-less one.
@@ -118,9 +124,10 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			Port:      port,
 			Protocol:  "tcp",
 			Decision:  "allow",
+			LimitRule: limitRule,
 		})
 		p.cfg.Metrics.RecordRequest("allow", "tcp")
-		p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: "tcp", Decision: "allow", ID: ci})
+		p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: "tcp", Decision: "allow", LimitRule: limitRule, ID: ci})
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
@@ -230,6 +237,12 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 		proto = "raw"
 	}
 	p.reach(PathRawTLS)
+	// Non-HTTP inside TLS shows no requests either: charge the per-user limit
+	// once, before the dial (d is deferNone here, a policy Allow).
+	limitRule, denied := p.passthroughUserLimit(ci, domain, port)
+	if denied {
+		return
+	}
 	// Register like a tunnel so a block-list or agent cut reaches this path, and
 	// never dial for a session the registry already refused.
 	var sess *session
@@ -258,9 +271,10 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 		Port:      port,
 		Protocol:  proto,
 		Decision:  "allow",
+		LimitRule: limitRule,
 	})
 	p.cfg.Metrics.RecordRequest("allow", proto)
-	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: proto, Decision: "allow", ID: ci})
+	p.logDecision(decisionLog{Domain: domain, Port: port, Protocol: proto, Decision: "allow", LimitRule: limitRule, ID: ci})
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {

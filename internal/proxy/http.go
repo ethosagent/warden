@@ -137,13 +137,19 @@ type requestScope struct {
 	idHeaderClaims identity.Claims
 	subject        *identity.Subject
 
-	// Decision state threaded between stages.
-	judgeReason string
-	wasMCP      bool
-	mcpTool     string
-	mcpReason   string
-	mcpSessKey  string
-	closeAfter  bool
+	// Decision state threaded between stages. policyAllowed is set by
+	// constraintGate when the policy verdict for this request was Allow (not
+	// NoMatch): only then does userLimitStage charge a per-user limit.
+	// limitRule is the per-user limit rule that stage resolved; it rides every
+	// event of the request.
+	policyAllowed bool
+	limitRule     string
+	judgeReason   string
+	wasMCP        bool
+	mcpTool       string
+	mcpReason     string
+	mcpSessKey    string
+	closeAfter    bool
 
 	// sess is the connection's registry session (nil for none): blockStage binds
 	// the request's identities to it.
@@ -457,6 +463,9 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 	if p.constraintGate(s) {
 		return true
 	}
+	if p.userLimitStage(s) {
+		return true
+	}
 	if p.judgeGate(s) {
 		return true
 	}
@@ -558,7 +567,10 @@ func (p *Proxy) constraintGate(s *requestScope) (endSession bool) {
 	})
 	p.recordScoped(verdict)
 	switch verdict.Decision {
-	case policy.Allow, policy.NoMatch:
+	case policy.Allow:
+		s.policyAllowed = true
+		return false
+	case policy.NoMatch:
 		return false
 	}
 	// Deny and Conditional are terminal, and anything else fails closed here.
@@ -1365,13 +1377,14 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			LatencyMs:      s.latencyMs(),
 			SwappedRefs:    s.swappedNames,
 			Evidence:       s.evidence,
+			LimitRule:      s.limitRule,
 		})
 		p.cfg.Metrics.RecordRequest("allow", "mcp")
 		p.logDecision(decisionLog{
 			Domain: s.domain, Port: s.port, Protocol: "mcp",
 			Method: s.req.Method, URL: fullURL, Decision: "allow",
-			ResponseStatus: s.resp.StatusCode,
-			ID:             s.resolved(),
+			ResponseStatus: s.resp.StatusCode, LimitRule: s.limitRule,
+			ID: s.resolved(),
 		})
 	}
 
@@ -1548,6 +1561,7 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 		LatencyMs:   s.latencyMs(),
 		SwappedRefs: s.swappedNames,
 		Evidence:    s.evidence,
+		LimitRule:   s.limitRule,
 	})
 	p.cfg.Metrics.RecordRequest("allow", proto)
 	for _, name := range s.swappedNames {
@@ -1557,7 +1571,7 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 		Domain: s.domain, Port: s.port, Protocol: proto,
 		Method: s.req.Method, URL: fullURL, Decision: "allow",
 		ResponseStatus: s.resp.StatusCode, SecretRef: secretRef,
-		JudgeReason: s.judgeReason, ID: s.resolved(),
+		JudgeReason: s.judgeReason, LimitRule: s.limitRule, ID: s.resolved(),
 	})
 }
 

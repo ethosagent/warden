@@ -141,7 +141,10 @@ type sinkRecorder struct {
 
 func (r *sinkRecorder) errorResponse(status int, text string) { r.status, r.body = status, text }
 func (r *sinkRecorder) errorJSON(status int, body string)     { r.status, r.body = status, body }
-func (r *sinkRecorder) relay(*http.Response) error            { return nil }
+func (r *sinkRecorder) errorJSONRetry(status int, body string, _ int) {
+	r.status, r.body = status, body
+}
+func (r *sinkRecorder) relay(*http.Response) error { return nil }
 func (r *sinkRecorder) stream(*http.Response) (io.Writer, error) {
 	return io.Discard, nil
 }

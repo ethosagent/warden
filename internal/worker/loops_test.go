@@ -13,6 +13,7 @@ import (
 	"github.com/ethosagent/warden/internal/clock"
 	"github.com/ethosagent/warden/internal/clock/clocktest"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/policy"
 )
 
@@ -97,6 +98,20 @@ func (e *recordingEvaluator) EvaluateRequest(string, int, policy.Scheme, string,
 }
 
 func (e *recordingEvaluator) IsBlocked(string, string) bool { return false }
+
+func (e *recordingEvaluator) ChargeUserLimit(policy.RequestContext, string) policy.RequestVerdict {
+	return policy.RequestVerdict{Decision: policy.Allow}
+}
+
+func (e *recordingEvaluator) PeekUserLimit(policy.RequestContext, string) policy.RequestVerdict {
+	return policy.RequestVerdict{Decision: policy.Allow}
+}
+
+func (e *recordingEvaluator) MatchUserLimit(*identity.Subject, string, string) (policy.UserLimitRule, bool) {
+	return policy.UserLimitRule{}, false
+}
+
+func (e *recordingEvaluator) IsCostBlocked(string, string, time.Time) bool { return false }
 
 func (e *recordingEvaluator) EvaluateFor(policy.RequestContext) policy.RequestVerdict {
 	return policy.RequestVerdict{}
