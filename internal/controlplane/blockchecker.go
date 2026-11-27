@@ -3,9 +3,12 @@ package controlplane
 import (
 	"context"
 	"errors"
+
+	"github.com/ethosagent/warden/internal/oauthbroker"
+	"github.com/ethosagent/warden/internal/tokensvc"
 )
 
-// ErrBlockListNotReady is returned by TokenBlockChecker before the block list
+// ErrBlockListNotReady is returned by BlockChecker before the block list
 // has loaded: the answer is unknown, so the token service refuses.
 var ErrBlockListNotReady = errors.New("controlplane: block list not loaded")
 
@@ -20,23 +23,10 @@ type BlockChecker struct {
 	store *BlockStore
 }
 
-// TokenBlockChecker and BrokerBlockChecker are the names the token service and
-// the broker wiring used before the adapter was shared.
-type (
-	TokenBlockChecker  = BlockChecker
-	BrokerBlockChecker = BlockChecker
-)
-
 // NewBlockChecker returns the adapter over store.
 func NewBlockChecker(store *BlockStore) *BlockChecker {
 	return &BlockChecker{store: store}
 }
-
-// NewTokenBlockChecker returns the adapter over store.
-func NewTokenBlockChecker(store *BlockStore) *BlockChecker { return NewBlockChecker(store) }
-
-// NewBrokerBlockChecker returns the adapter over store.
-func NewBrokerBlockChecker(store *BlockStore) *BlockChecker { return NewBlockChecker(store) }
 
 // IsBlocked reports whether sub (exact) or email (lowercased by the store) is
 // blocked. A store that has not loaded yet is an error, never "not blocked".
@@ -49,3 +39,8 @@ func (c *BlockChecker) IsBlocked(ctx context.Context, sub, email string) (bool, 
 	}
 	return c.store.IsBlocked(sub, email), nil
 }
+
+var (
+	_ tokensvc.BlockChecker    = (*BlockChecker)(nil)
+	_ oauthbroker.BlockChecker = (*BlockChecker)(nil)
+)

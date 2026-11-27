@@ -47,8 +47,6 @@ func checkOAuthBrokerStore(c *config.ConsentConfig, st secrets.SecretStore) erro
 	return errBrokerNeedsStore
 }
 
-var _ oauthbroker.BlockChecker = (*BrokerBlockChecker)(nil)
-
 // initBroker builds the connect routes' broker when every gate input is
 // present; otherwise s.broker stays nil and /connect/* is 404.
 func (s *Server) initBroker() {

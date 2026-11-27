@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/oauthbroker"
 	"github.com/ethosagent/warden/internal/oauthbroker/oauthbrokertest"
 	"github.com/ethosagent/warden/internal/portal"
 	"github.com/ethosagent/warden/test/fakes"
@@ -31,12 +32,13 @@ func (keepSessionsStore) DeleteByEmail(context.Context, string) (int, error) { r
 // test can inspect.
 type blockedRig struct {
 	*portalRig
-	ex     *stubExchange
-	vault  *fakes.MemorySecretStore
-	rec    *fakeRecorder
-	cookie *http.Cookie
-	state  string
-	cc     *http.Cookie
+	ex        *stubExchange
+	vault     *fakes.MemorySecretStore
+	rec       *fakeRecorder
+	cookie    *http.Cookie
+	state     string
+	pendingID string
+	cc        *http.Cookie
 }
 
 func newBlockedRig(t *testing.T) *blockedRig {
@@ -49,10 +51,11 @@ func newBlockedRig(t *testing.T) *blockedRig {
 	// The user's pending: a JIT request waiting for the connect to finish.
 	pend := oauthbrokertest.NewPending("pat", "google", "drive.readonly")
 	pend.Iss, pend.UserKey = r.idp.Issuer(), mustUserKey(t, r, "pat")
-	if _, err := r.srv.cfg.GrantStore.CreatePending(context.Background(), pend, time.Hour); err != nil {
+	created, err := r.srv.cfg.GrantStore.CreatePending(context.Background(), pend, time.Hour)
+	if err != nil {
 		t.Fatalf("CreatePending: %v", err)
 	}
-	return &blockedRig{portalRig: r, ex: ex, vault: vault, rec: rec, cookie: c, state: state, cc: cc}
+	return &blockedRig{portalRig: r, ex: ex, vault: vault, rec: rec, cookie: c, state: state, cc: cc, pendingID: created.ID}
 }
 
 // writes is every table and store the refusals must leave alone.
@@ -88,9 +91,9 @@ func TestBlockedUserRefusals(t *testing.T) {
 		if rec.Code != http.StatusForbidden || errBody(t, rec) != portal.CodeUserBlocked {
 			t.Fatalf("GET /portal/api/me = %d %s, want 403 user_blocked", rec.Code, rec.Body)
 		}
-		rec = b.portalReq(http.MethodPost, "/portal/api/logout", "", map[string]string{CSRFHeader: portalCSRF(b.cookie)}, b.cookie)
+		rec = b.portalReq(http.MethodPost, portalLogoutPath, "", map[string]string{CSRFHeader: portalCSRF(b.cookie)}, b.cookie)
 		if rec.Code != http.StatusForbidden || errBody(t, rec) != portal.CodeUserBlocked {
-			t.Fatalf("POST /portal/api/logout = %d %s, want 403 user_blocked", rec.Code, rec.Body)
+			t.Fatalf("POST /portal/logout = %d %s, want 403 user_blocked", rec.Code, rec.Body)
 		}
 	})
 	t.Run("portal page shows no session", func(t *testing.T) {
@@ -105,6 +108,12 @@ func TestBlockedUserRefusals(t *testing.T) {
 			t.Fatalf("POST /connect/start = %d %s, want 403 user_blocked", rec.Code, rec.Body)
 		}
 	})
+	t.Run("connect start GET", func(t *testing.T) {
+		rec := b.serve(http.MethodGet, "/connect/start?provider=google", b.cookie)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("GET /connect/start = %d %s, want 403", rec.Code, rec.Body)
+		}
+	})
 	t.Run("connect callback", func(t *testing.T) {
 		target := "/connect/callback?state=" + url.QueryEscape(b.state) + "&code=the-code"
 		rec := b.serve(http.MethodGet, target, b.cookie, b.cc)
@@ -113,6 +122,11 @@ func TestBlockedUserRefusals(t *testing.T) {
 		}
 		if b.ex.count() != 0 {
 			t.Fatal("a blocked user's code was exchanged at the provider")
+		}
+		// Current behaviour: the middleware refuses before the broker, so the
+		// open pending is left alone (OFFB-01 denies it during offboarding).
+		if p, err := b.srv.cfg.GrantStore.GetPending(context.Background(), b.pendingID); err != nil || p.Status != oauthbroker.StatusPending {
+			t.Fatalf("pending after the blocked callback = %+v, %v, want still pending", p, err)
 		}
 	})
 	t.Run("portal login", func(t *testing.T) {
@@ -130,8 +144,8 @@ func TestBlockedUserRefusals(t *testing.T) {
 	})
 	t.Run("audit rows", func(t *testing.T) {
 		denied := rowsByAction(b.rec, "connect.denied")
-		if len(denied) != 2 {
-			t.Fatalf("connect.denied rows = %d, want 2 (start, callback): %+v", len(denied), denied)
+		if len(denied) != 3 {
+			t.Fatalf("connect.denied rows = %d, want 3 (start, start GET, callback): %+v", len(denied), denied)
 		}
 		for _, in := range denied {
 			if in.Outcome != adminaudit.OutcomeDenied || in.Details["reason"] != "user_blocked" || in.Actor.Sub != "pat" ||

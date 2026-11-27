@@ -311,7 +311,7 @@ func (s *Server) auditConnectBlocked(r *http.Request, sess webauth.Session) {
 	ev := oauthbroker.AuditEvent{
 		Action: oauthbroker.AuditActionDenied, Outcome: oauthbroker.OutcomeDenied,
 		Reason: oauthbroker.ReasonUserBlocked, Status: http.StatusForbidden,
-		Sub: sess.Sub, Email: sess.Email,
+		Sub: sess.Sub, Email: sess.Email, Provider: oauthbroker.UnknownProviderLabel,
 	}
 	if err := (brokerAudit{s: s}).Record(r.Context(), ev); err != nil {
 		s.cfg.Logger.Error("connect: audit append failed", "action", ev.Action)
