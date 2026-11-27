@@ -162,6 +162,12 @@ type requestScope struct {
 	// Event.SwappedRefs.
 	refs         []secrets.Reference
 	swappedNames []string
+	// userTokenProvider / userTokenRetried are set by the per-user swap
+	// (W-P3-PUS-04) and the 401 retry (W-P3-PUS-05); recorded on the allow event
+	// as Event.UserTokenProvider / UserTokenRetried. A registered provider id
+	// only, never a token or ref.
+	userTokenProvider string
+	userTokenRetried  bool
 
 	// echoSecrets are the exact real values put into THIS request (swapped
 	// placeholders and auth-transformer injections); the echo guard checks the
@@ -1548,6 +1554,9 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 		LatencyMs:   s.latencyMs(),
 		SwappedRefs: s.swappedNames,
 		Evidence:    s.evidence,
+
+		UserTokenProvider: s.userTokenProvider,
+		UserTokenRetried:  s.userTokenRetried,
 	})
 	p.cfg.Metrics.RecordRequest("allow", proto)
 	for _, name := range s.swappedNames {
