@@ -83,8 +83,13 @@ type requestScope struct {
 	// upstream conn (upstream + its upstreamBR) is owned by the SESSION, not the
 	// request: handleHTTP carries it across keep-alive iterations for reuse and
 	// closes it exactly once when the session ends, so cleanup never touches it.
-	req        *http.Request
-	resp       *http.Response
+	req  *http.Request
+	resp *http.Response
+	// reqCount and respCount count the request-body bytes forwarded upstream and
+	// the response-body bytes read back, for cost estimates when the message has
+	// no Content-Length (chunked, SSE, gRPC). Counts only; never content.
+	reqCount   countingReadCloser
+	respCount  countingReadCloser
 	upstream   net.Conn
 	upstreamBR *bufio.Reader
 	// reused is true when upstream was carried over from a prior keep-alive
@@ -1121,6 +1126,7 @@ func (p *Proxy) applyTransforms(s *requestScope) (endSession bool) {
 // On success s.upstream/s.upstreamBR are the live conn the session carries. On a
 // stale redial they are the fresh conn; the dead one was already closed here.
 func (p *Proxy) forward(s *requestScope) (endSession bool) {
+	s.countRequestBody()
 	if s.rt != nil {
 		return p.forwardH2(s)
 	}
@@ -1208,6 +1214,7 @@ func (p *Proxy) readUpstreamResponse(s *requestScope) (ok bool) {
 		return false
 	}
 	s.resp = resp
+	s.countResponseBody()
 	s.closeAfter = s.req.Close || resp.Close
 	return true
 }
@@ -1393,6 +1400,7 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			Evidence:       s.evidence,
 		})
 	} else {
+		costUSD, provider := p.estimateCost(s)
 		p.recordEvent(s.resolved(), analytics.Event{
 			Timestamp:      time.Now(),
 			Domain:         s.domain,
@@ -1402,6 +1410,8 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			URL:            fullURL,
 			Decision:       "allow",
 			ResponseStatus: s.resp.StatusCode,
+			CostUSD:        costUSD,
+			Provider:       provider,
 			Tool:           s.mcpTool,
 			Reason:         preferEchoReason(s.mcpReason, s.echoMonitorReason),
 			LatencyMs:      s.latencyMs(),
@@ -1518,6 +1528,46 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 	return false
 }
 
+// countRequestBody wraps the outgoing request body in the byte counter when its
+// length is unknown (chunked upload, gRPC stream). It runs after every stage
+// (and so after the secret swap) has settled the body, immediately before the
+// body is sent upstream. A known length is used as-is and is never wrapped.
+func (s *requestScope) countRequestBody() {
+	if s.req.ContentLength < 0 && s.req.Body != nil && s.req.Body != http.NoBody {
+		s.req.Body = s.reqCount.wrap(s.req.Body)
+	}
+}
+
+// countResponseBody wraps the upstream response body in the byte counter when
+// its length is unknown (chunked, SSE, gRPC, read-to-close).
+func (s *requestScope) countResponseBody() {
+	if s.resp.ContentLength < 0 && s.resp.Body != nil && s.resp.Body != http.NoBody {
+		s.resp.Body = s.respCount.wrap(s.resp.Body)
+	}
+}
+
+// estimateCost prices the request from Content-Length where known and from the
+// bytes actually relayed where it is not, so streamed LLM responses are no
+// longer recorded at $0. Zero when cost tracking is off or the domain is not a
+// known provider.
+func (p *Proxy) estimateCost(s *requestScope) (costUSD float64, provider string) {
+	if p.cfg.Cost == nil || s.resp == nil {
+		return 0, ""
+	}
+	reqBytes := s.req.ContentLength
+	if reqBytes < 0 {
+		reqBytes = s.reqCount.count()
+	}
+	respBytes := s.resp.ContentLength
+	if respBytes < 0 {
+		respBytes = s.respCount.count()
+	}
+	if est := p.cfg.Cost.Estimate(s.domain, reqBytes, respBytes); est != nil {
+		return est.TotalCost, est.Provider
+	}
+	return 0, ""
+}
+
 // recordAllowEvent writes the single allow audit event for a forwarded request:
 // the by-reference secret list, optional cost estimate, MCP tool/reason, and any
 // judge reason — exactly one StoreEvent per allowed request. It also emits the
@@ -1545,22 +1595,7 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 	// Cost estimate (optional). Heuristic dollar figure from observed
 	// request/response Content-Length and the destination provider's pricing;
 	// zero when cost tracking is off or the domain is not a known provider.
-	var costUSD float64
-	var provider string
-	if p.cfg.Cost != nil {
-		reqBytes := s.req.ContentLength
-		if reqBytes < 0 {
-			reqBytes = 0
-		}
-		respBytes := s.resp.ContentLength
-		if respBytes < 0 {
-			respBytes = 0
-		}
-		if est := p.cfg.Cost.Estimate(s.domain, reqBytes, respBytes); est != nil {
-			costUSD = est.TotalCost
-			provider = est.Provider
-		}
-	}
+	costUSD, provider := p.estimateCost(s)
 	p.recordEvent(s.resolved(), analytics.Event{
 		Timestamp:      time.Now(),
 		Domain:         s.domain,
