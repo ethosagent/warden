@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/test/fakes"
 	"github.com/ethosagent/warden/test/harness"
 )
@@ -186,7 +187,8 @@ func identityRequireBoot(t *testing.T, h *harness.H) {
 // request on the spent token is refused. The worker's session expiry loop runs
 // on the harness clock (worker.Overrides.Clock), so the test drives it by
 // condition: it advances the clock until the cut is observed, never by a fixed
-// amount.
+// amount. The spent-token check then moves the clock past exp plus the
+// verifier's skew, the point where a fresh CONNECT with it is refused.
 func identityRequireSessionExpiry(t *testing.T, h *harness.H) {
 	good := bootSetup(t, h)
 	enterRequire(t, h)
@@ -230,6 +232,18 @@ func identityRequireSessionExpiry(t *testing.T, h *harness.H) {
 	if h.MetricsAvailable() {
 		key := harness.MetricKey("warden.blocked.total", map[string]string{"reason": "identity_expired"})
 		h.Eventually("warden.blocked.total{identity_expired} to count the cut", func() bool { return h.Metrics()[key] >= 1 })
+	}
+	// The cut lands at exp, but the verifier accepts the token for its clock
+	// skew past exp, so a fresh CONNECT inside that window is admitted by design
+	// (a "late" session). Where the clock stands now depends on which Eventually
+	// iteration saw the cut: the one whose Advance crossed exp (clock under
+	// exp+skew) or a later one. Move it past exp+skew so the token is spent on
+	// every run. The CONNECT and the per-request check read the clock directly,
+	// so no loop has to catch up after this Advance.
+	_, claims := verifyWardenToken(t, h, good)
+	spent := time.Unix(claims.Exp, 0).Add(identity.DefaultClockSkew)
+	if d := spent.Sub(h.Clock().Now()); d >= 0 {
+		h.Clock().Advance(d + time.Second)
 	}
 	if st, err := get("/spent"); err == nil && st == http.StatusOK {
 		t.Errorf("a request with the spent token = %d, want it refused", st)
