@@ -121,20 +121,20 @@ func validateMatchPattern(ctx, pattern string) error {
 }
 
 // reservedAuthField returns the first credential field of e that names a key in
-// the reserved cp/ secret namespace (W-P2-WCA-07), so an auth entry cannot be
-// pointed at control-plane material. It returns only the field name, never the
-// value.
-func reservedAuthField(e AuthEntry) (string, bool) {
+// a reserved secret namespace (cp/, W-P2-WCA-07; the per-user namespaces,
+// W-P3-CSIG-06), so an auth entry cannot be pointed at control-plane material.
+// It returns only the field and namespace names, never the value.
+func reservedAuthField(e AuthEntry) (field, namespace string, ok bool) {
 	for _, f := range []struct{ name, val string }{
 		{"clientID", e.ClientID}, {"clientSecret", e.ClientSecret},
 		{"accessKeyID", e.AccessKeyID}, {"secretAccessKey", e.SecretAccessKey},
 		{"sessionToken", e.SessionToken}, {"secret", e.Secret}, {"value", e.Value},
 	} {
-		if IsReservedSecretKey(f.val) {
-			return f.name, true
+		if ns, ok := ReservedSecretNamespaceOf(f.val); ok {
+			return f.name, ns, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // validateAuth enforces structural requirements per transform type. Credential
@@ -146,8 +146,8 @@ func validateAuth(entries []AuthEntry) error {
 		if err := validateMatchPattern(ctx, e.Match); err != nil {
 			return err
 		}
-		if field, ok := reservedAuthField(e); ok {
-			return fmt.Errorf("config: %s: %s names the reserved %q secret namespace", ctx, field, ReservedSecretNamespace+"/")
+		if field, ns, ok := reservedAuthField(e); ok {
+			return fmt.Errorf("config: %s: %s names the reserved %q secret namespace", ctx, field, ns+"/")
 		}
 		switch e.Type {
 		case AuthOAuth2ClientCredentials:

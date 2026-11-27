@@ -277,6 +277,10 @@ var All = slices.Concat(
 		// cp/ secret namespace reserved (W-P2-WCA-07): hidden from the list,
 		// POST and DELETE refused with 403 reserved_key.
 		{Name: "reserved_secret_namespace", Opts: strictAuthOpts(), Run: reservedSecretNamespace},
+		// Per-user credential namespaces reserved (W-P3-CSIG-06): idp/, users/,
+		// revoking/ and oauth-clients/ are hidden from the list and refused on
+		// POST and DELETE with 403 reserved_key.
+		{Name: "reserved_user_secret_namespaces", Opts: strictAuthOpts(), Run: reservedUserSecretNamespaces},
 		// Held long-poll (W-P1-WTOK-09): a revoke out of process returns that
 		// token's held /policy with 401 while another token's stays parked.
 		{Name: "worker_token_longpoll_revoke", Opts: workerTokenOpts(), Run: workerTokenLongPollRevoke},
