@@ -2735,9 +2735,15 @@ With the default prefix the backend name of `idp/<userKey>` is
   environment or instance role only (env, then IMDS); the Vault token is read
   from the CP environment variable named by `tokenEnv`. The block has no key or
   token field, and the strict parser rejects one.
+- **Persistence.** With `consent.idpLink.enabled` (the default) the control
+  plane refuses to start unless `consent.store` is configured with a backend
+  that keeps values (aws today); no store and `echo` are refused, naming
+  `consent.idpLink.enabled` and `consent.store.backend`. Set
+  `idpLink.enabled: false` to run consent sign-in without a store.
 - **Startup refusals.** The control plane refuses to start, naming both keys,
   when `consent.store.namePrefix` equals, starts with, or is a prefix of
-  `secretStore.aws.namePrefix` on the same backend. For AWS the region and
+  `secretStore.aws.namePrefix` on the same backend (compared after trimming,
+  case-insensitively, and with the default prefix filled in). For AWS the region and
   account are not taken into account: a worker grant on a prefix usually spans
   regions, and the account behind a credential is not known before calling AWS.
   It also refuses a `consent.store` that nests with `keys.store.aws.namePrefix`,
@@ -2755,23 +2761,33 @@ With the default prefix the backend name of `idp/<userKey>` is
 
 Give only the control plane's role access to `warden-cp/*`. Worker roles, and
 any credential you put in `secretStore.aws`, must never cover it. Example IAM
-statement for the control plane role (use your own prefix if you changed it;
+statements for the control plane role (use your own prefix if you changed it;
 keep `warden-cp/*` with the slash, so it does not also match
-`warden-cp-keys/`):
+`warden-cp-keys/`). `secretsmanager:ListSecrets` has no resource-level
+permissions, so it needs its own statement on `"*"`; listing returns names and
+metadata only, never values, and the names under `warden-cp/` carry only the
+pseudonymous `<userKey>` and provider ids, never a subject or email:
 
 ```json
-{
-  "Sid": "WardenCpUserCredentialStore",
-  "Effect": "Allow",
-  "Action": [
-    "secretsmanager:GetSecretValue",
-    "secretsmanager:PutSecretValue",
-    "secretsmanager:CreateSecret",
-    "secretsmanager:DeleteSecret",
-    "secretsmanager:ListSecrets"
-  ],
-  "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp/*"
-}
+[
+  {
+    "Sid": "WardenCpUserCredentialStore",
+    "Effect": "Allow",
+    "Action": [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:PutSecretValue",
+      "secretsmanager:CreateSecret",
+      "secretsmanager:DeleteSecret"
+    ],
+    "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp/*"
+  },
+  {
+    "Sid": "WardenCpListSecrets",
+    "Effect": "Allow",
+    "Action": "secretsmanager:ListSecrets",
+    "Resource": "*"
+  }
+]
 ```
 
 And an explicit deny on every worker role, so it holds even if a later grant
