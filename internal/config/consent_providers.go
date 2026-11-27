@@ -242,6 +242,11 @@ func validateOAuthProvider(i int, p OAuthProviderConfig) error {
 			return err
 		}
 	}
+	if (p.Type == OAuthProviderGitHub || p.Type == OAuthProviderGitHubApp) && p.RevokeURL != "" {
+		if ru, err := url.Parse(p.RevokeURL); err != nil || !strings.HasSuffix(ru.Path, "/applications/{client_id}/grant") {
+			return fmt.Errorf("config: %s must end in /applications/{client_id}/grant for a github provider", f("revokeURL"))
+		}
+	}
 	if (p.Type == OAuthProviderGitHub || p.Type == OAuthProviderGitHubApp) && p.RevokeURL == "" {
 		// The built-in revoke URL is api.github.com; against a GitHub
 		// Enterprise Server it would answer 404 and leave the token live.

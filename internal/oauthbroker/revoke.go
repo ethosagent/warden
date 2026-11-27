@@ -157,6 +157,13 @@ func (p *Provider) countRevoke(outcome string) {
 // the user with client basic auth, which removes EVERY token of that OAuth app
 // for the user, not only rec. generic is RFC 7009 with client_secret_basic.
 //
+// For github and githubApp with a refreshable record near or past its expiry,
+// Revoke refreshes internally and the refreshed tokens are never persisted, so
+// callers must treat the stored record as consumed after ANY call (a retry
+// then sees the old refresh token rejected; Revoke handles that by trying the
+// stored access token). The whole call, refresh included, is bounded by
+// RevokeTimeout.
+//
 // userKey is for the log line only. Tokens, the secret and response bodies
 // never appear in a log line or an error.
 func Revoke(ctx context.Context, p *Provider, rec TokenRecord, clientSecret Secret, userKey string) error {
@@ -196,7 +203,12 @@ func (p *Provider) revoke(ctx context.Context, rec TokenRecord, secret Secret) (
 		return fail(0)
 	}
 
+	// One deadline covers the inner refresh and the DELETE(s).
+	ctx, cancel := context.WithTimeout(ctx, RevokeTimeout)
+	defer cancel()
+
 	var req Request
+	refreshed := false
 	req.Method, req.URL = "POST", endpoint
 	switch p.Type {
 	case config.OAuthProviderGoogle:
@@ -210,15 +222,19 @@ func (p *Provider) revoke(ctx context.Context, rec TokenRecord, secret Secret) (
 		// GitHub's grant endpoint takes the access token (a refresh token is
 		// not accepted) and the client credentials as basic auth.
 		access := rec.AccessToken
-		if rec.Expiry > 0 && rec.RefreshToken != "" && p.now != nil && rec.Expiry < p.now().UTC().Unix() {
+		if rec.Expiry > 0 && rec.RefreshToken != "" && p.now != nil && rec.Expiry <= p.now().UTC().Unix()+revokeExpirySkew {
 			// An expired token would 404 as "already revoked" while the grant
 			// lives on, so mint a fresh access token first. It is not persisted.
 			fresh, rErr := p.refresh(ctx, rec, secret)
 			switch {
 			case rErr == nil:
-				access = fresh.AccessToken
+				access, refreshed = fresh.AccessToken, true
 			case errors.Is(rErr, ErrRefreshInvalidGrant):
-				return 0, RevokeAlready, nil
+				// The refresh token is dead, but the stored access token may
+				// still be live: try it and classify the DELETE normally.
+				if p.logger != nil {
+					p.logger.Info("oauth_revoke_refresh", "provider", p.ID, "reason", "refresh_invalid_grant")
+				}
 			case errors.Is(rErr, ErrBlockedDestination):
 				return 0, RevokeFailed, &RevokeError{Provider: p.ID, blocked: true}
 			case errors.Is(rErr, ErrRefreshRetryable):
@@ -250,10 +266,13 @@ func (p *Provider) revoke(ctx context.Context, rec TokenRecord, secret Secret) (
 		req.BasicUser, req.BasicPass = url.QueryEscape(p.ClientID), url.QueryEscape(secret.Reveal())
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, RevokeTimeout)
-	defer cancel()
 	req.MaxBytes = MaxRevokeResponseBytes
 	status, body, derr := rq.Do(ctx, req)
+	if refreshed && revokeRetryable(status, derr) {
+		// The refreshed (possibly rotated) refresh token is not persisted, so a
+		// caller retry would see invalid_grant: retry the DELETE here once.
+		status, body, derr = rq.Do(ctx, req)
+	}
 	if derr != nil {
 		var be *BlockedError
 		if errors.As(derr, &be) {
@@ -286,6 +305,19 @@ func (p *Provider) revoke(ctx context.Context, rec TokenRecord, secret Secret) (
 		}
 	}
 	return fail(status)
+}
+
+// revokeExpirySkew is the margin before Expiry at which a GitHub record is
+// refreshed before its DELETE.
+const revokeExpirySkew = 60
+
+// revokeRetryable: a transport failure (not an SSRF block), 429 or 5xx.
+func revokeRetryable(status int, err error) bool {
+	if err != nil {
+		var be *BlockedError
+		return !errors.As(err, &be)
+	}
+	return status == 429 || status >= 500
 }
 
 // githubNotFound reports whether a 404 from a github or githubApp revoke means

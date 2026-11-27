@@ -368,20 +368,24 @@ func TestRevoke404IsFailureForGoogleAndGeneric(t *testing.T) {
 
 func TestRevokeGitHubExpiredRecord(t *testing.T) {
 	var revokedWith string
-	var tokenReply func(w http.ResponseWriter)
+	var tokenReply, revokeReply func(w http.ResponseWriter)
+	var revokes int
 	var f *revokeFixture
 	f = newRevokeFixture(t, "github", "/applications/{client_id}/grant", nil, func(w http.ResponseWriter) {
 		if f.srv.path == "/token" {
 			tokenReply(w)
 			return
 		}
+		revokes++
 		var b map[string]string
 		_ = json.Unmarshal([]byte(f.srv.body), &b)
 		revokedWith = b["access_token"]
-		w.WriteHeader(204)
+		revokeReply(w)
 	})
 	p := f.provider(t)
+	reset := func() { revokedWith, revokes = "", 0 }
 
+	revokeReply = status(204, "")
 	tokenReply = status(200, `{"access_token":"`+tNewAcc+`","expires_in":3600}`)
 	if err := Revoke(t.Context(), p, storedRecord(), f.secret, "uk"); err != nil {
 		t.Fatal(err)
@@ -390,17 +394,27 @@ func TestRevokeGitHubExpiredRecord(t *testing.T) {
 		t.Fatalf("must revoke with the refreshed access token, got %q", revokedWith)
 	}
 
-	revokedWith = ""
-	hits := f.srv.hits.Load()
+	// Invalid refresh token: still DELETE with the stored access token.
+	reset()
 	tokenReply = status(400, `{"error":"bad_refresh_token"}`)
-	if err := Revoke(t.Context(), p, storedRecord(), f.secret, "uk"); err != nil {
-		t.Fatalf("invalid refresh token means already revoked: %v", err)
+	if err := Revoke(t.Context(), p, storedRecord(), f.secret, "uk"); err != nil || revokedWith != tAccess || revokes != 1 {
+		t.Fatalf("must still send the stored access token: err=%v with=%q", err, revokedWith)
 	}
-	if revokedWith != "" || f.srv.hits.Load() != hits+1 || f.reg.RevokeCounters().Count("prov", RevokeAlready) != 1 {
-		t.Fatalf("expected only the refresh call and outcome already: with=%q", revokedWith)
+	reset()
+	revokeReply = status(404, `{"message":"Not Found"}`)
+	if err := Revoke(t.Context(), p, storedRecord(), f.secret, "uk"); err != nil || f.reg.RevokeCounters().Count("prov", RevokeAlready) != 1 {
+		t.Fatalf("404 after dead refresh token is already: %v", err)
+	}
+	revokeReply = status(401, "")
+	var re *RevokeError
+	if err := Revoke(t.Context(), p, storedRecord(), f.secret, "uk"); !errors.As(err, &re) || re.Retryable {
+		t.Fatalf("401 after dead refresh token must fail: %v", err)
+	}
+	if !strings.Contains(f.logs.String(), `"reason":"refresh_invalid_grant"`) {
+		t.Fatalf("missing refresh_invalid_grant log: %s", f.logs.String())
 	}
 
-	var re *RevokeError
+	revokeReply = status(204, "")
 	tokenReply = status(503, "")
 	if err := Revoke(t.Context(), p, storedRecord(), f.secret, "uk"); !errors.As(err, &re) || !re.Retryable {
 		t.Fatalf("retryable refresh must be retryable: %v", err)
@@ -408,6 +422,61 @@ func TestRevokeGitHubExpiredRecord(t *testing.T) {
 	tokenReply = status(400, `{"error":"invalid_client"}`)
 	if err := Revoke(t.Context(), p, storedRecord(), f.secret, "uk"); !errors.As(err, &re) || re.Retryable {
 		t.Fatalf("permanent refresh failure must be permanent: %v", err)
+	}
+}
+
+func TestRevokeGitHubExpirySkew(t *testing.T) {
+	var tokenHits int
+	var f *revokeFixture
+	f = newRevokeFixture(t, "github", "/applications/{client_id}/grant", nil, func(w http.ResponseWriter) {
+		if f.srv.path == "/token" {
+			tokenHits++
+			status(200, `{"access_token":"`+tNewAcc+`","expires_in":3600}`)(w)
+			return
+		}
+		w.WriteHeader(204)
+	})
+	rec := storedRecord()
+	rec.Expiry = refreshNow.Unix() + 30 // inside the 60s margin
+	if err := Revoke(t.Context(), f.provider(t), rec, f.secret, "uk"); err != nil || tokenHits != 1 {
+		t.Fatalf("a token about to expire must refresh first: err=%v hits=%d", err, tokenHits)
+	}
+	rec.Expiry = refreshNow.Unix() + 120
+	if err := Revoke(t.Context(), f.provider(t), rec, f.secret, "uk"); err != nil || tokenHits != 1 {
+		t.Fatalf("a token outside the margin must not refresh: err=%v hits=%d", err, tokenHits)
+	}
+}
+
+func TestRevokeGitHubRetriesDeleteAfterRefresh(t *testing.T) {
+	var revokes int
+	var seen []string
+	var f *revokeFixture
+	f = newRevokeFixture(t, "github", "/applications/{client_id}/grant", nil, func(w http.ResponseWriter) {
+		if f.srv.path == "/token" {
+			status(200, `{"access_token":"`+tNewAcc+`","expires_in":3600}`)(w)
+			return
+		}
+		revokes++
+		var b map[string]string
+		_ = json.Unmarshal([]byte(f.srv.body), &b)
+		seen = append(seen, b["access_token"])
+		if revokes == 1 {
+			w.WriteHeader(503)
+			return
+		}
+		w.WriteHeader(204)
+	})
+	if err := Revoke(t.Context(), f.provider(t), storedRecord(), f.secret, "uk"); err != nil {
+		t.Fatalf("DELETE must be retried once after a refresh: %v", err)
+	}
+	if revokes != 2 || seen[0] != tNewAcc || seen[1] != tNewAcc {
+		t.Fatalf("revokes=%d tokens=%v", revokes, seen)
+	}
+	// Without a refresh there is no extra DELETE.
+	f3 := newRevokeFixture(t, "github", "/applications/{client_id}/grant", nil, status(503, ""))
+	var re *RevokeError
+	if err := Revoke(t.Context(), f3.provider(t), liveRecord(), f3.secret, "uk"); !errors.As(err, &re) || !re.Retryable || f3.srv.hits.Load() != 1 {
+		t.Fatalf("no refresh means a single DELETE: %v hits=%d", err, f3.srv.hits.Load())
 	}
 }
 

@@ -55,6 +55,8 @@ func TestConsentProvidersValidate(t *testing.T) {
 		{"relative url", prov("      type: github\n      tokenURL: /token\n"), "consent.providers[0].tokenURL"},
 		{"ghes tokenURL without revokeURL", prov("      type: github\n      authURL: https://ghe.example.com/auth\n      tokenURL: https://ghe.example.com/token\n"), "consent.providers[0].revokeURL"},
 		{"ghes githubApp tokenURL without revokeURL", prov("      type: githubApp\n      tokenURL: https://ghe.example.com/token\n"), "revokeURL is required for GitHub Enterprise"},
+		{"github revokeURL wrong path", prov("      type: github\n      revokeURL: https://api.github.com/applications/grant\n"), "must end in /applications/{client_id}/grant"},
+		{"githubApp revokeURL wrong path", prov("      type: githubApp\n      revokeURL: https://ghe.example.com/revoke\n"), "consent.providers[0].revokeURL"},
 		{"ghes with revokeURL ok", prov("      type: github\n      tokenURL: https://ghe.example.com/token\n      revokeURL: https://ghe.example.com/api/v3/applications/{client_id}/grant\n"), ""},
 		{"github.com explicit urls ok", prov("      type: github\n      tokenURL: https://github.com/login/oauth/access_token\n"), ""},
 		{"revoke template ok", prov("      type: github\n      revokeURL: https://ghe.example.com/applications/{client_id}/grant\n"), ""},
