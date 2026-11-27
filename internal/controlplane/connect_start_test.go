@@ -74,7 +74,7 @@ func TestConnectStartRoute(t *testing.T) {
 		t.Fatalf("Location = %q", rec.Header().Get("Location"))
 	}
 	q := loc.Query()
-	if q.Get("code_challenge_method") != "S256" || q.Get("redirect_uri") != "https://cp.example/connect/callback" || q.Get("scope") != "drive.readonly" {
+	if q.Get("code_challenge_method") != "S256" || q.Get("redirect_uri") != "https://cp.example/connect/callback" || q.Get("scope") != "drive.readonly email openid" {
 		t.Errorf("query = %v", q)
 	}
 	var cookie *http.Cookie
