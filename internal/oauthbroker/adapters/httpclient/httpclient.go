@@ -7,19 +7,19 @@
 // hard 10s cap, and caps response bodies at MaxBodyBytes+1.
 //
 // It is not a general provider client: the authorization-code exchange through
-// golang.org/x/oauth2 needs an *http.Client, and GitHub's revoke is a DELETE
-// with a JSON body, so those tickets build their own constructor over the same
-// SafeDialer policy.
+// golang.org/x/oauth2 needs an *http.Client (that ticket builds its own over
+// the same SafeDialer policy), while GitHub's revoke, a DELETE with a JSON
+// body, goes through Do on this transport.
 package httpclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/ethosagent/warden/internal/oauthbroker"
@@ -38,7 +38,10 @@ const MaxBodyBytes = oauthbroker.MaxProviderResponseBytes
 // Poster implements oauthbroker.FormPoster.
 type Poster struct{ rt http.RoundTripper }
 
-var _ oauthbroker.FormPoster = (*Poster)(nil)
+var (
+	_ oauthbroker.FormPoster = (*Poster)(nil)
+	_ oauthbroker.Requester  = (*Poster)(nil)
+)
 
 // New builds the Poster. allowPrivate lists CIDRs exempted from the SSRF
 // blocklist (an operator's GitHub Enterprise Server on a private network, or
@@ -66,14 +69,32 @@ func New(allowPrivate []string, resolver proxy.NameResolver) (*Poster, error) {
 
 // PostForm implements oauthbroker.FormPoster.
 func (p *Poster) PostForm(ctx context.Context, r oauthbroker.FormRequest) (int, []byte, error) {
+	return p.Do(ctx, oauthbroker.Request{
+		Method: http.MethodPost, URL: r.URL, Body: []byte(r.Form),
+		ContentType: "application/x-www-form-urlencoded",
+		BasicUser:   r.BasicUser, BasicPass: r.BasicPass,
+	})
+}
+
+// Do implements oauthbroker.Requester over the same hardened transport.
+func (p *Poster) Do(ctx context.Context, r oauthbroker.Request) (int, []byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, HardTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.URL, strings.NewReader(r.Form))
+	var body io.Reader
+	if len(r.Body) > 0 {
+		body = bytes.NewReader(r.Body)
+	}
+	req, err := http.NewRequestWithContext(ctx, r.Method, r.URL, body)
 	if err != nil {
 		return 0, nil, errBadRequest
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if len(r.Body) > 0 && r.ContentType != "" {
+		req.Header.Set("Content-Type", r.ContentType)
+	}
 	req.Header.Set("Accept", "application/json")
+	if r.Accept != "" {
+		req.Header.Set("Accept", r.Accept)
+	}
 	if r.BasicUser != "" {
 		req.SetBasicAuth(r.BasicUser, r.BasicPass)
 	}
