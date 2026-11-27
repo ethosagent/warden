@@ -27,6 +27,13 @@ const costDomain = "api.openai.com"
 // recorded allow event for the given protocol.
 func costEvent(t *testing.T, ct, reqBody, respBody string, chunked bool, proto string) analytics.Event {
 	t.Helper()
+	return costEventReq(t, ct, reqBody, false, respBody, chunked, proto)
+}
+
+// costEventReq is costEvent with a choice of request framing: chunkedReq sends
+// the request with Transfer-Encoding: chunked (ContentLength -1).
+func costEventReq(t *testing.T, ct, reqBody string, chunkedReq bool, respBody string, chunked bool, proto string) analytics.Event {
+	t.Helper()
 	caCertPEM, caKeyPEM, caCert, caKey := generateTestCA(t)
 	rb := &mcpBackend{respStatus: 200, respCT: ct, respBody: respBody, chunked: chunked}
 	backendLn := startMCPBackend(t, caCert, caKey, rb)
@@ -38,6 +45,10 @@ func costEvent(t *testing.T, ct, reqBody, respBody string, chunked bool, proto s
 	req, _ := http.NewRequest("POST", "https://"+costDomain+"/v1/x", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = int64(len(reqBody))
+	if chunkedReq {
+		req.ContentLength = -1
+		req.TransferEncoding = []string{"chunked"}
+	}
 	if err := req.Write(tlsClient); err != nil {
 		t.Fatal(err)
 	}
@@ -90,9 +101,25 @@ func TestCost_SSEResponseCounted(t *testing.T) {
 	for sb.Len() < 40000 {
 		sb.WriteString(sseEvent(`{"jsonrpc":"2.0","id":"0","result":{}}`))
 	}
-	e := costEvent(t, "text/event-stream", mcpToolsList, sb.String(), true, "mcp")
-	if e.CostUSD <= 0 || e.Provider != "openai" {
-		t.Fatalf("SSE response priced at %v (provider %q), want > 0", e.CostUSD, e.Provider)
+	sseBody := sb.String()
+	e := costEvent(t, "text/event-stream", mcpToolsList, sseBody, true, "mcp")
+	// Exact: the fixed-length request alone would already make the cost positive,
+	// so only the full value proves the streamed response bytes were counted.
+	want := cost.NewEstimator().Estimate(costDomain, int64(len(mcpToolsList)), int64(len(sseBody)))
+	if e.CostUSD != want.TotalCost || e.Provider != "openai" {
+		t.Fatalf("SSE cost %v (provider %q), want %v", e.CostUSD, e.Provider, want.TotalCost)
+	}
+}
+
+// TestCost_ChunkedRequestCounted: a chunked h1 upload (request ContentLength -1)
+// through the normal stage pipeline is priced from the bytes relayed upstream.
+func TestCost_ChunkedRequestCounted(t *testing.T) {
+	reqBody := strings.Repeat("q", 40000)
+	respBody := strings.Repeat("x", 4000)
+	e := costEventReq(t, "text/plain", reqBody, true, respBody, false, "https")
+	want := cost.NewEstimator().Estimate(costDomain, 40000, 4000)
+	if e.CostUSD != want.TotalCost || e.Provider != "openai" {
+		t.Fatalf("chunked request cost %v (provider %q), want %v", e.CostUSD, e.Provider, want.TotalCost)
 	}
 }
 
