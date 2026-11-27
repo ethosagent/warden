@@ -398,7 +398,7 @@ func TestHeartbeatCaps(t *testing.T) {
 	if strings.Contains(string(raw), "caps") {
 		t.Errorf("body without caps = %s, want no caps field", raw)
 	}
-	if got := WorkerCaps(); !slices.Equal(got, []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1, CapIdentityRequireV1, CapUserLimitsV1}) {
+	if got := WorkerCaps(); !slices.Equal(got, []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1, CapIdentityRequireV1, CapUserCostV1, CapUserLimitsV1}) {
 		t.Fatalf("WorkerCaps() = %v", got)
 	}
 	rp.SetCaps(WorkerCaps())
@@ -412,8 +412,8 @@ func TestHeartbeatCaps(t *testing.T) {
 	if err := json.Unmarshal(raw, &b); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(b.Caps, []string{"agentreg/v1", "blocklist/v1", "grouppolicy/v1", "identity/challenge-v1", "identity/require-v1", "userlimits/v1"}) {
-		t.Errorf("caps = %v, want [agentreg/v1 blocklist/v1 grouppolicy/v1 identity/challenge-v1 identity/require-v1 userlimits/v1]; body %s", b.Caps, raw)
+	if !slices.Equal(b.Caps, []string{"agentreg/v1", "blocklist/v1", "grouppolicy/v1", "identity/challenge-v1", "identity/require-v1", "usercost/v1", "userlimits/v1"}) {
+		t.Errorf("caps = %v, want [agentreg/v1 blocklist/v1 grouppolicy/v1 identity/challenge-v1 identity/require-v1 usercost/v1 userlimits/v1]; body %s", b.Caps, raw)
 	}
 }
 

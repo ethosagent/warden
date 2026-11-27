@@ -30,6 +30,11 @@ type denyExtra struct {
 	SwappedRefs    []string
 	Evidence       []string
 	AddrClass      string // bounded address class behind an ssrf_* reason (#391)
+	// CostUSD and Provider price a response a deny cut after the upstream
+	// answered, charged to a per-user cost cap (W-P3-PUL-04, see cutCost), so
+	// the ledger reseed and the fleet rollup count it. Zero otherwise.
+	CostUSD  float64
+	Provider string
 }
 
 // emitDeny records one request-scoped deny — the analytics event, the
@@ -69,6 +74,8 @@ func (p *Proxy) emitDeny(s *requestScope, reason denyreason.Reason, extra ...den
 		ev.SwappedRefs = x.SwappedRefs
 		ev.Evidence = x.Evidence
 		ev.AddrClass = x.AddrClass
+		ev.CostUSD = x.CostUSD
+		ev.Provider = x.Provider
 	}
 	p.emitDenyEvent(s.resolved(), ev)
 }

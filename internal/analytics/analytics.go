@@ -502,10 +502,19 @@ CREATE TABLE IF NOT EXISTS events (
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_sub_ts ON events (user_sub, ts)`); err != nil {
 		return fmt.Errorf("analytics: migrate user index: %w", err)
 	}
-	// Seeds the worker's daily cost ledger: sum of cost_usd by user_sub and
-	// limit_rule over today's events (W-P3-PUL-04).
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_rule_ts ON events (user_sub, limit_rule, ts)`); err != nil {
-		return fmt.Errorf("analytics: migrate user rule index: %w", err)
+	// W-P3-PUL-02 created (user_sub, limit_rule, ts) for the cost seed, which
+	// it cannot serve without a full scan; nothing reads it, so it is dropped
+	// (idempotent: a database that never had it, or a concurrent opener that
+	// dropped it first, is a no-op).
+	if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_events_user_rule_ts`); err != nil {
+		return fmt.Errorf("analytics: migrate drop user rule index: %w", err)
+	}
+	// Seeds the worker's daily cost ledger (CostByUserSince, W-P3-PUL-04): a
+	// ts range over a covering index, so the boot-time sum reads only today's
+	// index entries and never the table. A user_sub-leading index cannot
+	// serve `ts >= ?` without a full scan.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_ts_user_rule_cost ON events (ts, user_sub, limit_rule, cost_usd)`); err != nil {
+		return fmt.Errorf("analytics: migrate cost seed index: %w", err)
 	}
 	// lower(user_email) lets SQLite plan the User filter's OR as two index
 	// lookups (user_sub, lower(user_email)) instead of a scan.

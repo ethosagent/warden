@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/denyreason"
@@ -500,12 +501,12 @@ func (e *Evaluator) userLimit(rc RequestContext, agentID string, peek bool) Requ
 	}
 	r, truncated := ls.match(rc.Subject, agentID, NormalizeHost(rc.Domain))
 	if truncated {
-		return RequestVerdict{Decision: Deny, Reason: denyreason.IdentityGroupsTruncated, LimitRule: r.name}
+		return RequestVerdict{Decision: Deny, Reason: denyreason.IdentityGroupsTruncated, LimitRule: r.name, DailyCostUSD: r.dailyCostUSD}
 	}
 	if r == nil {
 		return RequestVerdict{Decision: Allow}
 	}
-	v := RequestVerdict{Decision: Allow, LimitRule: r.name}
+	v := RequestVerdict{Decision: Allow, LimitRule: r.name, DailyCostUSD: r.dailyCostUSD}
 	if !r.hasRate {
 		return v
 	}
@@ -572,6 +573,8 @@ func compileCostBlocked(list []config.CostBlockedUser) map[costBlockKey]struct{}
 // IsCostBlocked reports whether the control plane listed sub as over rule's
 // daily cost cap for now's UTC day. Entries for any other day are ignored, so
 // a block lapses at UTC midnight even when the control plane is unreachable.
+// The wire carries subs cut to 255 bytes on a rune boundary (the fleet
+// rollup's cut), so sub is cut the same way before the lookup.
 func (e *Evaluator) IsCostBlocked(sub, rule string, now time.Time) bool {
 	if sub == "" {
 		return false
@@ -581,8 +584,24 @@ func (e *Evaluator) IsCostBlocked(sub, rule string, now time.Time) bool {
 	if len(e.costBlocked) == 0 {
 		return false
 	}
-	_, ok := e.costBlocked[costBlockKey{sub: sub, rule: rule, day: civilDay(now.UTC().Date())}]
+	_, ok := e.costBlocked[costBlockKey{sub: costBlockSub(sub), rule: rule, day: civilDay(now.UTC().Date())}]
 	return ok
+}
+
+// maxCostBlockSubBytes is the sub cut of the fleet rollup and costBlockedUsers
+// (cost.MaxLedgerSubBytes on the worker side).
+const maxCostBlockSubBytes = 255
+
+// costBlockSub cuts sub to maxCostBlockSubBytes without splitting a rune.
+func costBlockSub(sub string) string {
+	n := maxCostBlockSubBytes
+	if len(sub) <= n {
+		return sub
+	}
+	for n > 0 && !utf8.RuneStart(sub[n]) {
+		n--
+	}
+	return sub[:n]
 }
 
 // userBucket is one fixed rate window.

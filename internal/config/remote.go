@@ -93,7 +93,7 @@ const CapIdentityChallengeV1 = "identity/challenge-v1"
 // WorkerCaps returns the sorted capabilities this binary implements. Later
 // features append their own constant here.
 func WorkerCaps() []string {
-	caps := []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1, CapIdentityRequireV1, CapUserLimitsV1}
+	caps := []string{CapAgentRegV1, CapBlocklistV1, CapGroupPolicyV1, CapIdentityChallengeV1, CapIdentityRequireV1, CapUserCostV1, CapUserLimitsV1}
 	sort.Strings(caps)
 	return caps
 }
@@ -114,6 +114,14 @@ const CapAgentRegV1 = "agentreg/v1"
 // control plane uses the cap to tell which workers enforce them. Cost caps
 // (dailyCostUSD) have their own cap, usercost/v1 (W-P3-PUL-04).
 const CapUserLimitsV1 = "userlimits/v1"
+
+// CapUserCostV1 is the capability a worker advertises when it enforces
+// dailyCostUSD per-user cost caps and costBlockedUsers (W-P3-PUL-04). An old
+// worker fails open on cost caps, so a policy save that adds or sets a
+// dailyCostUSD rule is refused (409, unless an admin forces it) while a
+// connected worker lacks it (W-P3-PUL-08). The same constant, with the same
+// value, is declared on the W-P3-PUL-08 branch; keep one when they merge.
+const CapUserCostV1 = "usercost/v1"
 
 // CapIdentityRequireV1 is the capability a worker advertises when it enforces
 // identity require mode (W-P2-WBND-03). An old worker ignores a mode it does

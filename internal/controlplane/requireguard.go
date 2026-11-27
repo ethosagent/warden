@@ -71,15 +71,66 @@ func (s *Server) requireGuard(ctx context.Context, live *config.SettingsWire, in
 // rateLimit (live has none) is refused with 409 workers_lack_capability,
 // capability userlimits/v1, while any connected worker lacks the cap, unless
 // an admin forces it (audited). live and next are the docs before and after.
+// Every writer that reaches it also gets the cost-cap guard (userCostGuard).
 func (s *Server) userLimitsGuard(ctx context.Context, live, next policyWire) error {
-	if !hasRateLimitRule(next) || hasRateLimitRule(live) {
+	if hasRateLimitRule(next) && !hasRateLimitRule(live) {
+		lacking, total := s.registry.WorkersLackingCap(config.CapUserLimitsV1, func(string) bool { return true })
+		if len(lacking) > 0 {
+			if err := s.forceOrRefuse(ctx, config.CapUserLimitsV1, lacking, total, "user_limits_forced"); err != nil {
+				return err
+			}
+		}
+	}
+	return s.userCostGuard(ctx, live, next)
+}
+
+// userCostGuard is the rollout guard of per-user cost caps (W-P3-PUL-04). A
+// worker without usercost/v1 does not enforce dailyCostUSD: it fails open on
+// cost caps. So a write that adds a rule with dailyCostUSD, or sets
+// dailyCostUSD on a rule that had none (matched by name; default and
+// anonymous by their reserved names), is refused with 409
+// workers_lack_capability, capability usercost/v1, while any connected worker
+// lacks the cap, unless an admin forces it (audited). Changing an existing
+// cap's value needs no check. It runs wherever userLimitsGuard runs (policy
+// save, settings, rollback, approvals apply, file-mode policy write).
+// W-P3-PUL-08 carries the same guard as costCapGuard; keep one when merging.
+func (s *Server) userCostGuard(ctx context.Context, live, next policyWire) error {
+	if !addsUserCostCap(live, next) {
 		return nil
 	}
-	lacking, total := s.registry.WorkersLackingCap(config.CapUserLimitsV1, func(string) bool { return true })
+	lacking, total := s.registry.WorkersLackingCap(config.CapUserCostV1, func(string) bool { return true })
 	if len(lacking) == 0 {
 		return nil
 	}
-	return s.forceOrRefuse(ctx, config.CapUserLimitsV1, lacking, total, "user_limits_forced")
+	return s.forceOrRefuse(ctx, config.CapUserCostV1, lacking, total, "user_cost_forced")
+}
+
+// addsUserCostCap reports whether next has a rule with dailyCostUSD whose
+// same-named rule in live had none (or did not exist).
+func addsUserCostCap(live, next policyWire) bool {
+	prev := userCostCaps(live)
+	for name, c := range userCostCaps(next) {
+		if c > 0 && prev[name] <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// userCostCaps maps each rule of w to its dailyCostUSD, default and
+// anonymous under their reserved names.
+func userCostCaps(w policyWire) map[string]float64 {
+	m := make(map[string]float64, len(w.UserLimits)+2)
+	for _, l := range w.UserLimits {
+		m[l.Name] = l.DailyCostUSD
+	}
+	if w.DefaultUserLimit != nil {
+		m[config.UserLimitNameDefault] = w.DefaultUserLimit.DailyCostUSD
+	}
+	if w.AnonymousLimit != nil {
+		m[config.UserLimitNameAnonymous] = w.AnonymousLimit.DailyCostUSD
+	}
+	return m
 }
 
 // hasRateLimitRule reports whether w carries a per-user limit rule with a
