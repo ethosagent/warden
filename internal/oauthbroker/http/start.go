@@ -52,15 +52,18 @@ type Starter interface {
 // Config is what New needs.
 type Config struct {
 	Broker Starter
-	Cookie Cookie
-	Logger *slog.Logger
+	// Callback serves GET /connect/callback; nil leaves Callback() answering 404.
+	Callback Callbacker
+	Cookie   Cookie
+	Logger   *slog.Logger
 }
 
 // Handler serves the connect routes.
 type Handler struct {
-	broker Starter
-	cookie Cookie
-	logger *slog.Logger
+	broker     Starter
+	callbacker Callbacker
+	cookie     Cookie
+	logger     *slog.Logger
 }
 
 // New returns a Handler.
@@ -69,7 +72,7 @@ func New(cfg Config) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{broker: cfg.Broker, cookie: cfg.Cookie, logger: logger}
+	return &Handler{broker: cfg.Broker, callbacker: cfg.Callback, cookie: cfg.Cookie, logger: logger}
 }
 
 // maxPendingParam bounds the pending id a GET reflects into its redirect.

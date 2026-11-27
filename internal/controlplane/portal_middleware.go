@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	oauthbrokerhttp "github.com/ethosagent/warden/internal/oauthbroker/http"
 	"github.com/ethosagent/warden/internal/portal"
 	"github.com/ethosagent/warden/internal/webauth"
 )
@@ -167,6 +168,10 @@ func (p *portalService) requireSession(next http.Handler) http.Handler {
 type signedOutPolicy struct {
 	redirects func(r *http.Request) bool
 	status    int
+	// unauthenticated, when set, renders the 401 of a signed-out request that
+	// does not redirect (the connect callback answers an HTML page); nil is the
+	// JSON error.
+	unauthenticated func(w http.ResponseWriter)
 }
 
 // requireSessionWith is requireSession with its signed-out rule chosen by the
@@ -191,6 +196,10 @@ func (p *portalService) requireSessionWith(next http.Handler, so signedOutPolicy
 					next = p.loginNext(r)
 				}
 				http.Redirect(w, r, portal.LoginURL(next), so.status)
+				return
+			}
+			if so.unauthenticated != nil {
+				so.unauthenticated(w)
 				return
 			}
 			writeAuthError(w, http.StatusUnauthorized, portal.CodeUnauthenticated)
@@ -281,6 +290,25 @@ func (s *Server) connectWrap(h http.Handler) http.Handler {
 			return true
 		},
 		status: http.StatusSeeOther,
+	})
+}
+
+// connectCallbackWrap puts GET /connect/callback behind the portal session
+// middleware. A signed-out request is a 401 page, never a redirect: the query
+// holds the provider's code and state, which must not be carried into a login
+// round trip (the login's own next check would drop them anyway). Console
+// credentials are stripped like everywhere on /connect. Without a portal the
+// route is 404.
+func (s *Server) connectCallbackWrap(h http.Handler) http.Handler {
+	if s.portal == nil {
+		return http.NotFoundHandler()
+	}
+	return s.portal.requireSessionWith(h, signedOutPolicy{
+		redirects: func(*http.Request) bool { return false },
+		status:    http.StatusSeeOther,
+		unauthenticated: func(w http.ResponseWriter) {
+			oauthbrokerhttp.WriteErrorPage(w, http.StatusUnauthorized, portal.CodeUnauthenticated)
+		},
 	})
 }
 

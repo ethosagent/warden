@@ -211,6 +211,7 @@ func TestStoreErrorsWrapped(t *testing.T) {
 	_, errs["BeginGrant"] = s.BeginGrant(ctx, oauthbroker.GrantRef{UserKey: uk, Iss: "i", Sub: "s", Provider: "p"})
 	_, errs["ActivateGrant"] = s.ActivateGrant(ctx, "g", nil, oauthbroker.Account{})
 	_, errs["MarkReconsentRequired"] = s.MarkReconsentRequired(ctx, uk, "p", "g")
+	_, errs["RestoreGrant"] = s.RestoreGrant(ctx, uk, "p", "g", "h")
 	_, errs["RevokeGrant"] = s.RevokeGrant(ctx, uk, "p", "")
 	_, errs["GetGrant"] = s.GetGrant(ctx, uk, "p")
 	_, errs["ListGrants"] = s.ListGrants(ctx, uk, true)

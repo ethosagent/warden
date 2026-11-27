@@ -37,6 +37,14 @@
 //   - broker.go, start.go: Broker and Start, the POST /connect/start logic
 //     (checks, scope cap, PKCE attempt, authorization URL); the HTTP mapping is
 //     the transport package oauthbroker/http.
+//   - callback.go, exchange.go, locks.go, reconcile.go: Callback (GET
+//     /connect/callback: single-use attempt, session user and browser binding,
+//     block list, code exchange through the TokenExchanger port, scope cap, then
+//     the write under GrantLocks: grant connecting, TokenRecord in the TokenVault
+//     (consent.store), grant active, block re-check, pending completed), the
+//     reconciler for grants stuck connecting and the hourly orphan count.
+//   - adapters/exchange: the SSRF-safe TokenExchanger (SafeDialer, no proxy, no
+//     redirects, 64 KiB cap, 10s).
 //   - adapters/sqlite: the cpstate migrations oauthbroker/0001..0003 and the
 //     SQLite GrantStore.
 //   - oauthbrokertest: the conformance suite every GrantStore must pass (a

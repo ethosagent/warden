@@ -44,6 +44,9 @@ const (
 	AuthMethodNone       = "none"
 	AuthMethodSystem     = "system"
 	AuthMethodAPIKey     = "apikey"
+	// AuthMethodPortal is a signed-in employee on the consent portal (connect
+	// events, W-P3-BRKR-04).
+	AuthMethodPortal = "portal"
 )
 
 // Outcomes an entry may carry.
@@ -89,7 +92,7 @@ var (
 
 	authMethods = map[string]bool{
 		AuthMethodOIDC: true, AuthMethodBreakglass: true, AuthMethodCLI: true,
-		AuthMethodBearer: true, AuthMethodNone: true, AuthMethodSystem: true, AuthMethodAPIKey: true,
+		AuthMethodBearer: true, AuthMethodNone: true, AuthMethodSystem: true, AuthMethodAPIKey: true, AuthMethodPortal: true,
 	}
 	outcomes = map[string]bool{
 		OutcomeOK: true, OutcomeDenied: true, OutcomeRejected: true, OutcomeError: true,
@@ -198,7 +201,7 @@ func invalid(field, why string) error {
 // checked here.
 func (e *Entry) validate() error {
 	if !authMethods[e.AuthMethod] {
-		return invalid("auth_method", "is not one of oidc, breakglass, cli, bearer, none, system, apikey")
+		return invalid("auth_method", "is not one of oidc, breakglass, cli, bearer, none, system, apikey, portal")
 	}
 	if !outcomes[e.Outcome] {
 		return invalid("outcome", "is not one of ok, denied, rejected, error")

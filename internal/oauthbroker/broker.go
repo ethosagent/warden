@@ -44,6 +44,27 @@ type Config struct {
 	Now  func() time.Time
 	// Logger may be nil (slog.Default).
 	Logger *slog.Logger
+
+	// The fields below are needed only by Callback and Reconcile (W-P3-BRKR-04);
+	// Start works without them, and Callback answers CodeInternal when one of
+	// Vault, GrantKey and Exchanger is missing.
+
+	// Vault is consent.store, where the TokenRecord lives.
+	Vault TokenVault
+	// GrantKey builds the logical consent.store key of a grant
+	// (secrets.UserGrantKey; injected like UserKey).
+	GrantKey func(userKey, provider string) (string, error)
+	// NotFound reports whether a Vault.Get error means "no such key"
+	// (secrets.ErrSecretNotFound).
+	NotFound func(error) bool
+	// Exchanger performs the code exchange over an SSRF-safe client.
+	Exchanger TokenExchanger
+	// Audit records connect.granted and connect.denied; nil means admin audit
+	// is off.
+	Audit AuditSink
+	// Locks is the per-(userKey, provider) mutex shared with the refresh
+	// engine, revoke and offboarding; nil means a private set (tests).
+	Locks *GrantLocks
 }
 
 // Broker runs the connect flows of the OAuth broker. It is safe for
@@ -58,6 +79,13 @@ type Broker struct {
 	rand    io.Reader
 	now     func() time.Time
 	logger  *slog.Logger
+
+	vault     TokenVault
+	grantKey  func(userKey, provider string) (string, error)
+	notFound  func(error) bool
+	exchanger TokenExchanger
+	audit     AuditSink
+	locks     *GrantLocks
 
 	metrics connectMetrics
 }
@@ -84,16 +112,27 @@ func New(cfg Config) (*Broker, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	locks := cfg.Locks
+	if locks == nil {
+		locks = NewGrantLocks()
+	}
+	notFound := cfg.NotFound
+	if notFound == nil {
+		notFound = func(error) bool { return false }
+	}
 	return &Broker{
 		reg: cfg.Registry, store: cfg.Store, blocks: cfg.Blocks, limiter: cfg.Limiter,
 		redir: cfg.RedirectURL, userKey: cfg.UserKey, rand: cfg.Rand, now: cfg.Now, logger: logger,
-		metrics: connectMetrics{counts: map[ConnectKey]uint64{}},
+		vault: cfg.Vault, grantKey: cfg.GrantKey, notFound: notFound, exchanger: cfg.Exchanger,
+		audit: cfg.Audit, locks: locks,
+		metrics: connectMetrics{counts: map[ConnectKey]uint64{}, exchange: map[string]*exchangeTiming{}},
 	}, nil
 }
 
 // Stages and outcomes of warden_cp_oauth_connect_total{provider,stage,outcome}.
 const (
-	StageStart = "start"
+	StageStart    = "start"
+	StageCallback = "callback"
 
 	OutcomeOK     = "ok"
 	OutcomeDenied = "denied"
@@ -112,8 +151,17 @@ type ConnectKey struct {
 const UnknownProviderLabel = "unknown"
 
 type connectMetrics struct {
-	mu     sync.Mutex
-	counts map[ConnectKey]uint64
+	mu       sync.Mutex
+	counts   map[ConnectKey]uint64
+	exchange map[string]*exchangeTiming
+	orphans  int
+}
+
+// exchangeTiming is the sum and count behind
+// warden_cp_oauth_token_exchange_seconds{provider}.
+type exchangeTiming struct {
+	count uint64
+	sum   time.Duration
 }
 
 func (m *connectMetrics) inc(k ConnectKey) {

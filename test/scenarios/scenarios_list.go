@@ -101,6 +101,7 @@ var All = slices.Concat(
 		// the cap, a missing CSRF token or session, a blocked user and an eleventh
 		// start in a minute write nothing.
 		{Name: "connect_start", Opts: connectOpts(), Run: connectStart},
+		{Name: "connect_callback", Opts: connectCallbackOpts(), Run: connectCallback},
 
 		// Break-glass login (W-P1-OPS1-08): a real argon2id login opens a Secure
 		// admin session with a signed row, an ERROR line and a Finding per

@@ -189,6 +189,11 @@ type H struct {
 	// wantBroker (WithOAuthBroker) adds consent.providers on top of the consent
 	// block: the OAuth broker's connect routes over the real GrantStore.
 	wantBroker bool
+	// wantOAuthFake (WithOAuthProviderFake) points the broker's google provider
+	// at oauthFake, started in boot; without it the built-in Google endpoints
+	// stay.
+	wantOAuthFake bool
+	oauthFake     *fakes.OAuthProvider
 	// userStoreAWS is the AWS account behind consent.store (WithConsent): the
 	// CP-only user credential store the IdP link writes to.
 	userStoreAWS *fakes.FakeAWSSecretsClient
@@ -742,6 +747,9 @@ func (h *H) boot() {
 	h.upstreamCA = newCA(h.tb, "warden-harness-upstream-ca")
 
 	h.fake = clocktest.NewFake(time.Now())
+	if h.wantOAuthFake {
+		h.oauthFake = fakes.NewOAuthProvider(h.tb)
+	}
 	if h.wantIssuer {
 		h.issuer = fakes.NewOIDCIssuer(h.tb, fakes.WithIssuerClock(h.fake.Now))
 		if h.wantIssuerDown {
@@ -873,6 +881,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyBackup(&ip.cp.params)
 	h.applyKeys(&ip.cp.params)
 	h.applyConsent(&ip.cp.params)
+	h.applyBroker(&ip.cp.params)
 	h.applyBundles(&ip.cp.params)
 	h.applyAPIKeys(&ip.cp.params)
 	h.applyStrict(&ip.cp.params)

@@ -67,6 +67,7 @@ func Run(t *testing.T, newStore Factory) {
 		{"GrantRevokeIdempotent", grantRevoke, oauthbroker.Limits{}},
 		{"GrantRevokeCompareAndSet", grantRevokeCAS, oauthbroker.Limits{}},
 		{"GrantPrevGrantID", grantPrevGrantID, oauthbroker.Limits{}},
+		{"GrantRestoreCompareAndSet", grantRestore, oauthbroker.Limits{}},
 		{"GrantReconsentRequired", grantReconsent, oauthbroker.Limits{}},
 		{"GrantListPerUser", grantList, oauthbroker.Limits{}},
 		{"TouchLastUsedThrottled", touchLastUsed, oauthbroker.Limits{}},
@@ -760,6 +761,54 @@ func grantPrevGrantID(t *testing.T, ctx context.Context, s oauthbroker.GrantStor
 	after, err := s.BeginGrant(ctx, ref("alice", "github"))
 	if err != nil || after.PrevGrantID != "" {
 		t.Fatalf("reconnect over revoked = %+v, %v", after, err)
+	}
+}
+
+func grantRestore(t *testing.T, ctx context.Context, s oauthbroker.GrantStore, _ *clocktest.Fake) {
+	uk := UserKey("alice")
+	if _, err := s.RestoreGrant(ctx, uk, "google", "a", "b"); !errors.Is(err, oauthbroker.ErrNotFound) {
+		t.Fatalf("RestoreGrant with no row = %v, want ErrNotFound", err)
+	}
+	first, err := s.BeginGrant(ctx, ref("alice", "google"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A first connect has nothing to restore.
+	if _, err := s.RestoreGrant(ctx, uk, "google", first.GrantID, "x"); !errors.Is(err, oauthbroker.ErrGrantState) {
+		t.Fatalf("RestoreGrant of a first connect = %v, want ErrGrantState", err)
+	}
+	active, err := s.ActivateGrant(ctx, first.GrantID, []string{"email"}, oauthbroker.Account{ID: "acct", Login: "a@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	re, err := s.BeginGrant(ctx, ref("alice", "google"))
+	if err != nil || re.PrevGrantID != active.GrantID {
+		t.Fatalf("reconnect = %+v, %v", re, err)
+	}
+	// Wrong ids change nothing.
+	for _, ids := range [][2]string{{"other", active.GrantID}, {re.GrantID, "other"}} {
+		if _, err := s.RestoreGrant(ctx, uk, "google", ids[0], ids[1]); !errors.Is(err, oauthbroker.ErrGrantState) {
+			t.Fatalf("RestoreGrant(%v) = %v, want ErrGrantState", ids, err)
+		}
+	}
+	if _, err := s.RestoreGrant(ctx, uk, "google", "", ""); !errors.Is(err, oauthbroker.ErrInvalid) {
+		t.Fatalf("RestoreGrant with empty ids = %v, want ErrInvalid", err)
+	}
+	got, err := s.RestoreGrant(ctx, uk, "google", re.GrantID, active.GrantID)
+	if err != nil {
+		t.Fatalf("RestoreGrant: %v", err)
+	}
+	if got.State != oauthbroker.GrantActive || got.GrantID != active.GrantID || got.PrevGrantID != "" ||
+		!slices.Equal(got.Scopes, []string{"email"}) || got.Account.ID != "acct" {
+		t.Fatalf("restored grant = %+v, want the earlier active grant back with its scopes and account", got)
+	}
+	// The failed attempt's id is dead: it cannot activate, and a second
+	// restore is a state error.
+	if _, err := s.ActivateGrant(ctx, re.GrantID, nil, oauthbroker.Account{}); !errors.Is(err, oauthbroker.ErrNotFound) {
+		t.Fatalf("ActivateGrant of the abandoned id = %v, want ErrNotFound", err)
+	}
+	if _, err := s.RestoreGrant(ctx, uk, "google", re.GrantID, active.GrantID); !errors.Is(err, oauthbroker.ErrGrantState) {
+		t.Fatalf("second RestoreGrant = %v, want ErrGrantState", err)
 	}
 }
 

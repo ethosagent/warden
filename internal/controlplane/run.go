@@ -35,6 +35,7 @@ import (
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/oauthbroker"
+	oauthexchange "github.com/ethosagent/warden/internal/oauthbroker/adapters/exchange"
 	oauthbrokersqlite "github.com/ethosagent/warden/internal/oauthbroker/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/observability"
 	"github.com/ethosagent/warden/internal/secrets"
@@ -163,6 +164,13 @@ type Params struct {
 	// consent is enabled with consent.store.backend aws.
 	UserStoreAWSClient secrets.AWSSecretsClient
 
+	// OAuthAllowPrivateCIDRs exempts CIDRs from the SSRF blocklist for the OAuth
+	// broker's provider calls (the code exchange): a GitHub Enterprise Server on
+	// a private network, or a loopback provider fake in the harness. It is a
+	// test and lab seam with no flag or config key yet, empty in a normal
+	// deployment, and the control plane logs a WARN when it is set.
+	OAuthAllowPrivateCIDRs []string
+
 	// Dev (--dev) is development mode. Today it only allows the
 	// non-production echo consent.store backend.
 	Dev bool
@@ -194,6 +202,9 @@ func activeTestHooks(p Params) []string {
 	}
 	if p.UserStoreAWSClient != nil {
 		hooks = append(hooks, "UserStoreAWSClient")
+	}
+	if len(p.OAuthAllowPrivateCIDRs) > 0 {
+		hooks = append(hooks, "OAuthAllowPrivateCIDRs")
 	}
 	return hooks
 }
@@ -673,8 +684,9 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// sits on the state DB opened with the broker migrations above. Without a
 	// state dir the broker stays off (no cpstate to hold attempts), loudly.
 	var (
-		oauthRegistry *oauthbroker.Registry
-		grantStore    oauthbroker.GrantStore
+		oauthRegistry  *oauthbroker.Registry
+		grantStore     oauthbroker.GrantStore
+		oauthExchanger oauthbroker.TokenExchanger
 	)
 	if oauthBrokerWanted(consentCfg) {
 		if state == nil {
@@ -687,6 +699,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 				return fail(fmt.Errorf("control-plane: oauth providers: %w", err))
 			}
 			grantStore = oauthbrokersqlite.New(state, oauthbrokersqlite.Options{Clock: clk})
+			// The code exchange dials through the SSRF-safe dialer; only an
+			// explicit allow-list reaches a private address.
+			oauthExchanger, err = oauthexchange.New(oauthexchange.Options{AllowPrivate: p.OAuthAllowPrivateCIDRs, Now: clk.Now})
+			if err != nil {
+				return fail(fmt.Errorf("control-plane: oauth exchange client: %w", err))
+			}
 		}
 	}
 
@@ -723,6 +741,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		OAuthRegistry:       oauthRegistry,
 		GrantStore:          grantStore,
 		UserStore:           userStore,
+		OAuthExchanger:      oauthExchanger,
 		ClientSecret:        clientSecret,
 		ConsentClientSecret: consentSecret,
 		Now:                 clk.Now,

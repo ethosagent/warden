@@ -506,3 +506,24 @@ func TestStoreErrorsOnClosedDB(t *testing.T) {
 		t.Error("Verify: want error")
 	}
 }
+
+// TestRecordAcceptsPortalAuthMethod: connect events (W-P3-BRKR-04) are signed
+// in as auth_method portal and verify; an unknown method is still refused.
+func TestRecordAcceptsPortalAuthMethod(t *testing.T) {
+	db := openDB(t, dbPath(t))
+	s := newStore(t, db, newSigner(t))
+	in := input(1)
+	in.AuthMethod, in.Outcome, in.Action = AuthMethodPortal, OutcomeOK, "connect.granted"
+	in.Target, in.TargetRef = "grant:google", "grant_id:abc"
+	e, err := s.Record(context.Background(), in)
+	if err != nil || e.AuthMethod != "portal" {
+		t.Fatalf("Record = %+v, %v", e, err)
+	}
+	if res := verify(t, s, VerifyOptions{HMACKey: testHMACKey}); !res.OK {
+		t.Fatalf("Verify = %+v", res)
+	}
+	in.AuthMethod = "portals"
+	if _, err := s.Record(context.Background(), in); !errors.Is(err, ErrInvalidEntry) {
+		t.Fatalf("unknown method = %v", err)
+	}
+}

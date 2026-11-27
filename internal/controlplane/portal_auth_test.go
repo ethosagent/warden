@@ -68,6 +68,10 @@ type portalRigOpts struct {
 	// providers turns the OAuth broker on (W-P3-BRKR-03): consent.providers,
 	// the broker migrations and the sqlite GrantStore.
 	providers []config.OAuthProviderConfig
+	// userStore and exchanger complete the broker for /connect/callback
+	// (W-P3-BRKR-04): consent.store and the code exchange.
+	userStore secrets.SecretStore
+	exchanger oauthbroker.TokenExchanger
 }
 
 func newPortalRig(t *testing.T, o portalRigOpts) *portalRig {
@@ -138,6 +142,7 @@ func newPortalRig(t *testing.T, o portalRigOpts) *portalRig {
 		PolicyPath: writePolicyFile(t, "a.example"), State: db, Console: cc, Consent: consent,
 		ClientSecret: rigClientSecret, ConsentClientSecret: portalClientSecret, Now: clk.Now,
 		SecretStore: o.secretStore, Token: o.token, Logger: logger,
+		UserStore: o.userStore, OAuthExchanger: o.exchanger,
 	}
 	if o.allRoutes {
 		reg := newAPIKeyRegistry()
