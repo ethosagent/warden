@@ -851,3 +851,35 @@ func TestPerUserFileEditWarnsLackingWorkers(t *testing.T) {
 		t.Errorf("warnings = %d (want 1 naming old-b):\n%s", n, logs)
 	}
 }
+
+// TestPerUserSecretsHashCoversEnabled: an enable/disable-only save changes the
+// admin audit state hash.
+func TestPerUserSecretsHashCoversEnabled(t *testing.T) {
+	e := newAuditEnv(t, auditEnvOpts{token: dashTestToken})
+	src := &puBlock{cfg: puOn()}
+	e.srv.cfg.PerUserLoad = src.load
+	on, err := e.srv.perUserSecretsHash(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := puOn()
+	off.Enabled = false
+	src.set(off)
+	got, err := e.srv.perUserSecretsHash(context.Background())
+	if err != nil || got == on {
+		t.Fatalf("hash with the block disabled = %q (%v), same as enabled %q", got, err, on)
+	}
+}
+
+// TestPerUserUnreadableWithFeatureOff: an unreadable served config with the
+// feature off or never on leaves /healthz ok.
+func TestPerUserUnreadableWithFeatureOff(t *testing.T) {
+	src := &puBlock{loadErr: errors.New("read failed")}
+	h := newPerUserBundleHarness(t, src, nil, nil)
+	h.ps.Refresh()
+	rec := httptest.NewRecorder()
+	h.s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Body.String() != "ok\n" {
+		t.Errorf("healthz = %q, want ok with the feature off", rec.Body.String())
+	}
+}

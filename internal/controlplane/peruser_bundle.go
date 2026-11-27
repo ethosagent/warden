@@ -65,7 +65,14 @@ func (ps *policyServer) resolvePerUser() {
 	}
 	cfg, err := src.load()
 	if err != nil {
-		b.puStale("the block could not be read", err)
+		// Stale only while a section is being served; with the feature off (or
+		// never on) an unreadable config is not this feature's problem, and
+		// /healthz stays as it was.
+		if b.pu.raw != nil {
+			b.puStale("the block could not be read", err)
+		} else {
+			b.logger.Warn("control plane: perUserSecrets could not be read; nothing is served", "error", boundedErr(err))
+		}
 		return
 	}
 	if !cfg.Enabled {

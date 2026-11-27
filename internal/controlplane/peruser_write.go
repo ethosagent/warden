@@ -219,8 +219,8 @@ func (s *Server) mountPerUserSecrets(mux *http.ServeMux, classify func(*http.Req
 	mux.Handle(perUserSecretsPath, methodOnly(http.MethodPut, h))
 }
 
-// perUserSecretsHash is the admin audit state hash of the block: a hash of the
-// value-free section the block encodes to.
+// perUserSecretsHash is the admin audit state hash of the block: a hash of its
+// enabled switch and the value-free section it encodes to.
 func (s *Server) perUserSecretsHash(context.Context) (string, error) {
 	if s.cfg.PerUserLoad == nil {
 		return "", errors.New("per-user secrets are not wired")
@@ -233,5 +233,10 @@ func (s *Server) perUserSecretsHash(context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return s.stateHashJSON(auditTargetPerUserSecrets, json.RawMessage(raw))
+	// Enabled is part of the state: an enable or disable that leaves the
+	// mappings alone must still change the hash.
+	return s.stateHashJSON(auditTargetPerUserSecrets, struct {
+		Enabled bool            `json:"enabled"`
+		Section json.RawMessage `json:"section"`
+	}{c.Enabled, raw})
 }
