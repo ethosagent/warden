@@ -27,8 +27,8 @@ const (
 	SchemaDecisionV1 = "warden.decision.v1"
 	// SchemaRev 2 adds the user_blocked reason (W-P1-BLOCK-02); 3 adds
 	// agent_disabled (W-P2-AREG-05); 4 adds user.act and user.token_type
-	// (W-P2-WBND-02).
-	SchemaRev = 4
+	// (W-P2-WBND-02); 5 adds the user_rate_limited reason (W-P3-PUL-03).
+	SchemaRev = 5
 )
 
 // QueryMode says what FromEvent may record of the request query.
