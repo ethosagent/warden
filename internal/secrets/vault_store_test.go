@@ -31,6 +31,16 @@ func newVaultTestStore(t *testing.T) (*fakes.FakeVaultKV, secrets.SecretStore) {
 	return kv, s
 }
 
+// newVaultTestStoreOn builds another store (prefix app/) on an existing fake.
+func newVaultTestStoreOn(t *testing.T, kv *fakes.FakeVaultKV) (*fakes.FakeVaultKV, secrets.SecretStore) {
+	t.Helper()
+	s, err := secrets.NewVaultSecretStore(secrets.VaultStoreConfig{Addr: kv.URL(), NamePrefix: "app/", Token: vaultTestToken}, kv.Client())
+	if err != nil {
+		t.Fatalf("NewVaultSecretStore: %v", err)
+	}
+	return kv, s
+}
+
 func versioned(t *testing.T, s secrets.SecretStore) secrets.VersionedStore {
 	t.Helper()
 	vs, ok := s.(secrets.VersionedStore)
@@ -38,6 +48,16 @@ func versioned(t *testing.T, s secrets.SecretStore) secrets.VersionedStore {
 		t.Fatal("the Vault store must implement secrets.VersionedStore")
 	}
 	return vs
+}
+
+// kv2Preflight answers the store's mount check as a KV v2 mount for the
+// hand-rolled servers below; it reports whether it handled r.
+func kv2Preflight(w http.ResponseWriter, r *http.Request) bool {
+	if !strings.HasPrefix(r.URL.Path, "/v1/sys/internal/ui/mounts/") {
+		return false
+	}
+	_, _ = w.Write([]byte(`{"data":{"type":"kv","options":{"version":"2"}}}`))
+	return true
 }
 
 func hasRequest(reqs []fakes.VaultRequest, method, path string) bool {
@@ -148,7 +168,10 @@ func TestVaultStore_ListEmptyAndCap(t *testing.T) {
 		t.Fatalf("List(empty) = %v, %v; want none", metas, err)
 	}
 
-	huge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	huge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if kv2Preflight(w, r) {
+			return
+		}
 		var b strings.Builder
 		b.WriteString(`{"data":{"keys":[`)
 		for i := 0; i <= 10000; i++ {
@@ -171,12 +194,16 @@ func TestVaultStore_ListEmptyAndCap(t *testing.T) {
 
 	var paths []string
 	hostile := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if kv2Preflight(w, r) {
+			return
+		}
 		paths = append(paths, r.URL.Path)
 		if r.URL.Path == "/v1/secret/metadata/app" {
 			_, _ = w.Write([]byte(`{"data":{"keys":["../","..","ok",".","/abs"]}}`))
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"errors":[]}`))
 	}))
 	t.Cleanup(hostile.Close)
 	hs, err = secrets.NewVaultSecretStore(secrets.VaultStoreConfig{Addr: hostile.URL, NamePrefix: "app/", Token: vaultTestToken}, hostile.Client())
@@ -237,16 +264,165 @@ func TestVaultStore_PutIfVersion(t *testing.T) {
 	}
 }
 
-// TestVaultStore_NewKeyMetadataFailureRollsBack: if max_versions cannot be set
-// on a new key, Put fails and the key is removed again.
-func TestVaultStore_NewKeyMetadataFailureRollsBack(t *testing.T) {
+// TestVaultStore_MetadataFailureWritesNothing: max_versions is written BEFORE
+// the data, so when it fails nothing is written, nothing is rolled back (no
+// DELETE), and the next successful Put still enforces max_versions=1.
+func TestVaultStore_MetadataFailureWritesNothing(t *testing.T) {
 	kv, s := newVaultTestStore(t)
+	ctx := context.Background()
 	kv.ForceStatus(http.MethodPost, "/v1/secret/metadata/app/k", http.StatusInternalServerError)
-	if err := s.Put(context.Background(), "k", "v"); err == nil {
+	if err := s.Put(ctx, "k", "v1"); err == nil {
 		t.Fatal("Put must fail when max_versions cannot be set")
 	}
 	if _, ok := kv.Value("app/k"); ok {
-		t.Fatal("the new key must be rolled back")
+		t.Fatal("no data may be written when max_versions failed")
+	}
+	for _, r := range kv.Requests() {
+		if r.Method == http.MethodDelete || (r.Method == http.MethodPost && strings.Contains(r.Path, "/data/")) {
+			t.Fatalf("a failed metadata write must not be followed by %s %s", r.Method, r.Path)
+		}
+	}
+	for _, v := range []string{"v1", "v2", "v3"} {
+		if err := s.Put(ctx, "k", v); err != nil {
+			t.Fatalf("Put(%s): %v", v, err)
+		}
+	}
+	if kv.MaxVersions("app/k") != 1 || kv.StoredVersions("app/k") != 1 {
+		t.Fatalf("after recovery max_versions = %d, stored versions = %d; want 1 and 1",
+			kv.MaxVersions("app/k"), kv.StoredVersions("app/k"))
+	}
+
+	// An existing key whose metadata write fails keeps its value.
+	kv.ForceStatus(http.MethodPost, "/v1/secret/metadata/app/k", http.StatusInternalServerError)
+	if err := s.Put(ctx, "k", "v4"); err == nil {
+		t.Fatal("Put must fail when max_versions cannot be set")
+	}
+	if got, _ := kv.Value("app/k"); got != "v3" {
+		t.Fatalf("value after failed Put = %q, want v3", got)
+	}
+}
+
+// TestVaultStore_RacingWriterSurvivesMetadataFailure: writer B lands its value
+// while writer A's create is in flight and A's metadata write fails; B's
+// acknowledged value survives because A never deletes on failure.
+func TestVaultStore_RacingWriterSurvivesMetadataFailure(t *testing.T) {
+	kv, a := newVaultTestStore(t)
+	_, b := newVaultTestStoreOn(t, kv)
+	vb := versioned(t, b)
+	ctx := context.Background()
+
+	const meta = "/v1/secret/metadata/app/grant"
+	var bErr error
+	kv.ForceStatus(http.MethodPost, meta, http.StatusInternalServerError)
+	kv.OnRequest(http.MethodPost, meta, func() { bErr = vb.PutIfVersion(ctx, "grant", "b-value", 0) })
+	if err := versioned(t, a).PutIfVersion(ctx, "grant", "a-value", 0); err == nil {
+		t.Fatal("A's create must fail when its metadata write fails")
+	}
+	if bErr != nil {
+		t.Fatalf("B's create: %v", bErr)
+	}
+	if got, ok := kv.Value("app/grant"); !ok || got != "b-value" {
+		t.Fatalf("value = %q, %v; B's acknowledged write must survive A's failure", got, ok)
+	}
+	if kv.MaxVersions("app/grant") != 1 {
+		t.Fatalf("max_versions = %d, want 1 (set by B)", kv.MaxVersions("app/grant"))
+	}
+	for _, r := range kv.Requests() {
+		if r.Method == http.MethodDelete {
+			t.Fatalf("no writer may delete on failure: %s %s", r.Method, r.Path)
+		}
+	}
+}
+
+// TestVaultStore_KV1MountFailsClosed: against a KV v1 mount every operation
+// fails with ErrNotKV2 before writing anything; if the mount preflight lies,
+// the response-shape checks still refuse every write and read.
+func TestVaultStore_KV1MountFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	kv := fakes.NewFakeVaultKV1(t, vaultTestToken)
+	_, s := newVaultTestStoreOn(t, kv)
+	vs := versioned(t, s)
+	_, gErr := s.Get(ctx, "k")
+	_, _, gvErr := vs.GetVersion(ctx, "k")
+	_, lErr := s.List(ctx)
+	for op, err := range map[string]error{
+		"put":          s.Put(ctx, "k", "v"),
+		"putifversion": vs.PutIfVersion(ctx, "k", "v", 1),
+		"get":          gErr,
+		"getversion":   gvErr,
+		"delete":       s.Delete(ctx, "k"),
+		"list":         lErr,
+	} {
+		if !errors.Is(err, secrets.ErrNotKV2) {
+			t.Errorf("%s on KV v1 = %v, want ErrNotKV2", op, err)
+		}
+	}
+	if p := kv.FlatPaths(); len(p) != 0 {
+		t.Fatalf("nothing may be written to a KV v1 mount, found %v", p)
+	}
+	for _, r := range kv.Requests() {
+		if r.Method != http.MethodGet || !strings.HasPrefix(r.Path, "/v1/sys/internal/ui/mounts/") {
+			t.Fatalf("only the mount check may reach a KV v1 mount, saw %s %s", r.Method, r.Path)
+		}
+	}
+
+	// A mount that claims to be KV v2 but answers like v1.
+	liar := fakes.NewFakeVaultKV1(t, vaultTestToken)
+	liar.ReportMountVersion("2")
+	_, ls := newVaultTestStoreOn(t, liar)
+	lvs := versioned(t, ls)
+	if err := ls.Put(ctx, "k", "v"); !errors.Is(err, secrets.ErrNotKV2) {
+		t.Errorf("Put on a lying v1 mount = %v, want ErrNotKV2", err)
+	}
+	if err := lvs.PutIfVersion(ctx, "k", "v2", 1); !errors.Is(err, secrets.ErrNotKV2) {
+		t.Errorf("PutIfVersion on a lying v1 mount = %v, want ErrNotKV2 (cas is ignored there)", err)
+	}
+	if _, err := ls.Get(ctx, "k"); !errors.Is(err, secrets.ErrNotKV2) {
+		t.Errorf("Get on a lying v1 mount = %v, want ErrNotKV2", err)
+	}
+}
+
+// TestVaultStore_NotFoundVsMissingRoute: a 404 naming errors (bad route,
+// mount or namespace) is not ErrNotFound; a soft-deleted key is ErrNotFound
+// with its latest version, so a CAS create can build on it.
+func TestVaultStore_NotFoundVsMissingRoute(t *testing.T) {
+	kv, s := newVaultTestStore(t)
+	vs := versioned(t, s)
+	ctx := context.Background()
+
+	const route = `{"errors":["no handler for route \"secret/data/app/k\". route entry not found."]}`
+	kv.ForceResponse(http.MethodGet, "/v1/secret/data/app/k", http.StatusNotFound, route)
+	if _, err := s.Get(ctx, "k"); err == nil || errors.Is(err, secrets.ErrNotFound) {
+		t.Fatalf("Get on a missing route = %v, want a non-NotFound error", err)
+	}
+	kv.ForceResponse(http.MethodDelete, "/v1/secret/metadata/app/k", http.StatusNotFound, route)
+	if err := s.Delete(ctx, "k"); err == nil {
+		t.Fatal("Delete on a missing route must fail, not report success")
+	}
+	kv.ForceResponse("LIST", "/v1/secret/metadata/app", http.StatusNotFound, route)
+	if _, err := s.List(ctx); err == nil {
+		t.Fatal("List on a missing route must fail, not report an empty listing")
+	}
+
+	if err := s.Put(ctx, "k", "one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put(ctx, "k", "two"); err != nil {
+		t.Fatal(err)
+	}
+	kv.SoftDelete("app/k")
+	_, ver, err := vs.GetVersion(ctx, "k")
+	if !errors.Is(err, secrets.ErrNotFound) || ver != 2 {
+		t.Fatalf("GetVersion(soft-deleted) = %d, %v; want version 2 with ErrNotFound", ver, err)
+	}
+	if err := vs.PutIfVersion(ctx, "k", "three", 0); !errors.Is(err, secrets.ErrVersionConflict) {
+		t.Fatalf("create-only over a soft-deleted version = %v, want ErrVersionConflict", err)
+	}
+	if err := vs.PutIfVersion(ctx, "k", "three", ver); err != nil {
+		t.Fatalf("PutIfVersion at the reported version: %v", err)
+	}
+	if v, ver, err := vs.GetVersion(ctx, "k"); err != nil || v != "three" || ver != 3 {
+		t.Fatalf("GetVersion = %q, %d, %v; want three at 3", v, ver, err)
 	}
 }
 
@@ -300,18 +476,28 @@ func TestVaultStore_Config(t *testing.T) {
 	for name, cfg := range map[string]secrets.VaultStoreConfig{
 		"no addr":         {Token: "t"},
 		"bad scheme":      {Addr: "ftp://vault", Token: "t"},
-		"userinfo":        {Addr: "http://u:p@vault", Token: "t"},
-		"no token":        {Addr: "http://vault"},
-		"prefix no slash": {Addr: "http://vault", Token: "t", NamePrefix: "app"},
-		"prefix dotdot":   {Addr: "http://vault", Token: "t", NamePrefix: "../"},
-		"mount traversal": {Addr: "http://vault", Token: "t", Mount: "a/../b"},
+		"userinfo":        {Addr: "https://u:p@vault", Token: "t"},
+		"no token":        {Addr: "https://vault"},
+		"prefix no slash": {Addr: "https://vault", Token: "t", NamePrefix: "app"},
+		"prefix dotdot":   {Addr: "https://vault", Token: "t", NamePrefix: "../"},
+		"mount traversal": {Addr: "https://vault", Token: "t", Mount: "a/../b"},
+		"addr dotdot":     {Addr: "https://vault/a/../b", Token: "t"},
+		"plain http":      {Addr: "http://vault.example:8200", Token: "t"},
+		"mount sys":       {Addr: "https://vault", Token: "t", Mount: "sys"},
+		"mount sys sub":   {Addr: "https://vault", Token: "t", Mount: "sys/mounts"},
+		"mount auth":      {Addr: "https://vault", Token: "t", Mount: "auth/token"},
+		"mount identity":  {Addr: "https://vault", Token: "t", Mount: "identity"},
+		"mount cubbyhole": {Addr: "https://vault", Token: "t", Mount: "cubbyhole"},
+		"mount SYS case":  {Addr: "https://vault", Token: "t", Mount: "SYS"},
 	} {
 		if _, err := secrets.NewVaultSecretStore(cfg, nil); err == nil {
 			t.Errorf("%s: config accepted, want an error", name)
 		}
 	}
-	if _, err := secrets.NewVaultSecretStore(secrets.VaultStoreConfig{Addr: "https://vault:8200/", Token: "t"}, nil); err != nil {
-		t.Fatalf("valid config refused: %v", err)
+	for _, addr := range []string{"https://vault:8200/", "http://localhost:8200", "http://127.0.0.1:8200", "http://[::1]:8200"} {
+		if _, err := secrets.NewVaultSecretStore(secrets.VaultStoreConfig{Addr: addr, Token: "t", Mount: "kv/consent"}, nil); err != nil {
+			t.Errorf("valid addr %q refused: %v", addr, err)
+		}
 	}
 }
 
@@ -343,7 +529,10 @@ func TestVaultStore_NeverFollowsRedirects(t *testing.T) {
 
 // TestVaultStore_CapsResponseBody: a body over 1 MiB is refused.
 func TestVaultStore_CapsResponseBody(t *testing.T) {
-	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if kv2Preflight(w, r) {
+			return
+		}
 		_, _ = w.Write([]byte(`{"data":{"data":{"value":"`))
 		_, _ = w.Write(bytes.Repeat([]byte("a"), 1<<20))
 		_, _ = w.Write([]byte(`"}}}`))

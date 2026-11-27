@@ -8,11 +8,19 @@
 //
 // Layout for a logical key K under mount M and name prefix P:
 //
-//	Get/GetVersion  GET    /v1/M/data/P K       (.data.data.value, .data.metadata.version)
-//	Put/PutIfVersion POST  /v1/M/data/P K       {"data":{"value":...},"options":{"cas":N}}
-//	                 POST  /v1/M/metadata/P K   {"max_versions":1} (new keys only)
-//	Delete           DELETE /v1/M/metadata/P K  (every version; 404 is success)
-//	List             LIST  /v1/M/metadata/P...  (recursive; never a data/ path)
+//	(once)               GET    /v1/sys/internal/ui/mounts/M (refuse unless kv v2)
+//	Get/GetVersion       GET    /v1/M/data/P K      (.data.data.value, .data.metadata.version)
+//	Put, PutIfVersion(0) POST   /v1/M/metadata/P K  {"max_versions":1}, BEFORE the data write
+//	Put/PutIfVersion     POST   /v1/M/data/P K      {"data":{"value":...},"options":{"cas":N}}
+//	Delete               DELETE /v1/M/metadata/P K  (every version; 404 is success)
+//	List                 LIST   /v1/M/metadata/P... (recursive; never a data/ path)
+//
+// FAIL CLOSED ON A NON-KV-v2 MOUNT. On a KV v1 mount the same URLs are plain
+// secret paths: options.cas is ignored and metadata/ is just another secret, so
+// a CAS write would silently become an overwrite and Delete would remove
+// nothing. The store therefore checks the mount type once (the same preflight
+// the vault CLI uses) before its first request, and also refuses any data
+// response that lacks a KV v2 version (ErrNotKV2).
 //
 // VaultFetcher in vault.go is the older read-only placeholder fetcher and is
 // unrelated to this store.
@@ -25,10 +33,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -54,6 +64,14 @@ var ErrInvalidKey = errors.New("secrets: invalid key")
 // than 10,000 keys. List fails closed instead of returning a partial listing.
 var ErrListLimit = errors.New("secrets: vault list exceeds the key limit")
 
+// ErrNotKV2 is returned when the configured mount is not a KV version 2 engine,
+// either from the mount preflight or because a response lacks a KV v2 version.
+// Nothing is written once it is detected.
+var ErrNotKV2 = errors.New("secrets: vault mount is not KV v2")
+
+// reservedVaultMounts are Vault system paths that are never a KV mount.
+var reservedVaultMounts = map[string]bool{"sys": true, "auth": true, "identity": true, "cubbyhole": true}
+
 // VaultStoreConfig configures NewVaultSecretStore.
 type VaultStoreConfig struct {
 	// Addr is the Vault server base URL, e.g. "https://vault.internal:8200".
@@ -77,6 +95,9 @@ type vaultSecretStore struct {
 	prefix    string // validated, unescaped; "" or ends with "/"
 	token     string
 	namespace string
+
+	kv2Mu sync.Mutex
+	kv2OK bool // the mount preflight passed; only success is cached
 }
 
 var (
@@ -91,10 +112,19 @@ var (
 // caller's, when shorter) and with redirects disabled, because net/http
 // forwards the custom X-Vault-Token header to a redirect target. The caller
 // owns the transport (TLS roots, proxy, dialer).
+//
+// Addr must be https unless its host is loopback, and its path may not hold
+// "..". Mount may not be a Vault system path (sys, auth, identity, cubbyhole).
 func NewVaultSecretStore(cfg VaultStoreConfig, client *http.Client) (SecretStore, error) {
 	u, err := url.Parse(cfg.Addr)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 		return nil, errors.New("secrets: vault addr must be an http or https URL with a host and no query, fragment or userinfo")
+	}
+	if strings.Contains(u.Path, "..") || strings.Contains(u.RawPath, "..") {
+		return nil, errors.New("secrets: vault addr path must not contain '..'")
+	}
+	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+		return nil, errors.New("secrets: vault addr must use https unless the host is loopback")
 	}
 	if cfg.Token == "" {
 		return nil, errors.New("secrets: vault token is required")
@@ -105,6 +135,9 @@ func NewVaultSecretStore(cfg VaultStoreConfig, client *http.Client) (SecretStore
 	}
 	if err := validateVaultPath(mount); err != nil {
 		return nil, fmt.Errorf("secrets: vault mount %q: %w", mount, err)
+	}
+	if root, _, _ := strings.Cut(mount, "/"); reservedVaultMounts[strings.ToLower(root)] {
+		return nil, fmt.Errorf("secrets: vault mount %q is a reserved Vault system path", mount)
 	}
 	if p := cfg.NamePrefix; p != "" {
 		if !strings.HasSuffix(p, "/") {
@@ -133,6 +166,77 @@ func NewVaultSecretStore(cfg VaultStoreConfig, client *http.Client) (SecretStore
 		namespace: cfg.Namespace,
 	}, nil
 }
+
+// isLoopbackHost reports whether host is localhost or a loopback IP.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// ensureKV2 checks once, before the store's first request, that the mount is a
+// KV v2 engine. Only success is cached, so a transient failure is retried.
+func (s *vaultSecretStore) ensureKV2(ctx context.Context) error {
+	s.kv2Mu.Lock()
+	defer s.kv2Mu.Unlock()
+	if s.kv2OK {
+		return nil
+	}
+	status, body, err := s.do(ctx, http.MethodGet, s.base+"/v1/sys/internal/ui/mounts/"+escapeVaultPath(s.mount), nil)
+	if err != nil {
+		return fmt.Errorf("mount check: %w", err)
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("mount check: unexpected status %d", status)
+	}
+	var r struct {
+		Data struct {
+			Type    string `json:"type"`
+			Options struct {
+				Version string `json:"version"`
+			} `json:"options"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return errors.New("mount check: malformed response")
+	}
+	if r.Data.Type != "kv" || r.Data.Options.Version != "2" {
+		return ErrNotKV2
+	}
+	s.kv2OK = true
+	return nil
+}
+
+// vaultErrorBody is the shape of a Vault error response. A KV v2 404 for a
+// missing or soft-deleted key has an empty errors array (and, when
+// soft-deleted, the latest version's metadata); a 404 naming errors is a
+// missing route, mount or namespace.
+type vaultErrorBody struct {
+	Errors []string `json:"errors"`
+	Data   *struct {
+		Metadata *struct {
+			Version int64 `json:"version"`
+		} `json:"metadata"`
+	} `json:"data"`
+}
+
+// keyNotFound reports whether a 404 body means "no live value at this key",
+// and returns the latest (soft-deleted) version when Vault reports one.
+func keyNotFound(body []byte) (version int64, ok bool) {
+	var b vaultErrorBody
+	if err := json.Unmarshal(body, &b); err != nil || len(b.Errors) != 0 {
+		return 0, false
+	}
+	if b.Data != nil && b.Data.Metadata != nil {
+		version = b.Data.Metadata.Version
+	}
+	return version, true
+}
+
+// routeNotFound describes a 404 that is not a missing key.
+const routeNotFound = "unexpected status 404 (no such route, mount or namespace)"
 
 // validateVaultKey rejects keys that could escape the configured prefix, before
 // any request is built.
@@ -246,10 +350,15 @@ type kvReadResponse struct {
 }
 
 // GetVersion returns key's current value and KV v2 version. An absent,
-// deleted or destroyed key wraps ErrNotFound.
+// deleted or destroyed key wraps ErrNotFound; for a soft-deleted or destroyed
+// latest version the returned version is that version (0 when the key never
+// existed), so a CAS writer can build on it instead of conflicting forever.
 func (s *vaultSecretStore) GetVersion(ctx context.Context, key string) (string, int64, error) {
 	if err := validateVaultKey(key); err != nil {
 		return "", 0, err
+	}
+	if err := s.ensureKV2(ctx); err != nil {
+		return "", 0, s.opError("get", key, err)
 	}
 	status, body, err := s.do(ctx, http.MethodGet, s.apiURL("data", key), nil)
 	if err != nil {
@@ -258,7 +367,10 @@ func (s *vaultSecretStore) GetVersion(ctx context.Context, key string) (string, 
 	switch status {
 	case http.StatusOK:
 	case http.StatusNotFound:
-		return "", 0, s.opError("get", key, ErrNotFound)
+		if ver, ok := keyNotFound(body); ok {
+			return "", ver, s.opError("get", key, ErrNotFound)
+		}
+		return "", 0, s.opError("get", key, routeNotFound)
 	default:
 		return "", 0, s.statusError("get", key, status)
 	}
@@ -266,8 +378,11 @@ func (s *vaultSecretStore) GetVersion(ctx context.Context, key string) (string, 
 	if err := json.Unmarshal(body, &r); err != nil {
 		return "", 0, s.opError("get", key, "malformed response")
 	}
-	if r.Data == nil || r.Data.Data == nil {
-		return "", 0, s.opError("get", key, ErrNotFound)
+	if r.Data == nil || r.Data.Metadata.Version < 1 {
+		return "", 0, s.opError("get", key, fmt.Errorf("read has no version: %w", ErrNotKV2))
+	}
+	if r.Data.Data == nil {
+		return "", r.Data.Metadata.Version, s.opError("get", key, ErrNotFound)
 	}
 	v, ok := r.Data.Data["value"].(string)
 	if !ok {
@@ -276,14 +391,17 @@ func (s *vaultSecretStore) GetVersion(ctx context.Context, key string) (string, 
 	return v, r.Data.Metadata.Version, nil
 }
 
-// Put upserts key=value. A key's first version also sets max_versions=1 so an
-// overwritten value is not recoverable from an older version.
+// Put upserts key=value. It first sets max_versions=1 on the key's metadata
+// (creating it for a new key), so an overwritten value is never recoverable
+// from an older version and a failure leaves nothing written to roll back.
 func (s *vaultSecretStore) Put(ctx context.Context, key, value string) error {
 	return s.write(ctx, "put", key, value, nil)
 }
 
 // PutIfVersion writes value only when key's current version is version, using
 // KV v2 options.cas (0 means create-only). A mismatch wraps ErrVersionConflict.
+// A create-only write sets max_versions=1 first, as Put does; a write at a
+// version >= 1 targets a key that already exists and leaves metadata alone.
 func (s *vaultSecretStore) PutIfVersion(ctx context.Context, key, value string, version int64) error {
 	if version < 0 {
 		return s.opError("put", key, "negative version")
@@ -298,14 +416,23 @@ type kvWriteResponse struct {
 	} `json:"data"`
 }
 
-// write posts the value, with options.cas when cas is set, then applies
-// max_versions=1 to a newly created key.
+// write applies max_versions=1 (unless this is a CAS write to an existing
+// version) and then posts the value, with options.cas when cas is set. It
+// accepts the write only on 200 with a KV v2 version.
 func (s *vaultSecretStore) write(ctx context.Context, op, key, value string, cas *int64) error {
 	if err := validateVaultKey(key); err != nil {
 		return err
 	}
 	if value == "" {
 		return ErrEmptyValue
+	}
+	if err := s.ensureKV2(ctx); err != nil {
+		return s.opError(op, key, err)
+	}
+	if cas == nil || *cas == 0 {
+		if err := s.setMaxVersions(ctx, key); err != nil {
+			return s.opError(op, key, err)
+		}
 	}
 	payload := map[string]any{"data": map[string]string{"value": value}}
 	if cas != nil {
@@ -316,22 +443,17 @@ func (s *vaultSecretStore) write(ctx context.Context, op, key, value string, cas
 		return s.opError(op, key, err)
 	}
 	switch {
-	case status == http.StatusOK || status == http.StatusNoContent:
+	case status == http.StatusOK:
+	case status == http.StatusNoContent:
+		return s.opError(op, key, fmt.Errorf("write returned no version: %w", ErrNotKV2))
 	case status == http.StatusBadRequest && cas != nil && bytes.Contains(body, []byte("check-and-set")):
 		return fmt.Errorf("secrets: vault %s %q (mount %q) at version %d: %w", op, key, s.mount, *cas, ErrVersionConflict)
 	default:
 		return s.statusError(op, key, status)
 	}
 	var r kvWriteResponse
-	_ = json.Unmarshal(body, &r) // an unparseable version is treated as new below
-	if r.Data.Version > 1 {
-		return nil
-	}
-	// A new key: keep only the latest version from now on. If that fails, remove
-	// the key again so no key exists without the single-version guarantee.
-	if err := s.setMaxVersions(ctx, key); err != nil {
-		_ = s.Delete(ctx, key)
-		return s.opError(op, key, err)
+	if err := json.Unmarshal(body, &r); err != nil || r.Data.Version < 1 {
+		return s.opError(op, key, fmt.Errorf("write returned no version: %w", ErrNotKV2))
 	}
 	return nil
 }
@@ -354,13 +476,21 @@ func (s *vaultSecretStore) Delete(ctx context.Context, key string) error {
 	if err := validateVaultKey(key); err != nil {
 		return err
 	}
-	status, _, err := s.do(ctx, http.MethodDelete, s.apiURL("metadata", key), nil)
+	if err := s.ensureKV2(ctx); err != nil {
+		return s.opError("delete", key, err)
+	}
+	status, body, err := s.do(ctx, http.MethodDelete, s.apiURL("metadata", key), nil)
 	if err != nil {
 		return s.opError("delete", key, err)
 	}
 	switch status {
-	case http.StatusOK, http.StatusNoContent, http.StatusNotFound:
+	case http.StatusOK, http.StatusNoContent:
 		return nil
+	case http.StatusNotFound:
+		if _, ok := keyNotFound(body); ok {
+			return nil
+		}
+		return s.opError("delete", key, routeNotFound)
 	default:
 		return s.statusError("delete", key, status)
 	}
@@ -380,6 +510,9 @@ type kvListResponse struct {
 // validation are skipped, so a hostile listing cannot steer the walk outside
 // the prefix.
 func (s *vaultSecretStore) List(ctx context.Context) ([]SecretMeta, error) {
+	if err := s.ensureKV2(ctx); err != nil {
+		return nil, s.opError("list", s.prefix, err)
+	}
 	var out []SecretMeta
 	requests := 0
 	dirs := []string{""}
@@ -397,7 +530,10 @@ func (s *vaultSecretStore) List(ctx context.Context) ([]SecretMeta, error) {
 		switch status {
 		case http.StatusOK:
 		case http.StatusNotFound:
-			continue // empty directory
+			if _, ok := keyNotFound(body); ok {
+				continue // empty directory
+			}
+			return nil, s.opError("list", s.prefix+dir, routeNotFound)
 		default:
 			return nil, s.statusError("list", s.prefix+dir, status)
 		}
