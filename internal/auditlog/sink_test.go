@@ -133,24 +133,24 @@ func TestSinkNilAndEmptyAreNoOps(t *testing.T) {
 
 // TestSinkFlushWaitsForQueuedLines: Flush returns only once every line queued
 // before it reached the output, so a reader right after it never reads short
-// (the harness's decision-log oracle relies on this).
+// (the harness's decision-log oracle relies on this). While the writer is
+// stalled mid-write Flush cannot finish: a bounded one times out.
 func TestSinkFlushWaitsForQueuedLines(t *testing.T) {
-	bw := &blockWriter{release: make(chan struct{})}
+	bw := &blockWriter{release: make(chan struct{}), entered: make(chan struct{}, 1)}
 	s, err := New(config.JSONLogConfig{Output: config.JSONLogOutputStdout}, sinkMeta, nil, discardLogger(), WithWriter(bw))
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.Observe(events(2))
 	s.Observe(events(1))
-	flushed := make(chan error, 1)
-	go func() { flushed <- s.Flush(context.Background()) }()
-	select {
-	case err := <-flushed:
-		t.Fatalf("Flush returned (%v) while the writer was still stalled", err)
-	default:
+	<-bw.entered // the writer is parked inside the first batch's Write
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := s.Flush(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Flush with the writer stalled = %v, want deadline exceeded", err)
 	}
 	close(bw.release)
-	if err := <-flushed; err != nil {
+	if err := s.Flush(context.Background()); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
 	if got := len(decode(t, bw.buf.String())); got != 3 {
@@ -166,24 +166,56 @@ func TestSinkFlushWaitsForQueuedLines(t *testing.T) {
 	}
 }
 
-// TestSinkFlushIsBoundedByContext: a stuck writer with a full queue makes Flush
-// give up at its deadline instead of hanging the caller.
-func TestSinkFlushIsBoundedByContext(t *testing.T) {
-	bw := &blockWriter{release: make(chan struct{})}
-	s, err := New(config.JSONLogConfig{Output: config.JSONLogOutputStdout}, sinkMeta, nil, discardLogger(), WithWriter(bw))
+// TestSinkFlushNeverBlocksTheQueue: with the writer stalled and the queue full,
+// a Flush gives up at its deadline, and a Flush still waiting holds up neither
+// Observe (which drops) nor a bounded Close.
+func TestSinkFlushNeverBlocksTheQueue(t *testing.T) {
+	m, scrape := newMetrics(t)
+	bw := &blockWriter{release: make(chan struct{}), entered: make(chan struct{}, 1)}
+	s, err := New(config.JSONLogConfig{Output: config.JSONLogOutputStdout}, sinkMeta, m, discardLogger(), WithWriter(bw))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < queueBatches+2; i++ { // the writer holds one, the queue the rest
+	s.Observe(events(1))
+	<-bw.entered // the writer holds that batch; the queue is empty again
+	for i := 0; i < queueBatches+1; i++ {
 		s.Observe(events(1))
+	}
+	if !strings.Contains(scrape(), "warden_auditlog_dropped_total") {
+		t.Fatal("the queue never filled: no batch was dropped")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if err := s.Flush(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Flush with a full queue and a stuck writer = %v, want deadline exceeded", err)
 	}
+
+	// A long Flush stays pending on the stalled writer.
+	flushCtx, flushCancel := context.WithCancel(context.Background())
+	defer flushCancel()
+	pending := make(chan error, 1)
+	go func() { pending <- s.Flush(flushCtx) }()
+
+	unblocked := make(chan error, 1)
+	go func() {
+		s.Observe(events(1)) // full queue: dropped, never blocks
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer closeCancel()
+		unblocked <- s.Close(closeCtx)
+	}()
+	select {
+	case err := <-unblocked:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Close with a stuck writer = %v, want deadline exceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a pending Flush held up Observe or Close")
+	}
 	close(bw.release)
-	closeSink(t, s)
+	<-s.done
+	if err := <-pending; err != nil {
+		t.Errorf("the pending Flush after the writer exited = %v, want nil", err)
+	}
 }
 
 // errWriter always fails.
@@ -242,10 +274,19 @@ func TestFailingWriter(t *testing.T) {
 // blockWriter blocks every Write until released.
 type blockWriter struct {
 	release chan struct{}
+	// entered, when set (buffered), receives a signal each time a Write
+	// starts waiting, so a test knows the writer is parked.
+	entered chan struct{}
 	buf     syncBuf
 }
 
 func (b *blockWriter) Write(p []byte) (int, error) {
+	if b.entered != nil {
+		select {
+		case b.entered <- struct{}{}:
+		default:
+		}
+	}
 	<-b.release
 	return b.buf.Write(p)
 }
