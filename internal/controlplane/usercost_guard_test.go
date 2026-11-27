@@ -56,8 +56,8 @@ func TestCostCapCapabilityGate(t *testing.T) {
 		createRules(t, e.srv, engLLM(5)) // v2: a cost cap
 		createRules(t, e.srv, engLLM(0)) // v3: the same rule, rateLimit only
 		createRules(t, e.srv)            // v4: no rules
-		beat(e.srv, "old", "agent-a", config.CapBlocklistV1)
-		beat(e.srv, "new", "agent-b", config.CapUserCostV1)
+		beat(e.srv, "old", "agent-a", config.CapBlocklistV1, config.CapUserLimitsV1)
+		beat(e.srv, "new", "agent-b", config.CapUserCostV1, config.CapUserLimitsV1)
 
 		if rec := e.send(admin, http.MethodPost, rollbackPath(3), "", ifMatch(4)); rec.Code != http.StatusOK {
 			t.Fatalf("rateLimit-only rollback = %d %s, want 200", rec.Code, rec.Body.String())
@@ -100,7 +100,7 @@ func TestCostCapCapabilityGate(t *testing.T) {
 			t.Fatalf("forced audit row = %+v, want policy.rollback with force, capability usercost/v1, workersLacking old", forced)
 		}
 		// Once every connected worker has the cap, no force is needed.
-		beat(e.srv, "old", "agent-a", config.CapUserCostV1)
+		beat(e.srv, "old", "agent-a", config.CapUserCostV1, config.CapUserLimitsV1)
 		if rec := e.send(admin, http.MethodPost, rollbackPath(4), "", ifMatch(6)); rec.Code != http.StatusOK {
 			t.Fatalf("rollback to no rules = %d %s", rec.Code, rec.Body.String())
 		}
@@ -114,7 +114,7 @@ func TestCostCapCapabilityGate(t *testing.T) {
 		if err := s.importInitialVersion(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		beat(s, "old", "", config.CapBlocklistV1)
+		beat(s, "old", "", config.CapBlocklistV1, config.CapUserLimitsV1)
 		p := policyOfWire(baseDoc(t, s))
 		p.UserLimits = []config.UserLimit{{Name: "eng-rate", RateLimit: "60/minute", Match: config.UserLimitMatch{Groups: []string{"eng"}}}}
 		if err := s.WritePolicy(context.Background(), p, dashboard.WriteMeta{}); err != nil {
@@ -143,12 +143,16 @@ func TestCostCapCapabilityGate(t *testing.T) {
 		if err := s.importInitialVersion(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		beat(s, "old", "", config.CapBlocklistV1)
+		beat(s, "old", "", config.CapBlocklistV1, config.CapUserLimitsV1)
 		_, hd, err := s.headDoc(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
-		clr, err := s.gate.Clear(context.Background(), approvals.Change{Target: approvals.TargetPolicy, Base: 1, BaseDoc: draftDoc(hd), Draft: draftDoc(hd)})
+		// The clearance covers the doc with the rule added: since #293 the
+		// draft doc carries the limit keys, so a clearance for head would not.
+		withCap := hd
+		withCap.UserLimits = []config.UserLimit{engLLM(5)}
+		clr, err := s.gate.Clear(context.Background(), approvals.Change{Target: approvals.TargetPolicy, Base: 1, BaseDoc: draftDoc(hd), Draft: draftDoc(withCap)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -166,7 +170,7 @@ func TestCostCapCapabilityGate(t *testing.T) {
 	t.Run("file mode", func(t *testing.T) {
 		path := writePolicyFile(t, "api.openai.com")
 		s := New(Config{PolicyPath: path, Logger: testJSONLogger(nil)})
-		beat(s, "old", "", config.CapBlocklistV1)
+		beat(s, "old", "", config.CapBlocklistV1, config.CapUserLimitsV1)
 		p := policyOfWire(baseDoc(t, s))
 		p.UserLimits = []config.UserLimit{engLLM(5)}
 		wantCostLack(t, s.WritePolicy(context.Background(), p, dashboard.WriteMeta{}), "old")
