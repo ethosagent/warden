@@ -326,6 +326,14 @@ type GrantStore interface {
 	// idempotent: revoking a revoked grant succeeds and keeps the first
 	// RevokedAt. ErrNotFound when there is no row.
 	RevokeGrant(ctx context.Context, userKey, provider, grantID string) (Grant, error)
+	// RestoreGrant undoes a reconnect that never completed: when the
+	// (userKey, provider) row is connecting with grant id connectingID and its
+	// PrevGrantID is prevID, it becomes active again with grant id prevID and
+	// the scopes and account the earlier activation set (CompareAndSet; the
+	// W-P3-BRKR-04 reconciler calls it when the stored token still carries
+	// prevID). ErrGrantState when the row is in another state or carries other
+	// ids; ErrNotFound when there is no row.
+	RestoreGrant(ctx context.Context, userKey, provider, connectingID, prevID string) (Grant, error)
 	// GetGrant returns the (userKey, provider) grant in any state.
 	GetGrant(ctx context.Context, userKey, provider string) (Grant, error)
 	// ListGrants returns the user's grants ordered by provider; revoked ones

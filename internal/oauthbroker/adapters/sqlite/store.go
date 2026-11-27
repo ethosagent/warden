@@ -467,6 +467,26 @@ RETURNING `+grantCols,
 	return cur, nil
 }
 
+// RestoreGrant implements oauthbroker.GrantStore as a compare-and-set on
+// (connecting, grant_id, prev_grant_id).
+func (s *Store) RestoreGrant(ctx context.Context, userKey, provider, connectingID, prevID string) (oauthbroker.Grant, error) {
+	if connectingID == "" || prevID == "" {
+		return oauthbroker.Grant{}, fmt.Errorf("%w: connecting and previous grant ids are required", oauthbroker.ErrInvalid)
+	}
+	g, err := s.grantRow(ctx, "restore grant", `UPDATE oauth_grants
+SET state = 'active', grant_id = prev_grant_id, prev_grant_id = NULL, updated_at = ?
+WHERE user_key = ? AND provider = ? AND state = 'connecting' AND grant_id = ? AND prev_grant_id = ?
+RETURNING `+grantCols,
+		ms(s.clk.Now()), userKey, provider, connectingID, prevID)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return g, err
+	}
+	if _, err := s.GetGrant(ctx, userKey, provider); err != nil {
+		return oauthbroker.Grant{}, err
+	}
+	return oauthbroker.Grant{}, oauthbroker.ErrGrantState
+}
+
 // GetGrant implements oauthbroker.GrantStore.
 func (s *Store) GetGrant(ctx context.Context, userKey, provider string) (oauthbroker.Grant, error) {
 	g, err := s.grantRow(ctx, "get grant", `SELECT `+grantCols+` FROM oauth_grants WHERE user_key = ? AND provider = ?`, userKey, provider)
