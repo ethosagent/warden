@@ -914,8 +914,9 @@ dedicated `warden-portal` OIDC client, separate from the console's. Like
 served copy under `--state-dir`, where a different block is ignored with a
 warning), never sent to workers, and kept byte-identical by the dashboard
 writers. An absent block or `enabled: false` changes nothing and mounts no
-route. This section covers the config surface; the portal routes arrive in
-later tickets of the consent sign-in feature.
+route. The portal's sign-in routes are described under "Consent portal sign-in"
+below; the IdP link storage, the session middleware and logout arrive in later
+tickets of the consent sign-in feature.
 
 ```yaml
 consent:
@@ -948,6 +949,47 @@ consent:
   from `consent.oidc.issuer` is refused with 400 `identity_issuer_mismatch`.
 - `https` issuer unless `internalIssuerURL` is set; `redirectURL` is `https`
   unless its host is loopback, and must differ from `console.oidc.redirectURL`.
+
+### Consent portal sign-in
+
+With the block enabled and `--state-dir` set the control plane mounts:
+
+| Route | What it does |
+|---|---|
+| `GET /portal/login?next=<path>` | stores a `purpose=portal` row in `oidc_pending` (10 min TTL, single use, its own 10,000 cap), sets the `__Host-warden_portal_login` binding cookie and redirects to the IdP (S256 PKCE, state, nonce) as the portal client |
+| `GET /portal/callback` | consumes only a `purpose=portal` row (a console state, or a missing or wrong binding cookie, is `state_invalid`), exchanges the code and verifies the ID token for the portal client (audience and `azp` = `consent.oidc.clientID`, RS256/ES256, nonce, 60s skew), admits the user and creates a `portal_sessions` row |
+| `GET /portal` | a minimal no-store page: the signed-in email and a sign-out form, or a sign-in link |
+
+- `next` is kept only for a same-origin path under `/portal/` or `/connect/` (no
+  scheme, no `//`, no backslash, no dot segment); anything else lands on `/portal`.
+- Admission: no session, and nothing written, when the `sub` or `email` is on the
+  user block list (`login_error=blocked`), when `allowedGroups` is set and none of the
+  user's groups (first 256) matches (`not_allowed`), or when `idpLink` is enabled and
+  the token response has no refresh token (502 `{"error":"offline_access_not_granted"}`).
+  While no block list has loaded both routes refuse with 503 `block_list_unavailable`
+  and no existing portal session authenticates. A failed `portal_sessions` insert is
+  503 `session_store_unavailable` (an IdP link stored just before may then exist
+  without a session).
+- Other failures redirect to `/portal?login_error=<code>` with a code from
+  `state_invalid`, `nonce_mismatch`, `token_invalid`, `exchange_failed`, `idp_error`,
+  `idp_unavailable`; IdP error text is never echoed. Until discovery succeeds both
+  routes answer 503 `idp_unavailable`; startup and the worker routes are unaffected.
+- `portal_sessions` (migration `portal_sessions/0001`) holds `id_hash` (sha256 of a
+  fresh 32-byte id), `iss`, `sub`, `email`, `groups_json`, `created_at`,
+  `last_seen_at` (written at most once a minute) and `expires_at`. Idle and absolute
+  expiry use the control plane's clock; expired rows are swept every minute; sessions
+  survive restarts and are cleared by `warden-cp restore`. The cookie is
+  `__Host-warden_portal` (Secure, HttpOnly, SameSite=Lax, Path=/, no Domain) for an
+  https `redirectURL`; `warden_portal` only for an http loopback one, with a startup
+  warning. A portal session is not a console session: the console reads only
+  `__Host-warden_console` and `sessions`.
+- Each callback logs one `portal_login` line (`result`, `reason`, `sub`,
+  `duration_ms`); with admin audit on it records `portal.login` (target
+  `portal_session`, `target_ref` the session's short hash) or, after a portal state
+  was consumed, `portal.login_failed` with `{reason: <login_error code>}`, rate-limited
+  to 20 rows per address per minute by its own limiter (a portal flood does not use up
+  the `auth.login_failed` budget). No code, state, verifier, nonce, token or
+  cookie value is logged or recorded.
 
 ## API keys (`console.apiKeys`)
 

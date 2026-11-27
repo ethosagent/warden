@@ -187,6 +187,20 @@ func (i *OIDCIssuer) serve(l net.Listener) {
 	i.mu.Unlock()
 }
 
+// ServeHTTP serves r in process, as the listener would: a test that plays the
+// browser leg needs no client of its own. A stopped issuer answers 503, the way
+// an unreachable IdP fails a browser.
+func (i *OIDCIssuer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	i.mu.Lock()
+	running := i.srv != nil
+	i.mu.Unlock()
+	if !running {
+		http.Error(w, "fake issuer is stopped", http.StatusServiceUnavailable)
+		return
+	}
+	i.route(w, r)
+}
+
 // route dispatches the two endpoints by path (a switch, not a mux, so the fake
 // registers no routes: X9 keeps those in a server's routes.go).
 func (i *OIDCIssuer) route(w http.ResponseWriter, r *http.Request) {

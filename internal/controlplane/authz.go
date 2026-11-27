@@ -306,6 +306,12 @@ func cpRouteTable() map[routeKey]authzRow {
 		{get, "/auth/callback", handler("auth.callback")},
 		{post, "/auth/logout", handler("auth.logout")},
 		{post, "/auth/breakglass", handler("auth.breakglass")},
+		// The consent portal (W-P3-CSIG-02): a portal session is not a console
+		// Principal, so these never reach the console authz middleware.
+		// Mounted only with consent.enabled and a state dir.
+		{get, portalLoginPath, handler("portal.login")},
+		{get, portalCallbackPath, handler("portal.callback")},
+		{get, portalHomePath, handler("portal.home")},
 	}
 	t := make(map[routeKey]authzRow, len(rows))
 	for _, r := range rows {

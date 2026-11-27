@@ -526,11 +526,11 @@ func TestVersionedStoreCreateCallers(t *testing.T) {
 	createCall := regexp.MustCompile(`\.Create\(ctx, `)
 	publishCall := regexp.MustCompile(`\.(publish|publishLocked)\(ctx, `)
 	// wantCreate call the policy version store's Create; otherCreate call other
-	// stores' Create (sessions, worker tokens). Any other file with a
+	// stores' Create (sessions, portal sessions, worker tokens). Any other file with a
 	// `.Create(ctx, ` call fails: classify it here after routing a version write
 	// through Server.writeVersioned.
 	wantCreate := map[string]bool{"policy_publish.go": true, "policycli.go": true, "policystore.go": true}
-	otherCreate := map[string]bool{"approvals_agents.go": true, "auth.go": true, "breakglass.go": true, "workertokens_admin.go": true, "workertokens_cli.go": true,
+	otherCreate := map[string]bool{"approvals_agents.go": true, "auth.go": true, "portal_auth.go": true, "breakglass.go": true, "workertokens_admin.go": true, "workertokens_cli.go": true,
 		"agents.go": true, "agentcli.go": true, "enrollment_cli.go": true, "enrollment_admin.go": true}
 	wantPublish := map[string]bool{"policy_publish.go": true, "approvals_apply.go": true}
 	files, err := filepath.Glob("*.go")

@@ -14,7 +14,7 @@ import (
 // creation plus the session TTL.
 func TestBreakGlass_MeFields(t *testing.T) {
 	r := newBGRig(t, bgOpts{})
-	r.srv.sessions.now = r.clk.Now
+	r.srv.sessions.SetNow(r.clk.Now)
 	created := r.clk.Now()
 	raw, _, err := r.srv.sessions.Create(context.Background(),
 		SessionInput{Iss: "breakglass", Sub: "breakglass:" + bgUser, AuthMethod: AuthMethodBreakglass},
@@ -40,7 +40,7 @@ func TestBreakGlass_MeFields(t *testing.T) {
 // it never logs a session id.
 func TestBreakGlass_SessionWarn(t *testing.T) {
 	r := newBGRig(t, bgOpts{})
-	r.srv.sessions.now = r.clk.Now
+	r.srv.sessions.SetNow(r.clk.Now)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r.srv.Start(ctx)

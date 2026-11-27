@@ -2,102 +2,31 @@ package controlplane
 
 import (
 	"context"
-	"crypto/subtle"
-	"errors"
-	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/webauth"
 )
 
 // CSRFHeader carries the per-session CSRF token on state-changing requests.
-const CSRFHeader = "X-Warden-CSRF"
+const CSRFHeader = webauth.CSRFHeader
 
-// defaultPort lists the ports a browser leaves out of Origin.
-var defaultPort = map[string]string{"https": "443", "http": "80"}
-
-const (
-	cookieNameSecure = "__Host-warden_console"
-	cookieNamePlain  = "warden_console"
-)
+// consoleCookieBase is the console session cookie's name: __Host-warden_console
+// on https, warden_console on a loopback http redirectURL.
+const consoleCookieBase = "warden_console"
 
 // SessionCookie names and flags the console session cookie. Secure is decided
 // from the configured redirect URL, never from r.TLS: a TLS-terminating proxy
 // in front of the control plane must not downgrade the cookie.
-type SessionCookie struct {
-	Name   string
-	Secure bool
-	// origin is scheme://host of the redirect URL, the only Origin accepted on
-	// state-changing requests.
-	origin string
-}
+type SessionCookie = webauth.Cookie
 
 // NewSessionCookie derives the cookie spec from console.oidc.redirectURL. An
 // https URL gives the __Host- cookie (Secure, Path=/, no Domain). Plain http is
 // accepted only for a loopback host and gives an unprefixed, non-Secure cookie.
 func NewSessionCookie(redirectURL string) (SessionCookie, error) {
-	u, err := url.Parse(redirectURL)
-	if err != nil || u.Host == "" {
-		return SessionCookie{}, fmt.Errorf("session cookie: redirect URL %q is not absolute", redirectURL)
-	}
-	// Browsers send Origin lowercased and without the scheme's default port.
-	host := strings.ToLower(u.Hostname())
-	if strings.Contains(host, ":") {
-		host = "[" + host + "]"
-	}
-	if p := u.Port(); p != "" && p != defaultPort[u.Scheme] {
-		host += ":" + p
-	}
-	origin := strings.ToLower(u.Scheme) + "://" + host
-	switch u.Scheme {
-	case "https":
-		return SessionCookie{Name: cookieNameSecure, Secure: true, origin: origin}, nil
-	case "http":
-		if !isLoopback(u.Hostname()) {
-			return SessionCookie{}, errors.New("session cookie: an http redirect URL is allowed only on a loopback host")
-		}
-		return SessionCookie{Name: cookieNamePlain, origin: origin}, nil
-	}
-	return SessionCookie{}, fmt.Errorf("session cookie: redirect URL scheme %q is not http(s)", u.Scheme)
-}
-
-func isLoopback(h string) bool {
-	if strings.EqualFold(h, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(h)
-	return ip != nil && ip.IsLoopback()
-}
-
-// New returns the Set-Cookie value for a fresh session. maxAge is the absolute
-// session lifetime.
-func (c SessionCookie) New(rawID string, maxAge time.Duration) *http.Cookie {
-	return &http.Cookie{
-		Name: c.Name, Value: rawID, Path: "/", MaxAge: int(maxAge.Seconds()),
-		Secure: c.Secure, HttpOnly: true, SameSite: http.SameSiteLaxMode,
-	}
-}
-
-// Clear returns the Set-Cookie value that deletes the cookie.
-func (c SessionCookie) Clear() *http.Cookie {
-	return &http.Cookie{
-		Name: c.Name, Value: "", Path: "/", MaxAge: -1,
-		Secure: c.Secure, HttpOnly: true, SameSite: http.SameSiteLaxMode,
-	}
-}
-
-// From returns the raw session id the request carries, if any.
-func (c SessionCookie) From(r *http.Request) (string, bool) {
-	ck, err := r.Cookie(c.Name)
-	if err != nil || ck.Value == "" {
-		return "", false
-	}
-	return ck.Value, true
+	return webauth.NewCookie(redirectURL, consoleCookieBase)
 }
 
 // sessionReader is the part of SessionStore the middleware uses. It is a seam so
@@ -156,13 +85,13 @@ func withSessionRefuse(next, refuse http.Handler, store sessionReader, cookie Se
 		if guard != nil && kind != PrincipalBreakglass && guard(w, r, p) {
 			return
 		}
-		if !csrfOK(r, rawID, cookie.origin) {
+		if !consoleCSRF(cookie).Valid(r, rawID) {
 			logger.Warn("console csrf check failed", "session", shortHash(sess.IDHash), "method", r.Method, "path", r.URL.Path)
 			ctx := WithPrincipal(context.WithValue(r.Context(), csrfRefusedKey{}, true), p)
 			refuse.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
-		if !sess.LastSeenAt.After(store.Now().Add(-touchInterval)) {
+		if webauth.TouchDue(sess, store.Now()) {
 			if _, err := store.Touch(r.Context(), rawID); err != nil {
 				logger.Warn("console session touch failed", "session", shortHash(sess.IDHash), "error", err)
 			}
@@ -171,19 +100,10 @@ func withSessionRefuse(next, refuse http.Handler, store sessionReader, cookie Se
 	})
 }
 
-// csrfOK applies the CSRF rules to a request that carries a live session. Safe
-// methods pass. Otherwise the header must equal the session's token (constant
-// time) and an Origin header, when present, must equal the console origin.
-func csrfOK(r *http.Request, rawID, origin string) bool {
-	switch r.Method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions:
-		return true
-	}
-	if o := r.Header.Get("Origin"); o != "" && o != origin {
-		return false
-	}
-	got := r.Header.Get(CSRFHeader)
-	return subtle.ConstantTimeCompare([]byte(got), []byte(CSRFToken(rawID))) == 1
+// consoleCSRF is the console's CSRF rule: the X-Warden-CSRF header under the
+// console label and, when Origin is sent, the console's own origin.
+func consoleCSRF(cookie SessionCookie) webauth.CSRF {
+	return webauth.CSRF{Label: csrfLabel, Origin: cookie.Origin()}
 }
 
 // initSessions builds the session store when the console is in oidc mode and a
