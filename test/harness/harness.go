@@ -716,6 +716,12 @@ func New(t testing.TB, opts ...Option) *H {
 	for _, opt := range opts {
 		opt(h)
 	}
+	if h.wantPerUserVault && (h.wantConsent || h.wantBroker) {
+		// Each option renders its own consent block (oidc client, store,
+		// providers); merging them would silently drop one side's config.
+		t.Fatal("harness: WithPerUserSecretsVault owns the consent block (vault store and google provider); " +
+			"it cannot combine with WithConsent or WithOAuthBroker")
+	}
 	// Baseline BEFORE boot: only goroutines the harness itself starts can
 	// outlive it.
 	h.leakBaseline = runtime.NumGoroutine()

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,7 @@ type utRecords struct {
 	puts    int // StoreRotated calls, including failed ones
 	writes  int // successful writes
 	readVer []GrantVersion
+	block   bool // StoreRotated hangs until its context ends
 }
 
 func (r *utRecords) LoadGrant(_ context.Context, _, _ string) (TokenRecord, GrantVersion, error) {
@@ -66,11 +68,17 @@ func (r *utRecords) LoadGrant(_ context.Context, _, _ string) (TokenRecord, Gran
 	return r.rec, GrantVersion{N: r.version, Versioned: true, GrantID: r.rec.GrantID}, nil
 }
 
-func (r *utRecords) StoreRotated(_ context.Context, _, _ string, rec TokenRecord, read GrantVersion) error {
+func (r *utRecords) StoreRotated(ctx context.Context, _, _ string, rec TokenRecord, read GrantVersion) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.puts++
 	r.readVer = append(r.readVer, read)
+	if r.block {
+		r.mu.Unlock()
+		<-ctx.Done()
+		r.mu.Lock()
+		return ctx.Err()
+	}
 	if r.putErr != nil {
 		return r.putErr
 	}
@@ -186,7 +194,9 @@ type utEnv struct {
 	logs    *bytes.Buffer
 	srv     *httptest.Server
 	hits    atomic.Int32
-	reply   atomic.Value // func(w http.ResponseWriter, n int)
+	reply   atomic.Value // func(w http.ResponseWriter, n int): a custom reply; unset means the strict rotating provider
+	pmu     sync.Mutex
+	valid   map[string]bool // refresh tokens the strict provider still accepts
 	slept   []time.Duration
 	smu     sync.Mutex
 }
@@ -199,10 +209,31 @@ func rotating(n int, w http.ResponseWriter) {
 func newUTEnv(t *testing.T, typ string) *utEnv {
 	t.Helper()
 	env := &utEnv{clk: &utClock{t: utStart}, recs: &utRecords{}, metrics: &utMetrics{}, alerter: &utAlerter{}, logs: &bytes.Buffer{}}
-	env.reply.Store(func(w http.ResponseWriter, n int) { rotating(n, w) })
-	env.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	env.valid = map[string]bool{utRefresh0: true}
+	env.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := int(env.hits.Add(1))
-		env.reply.Load().(func(http.ResponseWriter, int))(w, n)
+		if f, ok := env.reply.Load().(func(http.ResponseWriter, int)); ok {
+			f(w, n)
+			return
+		}
+		// The strict rotating provider: a refresh token works once; presenting a
+		// consumed (or unknown) one is invalid_grant, like Google/Dex rotation.
+		_ = r.ParseForm()
+		presented := r.PostForm.Get("refresh_token")
+		env.pmu.Lock()
+		ok := env.valid[presented]
+		delete(env.valid, presented)
+		if ok {
+			env.valid[fmt.Sprintf("ut-refresh-%d-SECRET", n)] = true
+		}
+		env.pmu.Unlock()
+		if !ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"error":"invalid_grant","error_description":"SENSITIVE-DESCRIPTION"}`)
+			return
+		}
+		rotating(n, w)
 	}))
 	t.Cleanup(env.srv.Close)
 	cfg := config.OAuthProviderConfig{ID: utProvider, Type: typ, ClientID: "cid", ClientSecretEnv: "SEC", TokenURL: env.srv.URL + "/token", AllowedScopes: []string{"a", "b", "c"}}
@@ -276,12 +307,10 @@ func TestEngineSingleflight(t *testing.T) {
 			toks[i], errs[i] = env.token(t, false, "", "a")
 		}()
 	}
-	// Let every caller reach the flight, then release the one refresh.
-	deadline := time.Now().Add(5 * time.Second)
-	for env.hits.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	// Release the one refresh once every caller has reached the flight.
+	for env.e.flightCalls.Load() < n {
+		runtime.Gosched()
 	}
-	time.Sleep(50 * time.Millisecond)
 	close(release)
 	wg.Wait()
 	for i := range n {
@@ -539,20 +568,156 @@ func TestEngineReconnectDuringRefreshDropsRotatedToken(t *testing.T) {
 }
 
 func TestEngineEpochChangeDuringRefreshDropsRotatedToken(t *testing.T) {
+	// Epochs are per user: another provider's revoke bumps this user's epoch
+	// while this grant stays active with the same grant_id. The rotated refresh
+	// token (the strict provider has already consumed the old one) must be
+	// persisted and served at the new epoch, never dropped.
 	env := newUTEnv(t, "google")
 	ep := &utEpochs{}
 	env.e.epochs = ep
 	env.e.testHook = func(string, string) { ep.set(5) }
-	_, err := env.token(t, false, "", "a")
-	// The second pass re-reads at the new epoch and refreshes again.
+	m, err := env.token(t, false, "", "a")
 	if err != nil {
 		t.Fatalf("Token: %v", err)
 	}
-	if _, _, _, writes := env.recs.snapshot(); writes != 1 {
-		t.Fatalf("writes = %d: the first rotated token must be dropped, the second written", writes)
+	if m.GrantEpoch != 5 {
+		t.Fatalf("GrantEpoch = %d, want 5", m.GrantEpoch)
 	}
-	if env.hits.Load() != 2 {
-		t.Fatalf("refreshes = %d, want 2", env.hits.Load())
+	rec, _, _, writes := env.recs.snapshot()
+	if writes != 1 || rec.RefreshToken != "ut-refresh-1-SECRET" {
+		t.Fatalf("the rotated token was not persisted: writes=%d", writes)
+	}
+	if env.hits.Load() != 1 {
+		t.Fatalf("refreshes = %d, want 1 (the consumed token must not be reused)", env.hits.Load())
+	}
+	if env.grants.state() != GrantActive {
+		t.Fatalf("state = %s, want active", env.grants.state())
+	}
+	env.assertClean(t)
+}
+
+// TestEngineRowReadFailureAfterRefreshKeepsRotation: the grant row cannot be
+// read after the provider rotated the refresh token. The rotation is held
+// pending (never dropped), the call is unavailable, and the next call persists
+// it without another provider refresh.
+func TestEngineRowReadFailureAfterRefreshKeepsRotation(t *testing.T) {
+	env := newUTEnv(t, "google")
+	env.e.testHook = func(string, string) {
+		env.grants.mu.Lock()
+		env.grants.getErr = errors.New("db locked")
+		env.grants.mu.Unlock()
+	}
+	if _, err := env.token(t, false, "", "a"); !errors.Is(err, ErrTokenUnavailable) {
+		t.Fatalf("err = %v, want ErrTokenUnavailable", err)
+	}
+	if _, _, _, writes := env.recs.snapshot(); writes != 0 {
+		t.Fatalf("wrote while the row state was unknown")
+	}
+	env.e.testHook = nil
+	env.grants.mu.Lock()
+	env.grants.getErr = nil
+	env.grants.mu.Unlock()
+	m, err := env.token(t, false, "", "a")
+	if err != nil {
+		t.Fatalf("after recovery: %v", err)
+	}
+	rec, _, _, writes := env.recs.snapshot()
+	if writes != 1 || rec.RefreshToken != "ut-refresh-1-SECRET" || m.AccessToken != rec.AccessToken {
+		t.Fatalf("the pending rotation was lost: writes=%d", writes)
+	}
+	if env.hits.Load() != 1 {
+		t.Fatalf("refreshes = %d, want 1", env.hits.Load())
+	}
+	env.assertClean(t)
+}
+
+// TestEngineRowErrorDoesNotDropPendingRotation: a grant-row read error in a
+// later flight must not delete an unwritten rotated refresh token.
+func TestEngineRowErrorDoesNotDropPendingRotation(t *testing.T) {
+	env := newUTEnv(t, "google")
+	env.recs.putErr = errors.New("store down")
+	if _, err := env.token(t, false, "", "a"); !errors.Is(err, ErrTokenUnavailable) {
+		t.Fatalf("err = %v", err)
+	}
+	env.grants.mu.Lock()
+	env.grants.getErr = errors.New("db locked")
+	env.grants.mu.Unlock()
+	if _, err := env.token(t, false, "", "a"); !errors.Is(err, ErrTokenUnavailable) {
+		t.Fatalf("err = %v", err)
+	}
+	env.grants.mu.Lock()
+	env.grants.getErr = nil
+	env.grants.mu.Unlock()
+	env.recs.mu.Lock()
+	env.recs.putErr = nil
+	env.recs.mu.Unlock()
+	if _, err := env.token(t, false, "", "a"); err != nil {
+		t.Fatalf("after recovery: %v", err)
+	}
+	if rec, _, _, writes := env.recs.snapshot(); writes != 1 || rec.RefreshToken != "ut-refresh-1-SECRET" {
+		t.Fatalf("the pending rotation was dropped: writes=%d", writes)
+	}
+	if env.hits.Load() != 1 {
+		t.Fatalf("refreshes = %d, want 1", env.hits.Load())
+	}
+}
+
+// TestEnginePendingRotationDroppedWhenStoreMovedOn: a pending rotation is
+// flushed only while the store still holds the refresh token it came from.
+func TestEnginePendingRotationDroppedWhenStoreMovedOn(t *testing.T) {
+	env := newUTEnv(t, "google")
+	env.recs.putErr = errors.New("store down")
+	if _, err := env.token(t, false, "", "a"); !errors.Is(err, ErrTokenUnavailable) {
+		t.Fatalf("err = %v", err)
+	}
+	// Another writer replaced the stored record (same grant) meanwhile.
+	env.recs.mu.Lock()
+	env.recs.putErr = nil
+	env.recs.rec.RefreshToken, env.recs.rec.AccessToken = "ut-refresh-other-SECRET", "ut-access-other-SECRET"
+	env.recs.rec.Expiry = utStart.Unix() + 3600
+	env.recs.version++
+	env.recs.mu.Unlock()
+	m, err := env.token(t, false, "", "a")
+	if err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	rec, _, _, writes := env.recs.snapshot()
+	if writes != 0 || rec.RefreshToken != "ut-refresh-other-SECRET" || m.AccessToken != "ut-access-other-SECRET" {
+		t.Fatalf("a stale pending rotation overwrote the store: writes=%d", writes)
+	}
+}
+
+// TestEngineFlightDeadline: a store that hangs cannot pin the grant lock
+// beyond the flight deadline; the rotation stays pending.
+func TestEngineFlightDeadline(t *testing.T) {
+	env := newUTEnv(t, "google")
+	env.e.flightTimeout = 50 * time.Millisecond
+	env.recs.block = true
+	done := make(chan error, 1)
+	go func() { _, err := env.token(t, false, "", "a"); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrTokenUnavailable) {
+			t.Fatalf("err = %v, want ErrTokenUnavailable", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the flight outlived its deadline")
+	}
+	if held := env.e.locks.Held(); held != 0 {
+		t.Fatalf("grant locks still held: %d", held)
+	}
+	env.recs.mu.Lock()
+	env.recs.block = false
+	env.recs.mu.Unlock()
+	env.e.flightTimeout = FlightTimeout
+	if _, err := env.token(t, false, "", "a"); err != nil {
+		t.Fatalf("after recovery: %v", err)
+	}
+	if rec, _, _, writes := env.recs.snapshot(); writes != 1 || rec.RefreshToken != "ut-refresh-1-SECRET" {
+		t.Fatalf("the pending rotation was lost: writes=%d", writes)
+	}
+	if env.hits.Load() != 1 {
+		t.Fatalf("refreshes = %d, want 1", env.hits.Load())
 	}
 }
 
@@ -686,6 +851,9 @@ func TestRefreshWriteBackFailure(t *testing.T) {
 
 func TestEngineWritebackConflictDropsRotatedToken(t *testing.T) {
 	env := newUTEnv(t, "google")
+	// The injected conflict leaves the store unchanged, so the provider must
+	// accept the same refresh token twice here.
+	env.reply.Store(func(w http.ResponseWriter, n int) { rotating(n, w) })
 	env.recs.putErr = ErrGrantChanged
 	m, err := env.token(t, false, "", "a")
 	// The grant "changed" on every attempt: two passes, then unavailable; the

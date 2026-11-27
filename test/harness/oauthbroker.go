@@ -91,7 +91,7 @@ func BrokerClientSecret() string { return brokerSecretValue }
 // brokerYAML continues the consent block consentYAML opened (it is written
 // right after it): the providers list.
 func (h *H) brokerYAML() string {
-	if !h.wantBroker || h.wantPerUserVault {
+	if !h.wantBroker {
 		return ""
 	}
 	clientID, endpoints := "harness-google-client", ""

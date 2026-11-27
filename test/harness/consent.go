@@ -58,9 +58,7 @@ func (h *H) prepareConsent() {
 
 // consentYAML renders the consent block for the control plane's config file.
 func (h *H) consentYAML() string {
-	// WithPerUserSecretsVault renders the one consent block (vault store plus
-	// providers) in perUserVaultYAML; a second block would be a duplicate key.
-	if !h.wantConsent || h.wantPerUserVault {
+	if !h.wantConsent {
 		return ""
 	}
 	return fmt.Sprintf(`

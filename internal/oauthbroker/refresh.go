@@ -16,6 +16,11 @@ import (
 	"github.com/ethosagent/warden/internal/config"
 )
 
+// MaxProviderResponseBytes caps every provider token-endpoint response body
+// (code exchange and refresh): a hostile or broken endpoint cannot make the
+// control plane buffer an unbounded body.
+const MaxProviderResponseBytes = 64 << 10
+
 // RefreshTimeout is the per-call deadline of one refresh_token exchange.
 const RefreshTimeout = 5 * time.Second
 

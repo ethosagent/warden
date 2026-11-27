@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -83,6 +84,8 @@ const (
 	// nonExpiringTTL is the ExpiresIn reported for a record that never expires
 	// (a GitHub OAuth-app token); the worker caches it for at most its own TTL.
 	nonExpiringTTL = 3600
+	// FlightTimeout is the overall deadline of one refresh flight.
+	FlightTimeout = 15 * time.Second
 )
 
 // writebackBackoff is the wait before each retry of a failed write-back: the
@@ -161,6 +164,12 @@ type EngineConfig struct {
 }
 
 // Engine mints user access tokens. It is safe for concurrent use.
+//
+// Until W-P3-PUS-07 wires it, the engine is inert: the Registry's Options must
+// carry the SSRF-safe HTTPClient (adapters/httpclient) and a client-secret
+// Resolver, and Config.UserTokenMetrics must be set. Without an HTTPClient
+// every refresh fails closed to ErrTokenUnavailable (ErrRefreshUnconfigured),
+// never to reconsent_required.
 type Engine struct {
 	reg     *Registry
 	grants  GrantStore
@@ -174,6 +183,12 @@ type Engine struct {
 	sleep   func(ctx context.Context, d time.Duration)
 
 	sf singleflight.Group
+
+	// flightTimeout bounds one flight (default FlightTimeout); flightCalls
+	// counts callers that reached the flight (tests wait on it instead of
+	// sleeping).
+	flightTimeout time.Duration
+	flightCalls   atomic.Int64
 
 	mu      sync.Mutex
 	entries map[string]*tokenEntry
@@ -191,6 +206,10 @@ type tokenEntry struct {
 	// yet. It is flushed by the next flight, and the entry is never served from
 	// the fast path nor evicted until then.
 	unwritten bool
+	// from is the refresh token the unwritten rotation came FROM. The pending
+	// record is flushed only while the store still holds that token; if the
+	// stored record moved on, the pending one is stale and dropped.
+	from string
 }
 
 // NewEngine returns an Engine over cfg.
@@ -209,7 +228,7 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		reg: cfg.Registry, grants: cfg.Grants, records: cfg.Records, locks: cfg.Locks,
 		epochs: cfg.Epochs, metrics: cfg.Metrics, alerter: cfg.Alerter, now: cfg.Now,
 		log: cfg.Logger, sleep: cfg.Sleep,
-		entries: map[string]*tokenEntry{}, forceAt: map[string]time.Time{},
+		entries: map[string]*tokenEntry{}, forceAt: map[string]time.Time{}, flightTimeout: FlightTimeout,
 	}
 	if e.locks == nil {
 		e.locks = NewGrantLocks()
@@ -405,11 +424,16 @@ func (e *Engine) grantRow(ctx context.Context, userKey, provider string) (Grant,
 func (e *Engine) flight(ctx context.Context, key, userKey, provider string, force bool, staleRef string) (flightResult, error) {
 	sfKey := key
 	if force {
-		sfKey += "\x00force"
+		sfKey += "\x00force\x00" + staleRef
 	}
 	dctx := context.WithoutCancel(ctx)
+	e.flightCalls.Add(1)
 	ch := e.sf.DoChan(sfKey, func() (any, error) {
-		return e.doFlight(dctx, key, userKey, provider, force, staleRef)
+		// One overall deadline: the grant lock is held for the whole flight, so
+		// a slow provider plus a slow store must not pin it for minutes.
+		fctx, cancel := context.WithTimeout(dctx, e.flightTimeout)
+		defer cancel()
+		return e.doFlight(fctx, key, userKey, provider, force, staleRef)
 	})
 	select {
 	case r := <-ch:
@@ -443,7 +467,11 @@ func (e *Engine) doFlight(ctx context.Context, key, userKey, provider string, fo
 func (e *Engine) once(ctx context.Context, key, userKey, provider string, force bool, staleRef string) (res flightResult, again bool, err error) {
 	g, err := e.grantRow(ctx, userKey, provider)
 	if err != nil {
-		e.drop(key)
+		// Only a definitively missing grant discards cached state; a read error
+		// must not delete an unwritten rotated refresh token.
+		if errors.Is(err, ErrGrantMissing) {
+			e.drop(key)
+		}
 		return res, false, err
 	}
 	switch g.State {
@@ -485,11 +513,19 @@ func (e *Engine) once(ctx context.Context, key, userKey, provider string, force 
 	e.mu.Lock()
 	ent := e.entries[key]
 	var pending *TokenRecord
-	if ent != nil && ent.unwritten && ent.rec.GrantID == cur.GrantID {
-		p := ent.rec
-		pending = &p
+	stale := false
+	if ent != nil && ent.unwritten {
+		if ent.rec.GrantID == cur.GrantID && ent.from == cur.RefreshToken {
+			p := ent.rec
+			pending = &p
+		} else {
+			stale = true // the store moved on (a reconnect or another writer)
+		}
 	}
 	e.mu.Unlock()
+	if stale {
+		e.drop(key)
+	}
 	if pending != nil {
 		if err := e.store(ctx, userKey, provider, *pending, ver, 0); err != nil {
 			if errors.Is(err, ErrGrantChanged) {
@@ -499,7 +535,7 @@ func (e *Engine) once(ctx context.Context, key, userKey, provider string, force 
 			return res, false, fmt.Errorf("%w: write-back pending", ErrTokenUnavailable)
 		}
 		cur = *pending
-		e.setEntry(key, cur, false)
+		e.setEntry(key, cur, false, "")
 		if _, ver, err = e.load(ctx, userKey, provider); err != nil {
 			return res, false, err
 		}
@@ -513,11 +549,11 @@ func (e *Engine) once(ctx context.Context, key, userKey, provider string, force 
 		}
 	} else if e.fresh(cur) {
 		src := UserTokenStored
-		e.setEntry(key, cur, false)
+		e.setEntry(key, cur, false, "")
 		return flightResult{rec: cur, grant: g, epoch: epoch, source: src}, false, nil
 	}
 
-	return e.refresh(ctx, key, userKey, provider, cur, ver, g, epoch)
+	return e.refresh(ctx, key, userKey, provider, cur, ver, g)
 }
 
 // load reads the record. A missing key is ErrGrantMissing; every other store
@@ -554,7 +590,7 @@ func (e *Engine) forceAllowed(key string) bool {
 	return true
 }
 
-func (e *Engine) setEntry(key string, rec TokenRecord, unwritten bool) {
+func (e *Engine) setEntry(key string, rec TokenRecord, unwritten bool, from string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if _, ok := e.entries[key]; !ok && len(e.entries) >= maxEntries {
@@ -565,14 +601,15 @@ func (e *Engine) setEntry(key string, rec TokenRecord, unwritten bool) {
 			}
 		}
 	}
-	e.entries[key] = &tokenEntry{rec: rec, unwritten: unwritten}
+	e.entries[key] = &tokenEntry{rec: rec, unwritten: unwritten, from: from}
 }
 
 // markReconsent records reconsent_required on the grant row (kept, never
 // offboarded) and drops the cache entry.
 func (e *Engine) markReconsent(ctx context.Context, key, userKey, provider, grantID, status string) {
 	e.drop(key)
-	cctx, cancel := context.WithTimeout(ctx, opTimeout)
+	// Detached: the flight deadline may have passed, and the state change must land.
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), opTimeout)
 	defer cancel()
 	if _, err := e.grants.MarkReconsentRequired(cctx, userKey, provider, grantID); err != nil {
 		e.log.Warn("user token: could not mark the grant reconsent_required", "provider", provider, "user_key", userKey, "grant_id", grantID)
@@ -581,6 +618,8 @@ func (e *Engine) markReconsent(ctx context.Context, key, userKey, provider, gran
 }
 
 func (e *Engine) stamp(ctx context.Context, userKey, provider, grantID, status string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), opTimeout)
+	defer cancel()
 	if rr, ok := e.grants.(RefreshRecorder); ok {
 		if err := rr.RecordRefresh(ctx, userKey, provider, grantID, status, e.now()); err != nil && !errors.Is(err, ErrNotFound) {
 			e.log.Warn("user token: could not record the refresh status", "provider", provider, "status", status)
@@ -589,7 +628,7 @@ func (e *Engine) stamp(ctx context.Context, userKey, provider, grantID, status s
 }
 
 // refresh runs the provider refresh for cur and persists a rotated token.
-func (e *Engine) refresh(ctx context.Context, key, userKey, provider string, cur TokenRecord, ver GrantVersion, g Grant, epoch int64) (flightResult, bool, error) {
+func (e *Engine) refresh(ctx context.Context, key, userKey, provider string, cur TokenRecord, ver GrantVersion, g Grant) (flightResult, bool, error) {
 	prov, err := e.reg.Get(provider)
 	if err != nil {
 		return flightResult{}, false, fmt.Errorf("%w: provider not configured", ErrTokenUnavailable)
@@ -615,22 +654,37 @@ func (e *Engine) refresh(ctx context.Context, key, userKey, provider string, cur
 		e.testHook(userKey, provider)
 	}
 
-	// The grant must still be the one we refreshed: re-read the row and the
-	// epoch before any write. Anything else is dropped, never written.
+	// A rotation is the only copy of the new refresh token: it is discarded
+	// only when the grant is definitively gone (revoked, missing, or replaced
+	// by another grant_id). A failed read keeps it pending; an epoch change
+	// alone (epochs are per user, another provider's revoke bumps them) keeps
+	// the same active grant, so the rotation is persisted and the new epoch
+	// returned.
+	rotated := next.RefreshToken != cur.RefreshToken
+	hold := func(why string) (flightResult, bool, error) {
+		if rotated {
+			e.setEntry(key, next, true, cur.RefreshToken)
+		}
+		return flightResult{}, false, fmt.Errorf("%w: %s", ErrTokenUnavailable, why)
+	}
 	g2, err := e.grantRow(ctx, userKey, provider)
-	if err != nil {
-		return flightResult{}, false, err
+	switch {
+	case errors.Is(err, ErrGrantMissing):
+		e.drop(key)
+		return flightResult{}, true, nil
+	case err != nil:
+		return hold("grant row")
 	}
 	epoch2, err := e.epoch(ctx, userKey)
 	if err != nil {
-		return flightResult{}, false, fmt.Errorf("%w: epoch", ErrTokenUnavailable)
+		return hold("epoch")
 	}
-	if g2.State != GrantActive || g2.GrantID != cur.GrantID || epoch2 != epoch {
+	if g2.State == GrantRevoked || g2.GrantID != cur.GrantID {
 		e.drop(key)
 		return flightResult{}, true, nil
 	}
 
-	if next.RefreshToken != cur.RefreshToken {
+	if rotated {
 		if err := e.store(ctx, userKey, provider, next, ver, len(writebackBackoff)); err != nil {
 			if errors.Is(err, ErrGrantChanged) {
 				e.drop(key)
@@ -639,13 +693,22 @@ func (e *Engine) refresh(ctx context.Context, key, userKey, provider string, cur
 			// Keep the only copy of the rotated refresh token in memory and write
 			// it again at the next flight. Do not hand out a token whose rotation
 			// is not durable.
-			e.setEntry(key, next, true)
+			e.setEntry(key, next, true, cur.RefreshToken)
 			e.writebackFailed(ctx, userKey, provider, g2.GrantID)
 			return flightResult{}, false, fmt.Errorf("%w: write-back", ErrTokenUnavailable)
 		}
 	}
-	e.setEntry(key, next, false)
 	e.stamp(ctx, userKey, provider, g2.GrantID, RefreshStatusOK)
+	if g2.State != GrantActive {
+		// Persisted, but the row now asks for re-consent (or a reconnect began
+		// on this grant); do not serve.
+		e.drop(key)
+		if g2.State == GrantReconsentRequired {
+			return flightResult{}, false, ErrReconsentRequired
+		}
+		return flightResult{}, false, fmt.Errorf("%w: grant is being reconnected", ErrTokenUnavailable)
+	}
+	e.setEntry(key, next, false, "")
 	return flightResult{rec: next, grant: g2, epoch: epoch2, source: UserTokenRefreshed}, false, nil
 }
 

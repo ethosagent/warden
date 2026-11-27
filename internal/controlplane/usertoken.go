@@ -14,6 +14,9 @@ const findingUserTokenWritebackFailed = oauthbroker.FindingWritebackFailed
 // initUserTokens builds the user-token refresh engine (W-P3-PUS-03) over the
 // broker's grant metadata store, the consent.store grant records and the one
 // shared grantLocks. It needs consent.store; without it s.userTokens stays nil.
+// The engine is inert (every refresh fails closed to ErrTokenUnavailable) until
+// W-P3-PUS-07 wires NewRegistry Options{HTTPClient, Resolver} (run.go; sibling
+// #281 wires the HTTPClient) and Config.UserTokenMetrics.
 // The engine has no route here: W-P3-PUS-07 exposes it on POST
 // /control/user-token, and RevokeUserGrant and offboarding take their grant
 // locks through Engine.WithGrantLock.
