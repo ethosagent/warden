@@ -158,7 +158,11 @@ func (s *Server) GrantEpochs() *EpochStore {
 // after the entry was pruned.
 //
 // With per-user secrets off (nothing serves the sections) Bump does nothing and
-// returns 0, so a caller need not know whether the feature is on. A failed Bump
+// returns 0, so a caller need not know whether the feature is on. No epoch is
+// recorded then (there is no publish row to take a seq from), so a worker that
+// was partitioned before the "off" bundle and rejoins after the feature is on
+// again can keep a cached per-user token for up to workerCacheTTL (at most 15m).
+// This is an accepted limitation. A failed Bump
 // returns an error and the caller must not report the revocation as delivered:
 // ErrEpochNotPublished means the epoch is recorded but workers are not told yet.
 func (e *EpochStore) Bump(ctx context.Context, userKey string) (int64, error) {

@@ -19,6 +19,9 @@ var ErrGrantEpochsUnavailable = errors.New("controlplane: user grant epochs need
 // ErrPerUserSecretsOff is returned by the epoch adapter when per-user secrets
 // are off: EpochStore.Bump published nothing (epoch 0), so no worker was told.
 // It wraps oauthbroker.ErrEpochSkipped, which the revoke reports as skipped.
+// Accepted limitation: such a revoke records no epoch, so a worker partitioned
+// before the "off" bundle that rejoins after per-user secrets are on again can
+// keep a cached per-user token for up to workerCacheTTL (at most 15m).
 var ErrPerUserSecretsOff = fmt.Errorf("controlplane: per-user secrets are off, no epoch was published: %w", oauthbroker.ErrEpochSkipped)
 
 // grantEpochBumper implements oauthbroker.EpochBumper over EpochStore.Bump
