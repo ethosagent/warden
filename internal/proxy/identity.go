@@ -532,7 +532,21 @@ func (c connIdentity) stamp(ev *analytics.Event, on bool) {
 // else in the package fails TestAllEventsCarryIdentity.
 func (p *Proxy) recordEvent(ci connIdentity, ev analytics.Event) {
 	ci.stamp(&ev, p.identity() != nil)
+	if ev.AgentID == "" {
+		ev.AgentID = p.agentIDFor(ci)
+	}
 	_ = p.analyticsStore().StoreEvent(ev)
+}
+
+// agentIDFor is the agent an event is attributed to (W-P3-PUL-02): the agent a
+// verified Warden token was minted for (act.sub, which binding has already
+// matched to this worker), else the worker's resolved agent id. An unverified
+// token's claims are never used.
+func (p *Proxy) agentIDFor(ci connIdentity) string {
+	if ci.status() == identity.StatusValid && ci.Claims.Act != "" {
+		return ci.Claims.Act
+	}
+	return p.cfg.AgentID
 }
 
 // resolved is the identity this request's events carry: the per-request result

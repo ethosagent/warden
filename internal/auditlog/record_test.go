@@ -282,3 +282,17 @@ func TestMarshalLine_DropOrder(t *testing.T) {
 		t.Fatal("compliance and judge_reason must survive when dropping earlier fields is enough")
 	}
 }
+
+func TestFromEvent_AgentIDLimitRule(t *testing.T) {
+	r := FromEvent(analytics.Event{Decision: "allow", AgentID: "claude-code", LimitRule: "eng-llm"}, testMeta, QueryDrop)
+	if r.AgentID != "claude-code" || r.LimitRule != "eng-llm" {
+		t.Fatalf("agent %q rule %q", r.AgentID, r.LimitRule)
+	}
+	r = FromEvent(analytics.Event{Decision: "allow"}, testMeta, QueryDrop)
+	if r.AgentID != "agent-a" || r.LimitRule != "" {
+		t.Fatalf("fallback: agent %q rule %q", r.AgentID, r.LimitRule)
+	}
+	if strings.Contains(string(marshal(t, r)), "limit_rule") {
+		t.Error("empty limit_rule must be omitted")
+	}
+}

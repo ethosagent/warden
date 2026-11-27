@@ -276,7 +276,7 @@ func TestContractDocMatchesConstants(t *testing.T) {
 		et := reflect.TypeOf(analytics.Event{})
 		for i := 0; i < et.NumField(); i++ {
 			name, _, _ := strings.Cut(et.Field(i).Tag.Get("json"), ",")
-			if strings.HasPrefix(name, "user_") || strings.HasPrefix(name, "identity_") {
+			if strings.HasPrefix(name, "user_") || strings.HasPrefix(name, "identity_") || name == "agent_id" || name == "limit_rule" {
 				want = append(want, name)
 			}
 		}

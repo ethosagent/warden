@@ -157,7 +157,29 @@ func TestUserFilterUsesIndexes(t *testing.T) {
 			plan.WriteString(detail + "\n")
 		}
 		_ = rows.Close()
-		if !strings.Contains(plan.String(), "idx_events_user_sub_ts") || !strings.Contains(plan.String(), "idx_events_user_email_lower") {
+		// With a ts bound the user filter must still use the (user_sub, ts)
+		// range, not the wider (user_sub, limit_rule, ts) index.
+		rows2, err := db.Query("EXPLAIN QUERY PLAN SELECT ts FROM events WHERE 1=1"+userFilterSQL+" AND ts >= ?", "x", "x", 0)
+		if err != nil {
+			t.Fatalf("%s: explain ts: %v", name, err)
+		}
+		var plan2 strings.Builder
+		for rows2.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows2.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan2.WriteString(detail + "\n")
+		}
+		_ = rows2.Close()
+		if !strings.Contains(plan2.String(), "idx_events_user_sub_ts (user_sub=? AND ts>?)") {
+			t.Errorf("%s: ts-bounded plan does not use the (user_sub, ts) range:\n%s", name, plan2.String())
+		}
+		// The local store also has (user_sub, limit_rule, ts) (W-P3-PUL-02); its
+		// user_sub prefix serves the equality lookup just as well.
+		usesSub := strings.Contains(plan.String(), "idx_events_user_sub_ts") || strings.Contains(plan.String(), "idx_events_user_rule_ts")
+		if !usesSub || !strings.Contains(plan.String(), "idx_events_user_email_lower") {
 			t.Errorf("%s: plan does not use both user indexes:\n%s", name, plan.String())
 		}
 	}
