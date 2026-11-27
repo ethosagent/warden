@@ -455,8 +455,14 @@ func TestUserLimit_Concurrent(t *testing.T) {
 				return
 			default:
 			}
+			// Alternate the anonymous rule's rate so every Replace drops that
+			// rule's buckets: the table walk races charges and sweeps, while
+			// alice's unchanged eng rule keeps its window.
 			q := p
 			q.BlockedUsers = []config.BlockedUser{{Sub: fmt.Sprint(i)}}
+			if i%2 == 1 {
+				q.AnonymousLimit = &config.UserLimit{Name: config.UserLimitNameAnonymous, RateLimit: "999/minute"}
+			}
 			e.Replace(q)
 		}
 	}()

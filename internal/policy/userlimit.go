@@ -713,41 +713,56 @@ func (b *userBuckets) sweepShard(i int, now int64) {
 	sh.mu.Unlock()
 }
 
-// dropChanged deletes the buckets of rules that are gone from next or whose
-// definition changed, and keeps every other bucket. Replace calls it under
-// swapMu's write lock, so no charge runs meanwhile. When no rule was removed
-// or changed it does not walk the table.
-func (b *userBuckets) dropChanged(prev, next *userLimitSet) {
+// changedUserLimits names the rules of prev that are gone from next or whose
+// definition changed, or returns nil when there are none. Replace calls it
+// under swapMu's write lock; it only compares the two small hash maps.
+func changedUserLimits(prev, next *userLimitSet) map[string]struct{} {
 	if prev == nil {
-		return
+		return nil
 	}
-	changed := false
+	var out map[string]struct{}
 	for name, h := range prev.hashes {
-		if next == nil {
-			changed = true
-			break
+		if next != nil {
+			if nh, ok := next.hashes[name]; ok && nh == h {
+				continue
+			}
 		}
-		if nh, ok := next.hashes[name]; !ok || nh != h {
-			changed = true
-			break
+		if out == nil {
+			out = make(map[string]struct{})
 		}
+		out[name] = struct{}{}
 	}
-	if !changed {
-		return
-	}
+	return out
+}
+
+// dropUserBuckets deletes the buckets of the changed rules. Replace calls it
+// after releasing swapMu's write lock, so the walk never stalls requests: each
+// shard is visited under a read lock of swapMu plus the shard lock (the order
+// charges use) and a bucket is deleted only if its rule is still absent from
+// the live set or its hash still differs. A charge that already reset the
+// bucket under the new definition keeps it; one that has not is reset lazily
+// by the defHash check in charge, so a bucket that survives a racing walk can
+// never carry an old window into a new rule.
+func (e *Evaluator) dropUserBuckets(changed map[string]struct{}) {
+	b := e.ub
 	for i := range b.shards {
+		e.swapMu.RLock()
+		live := e.userLimits
 		sh := &b.shards[i]
 		sh.mu.Lock()
 		for k, bk := range sh.m {
-			h, ok := uint64(0), false
-			if next != nil {
-				h, ok = next.hashes[k.rule]
+			if _, ok := changed[k.rule]; !ok {
+				continue
 			}
-			if !ok || h != bk.defHash {
-				delete(sh.m, k)
-				b.n.Add(-1)
+			if live != nil {
+				if h, ok := live.hashes[k.rule]; ok && h == bk.defHash {
+					continue
+				}
 			}
+			delete(sh.m, k)
+			b.n.Add(-1)
 		}
 		sh.mu.Unlock()
+		e.swapMu.RUnlock()
 	}
 }

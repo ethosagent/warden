@@ -226,10 +226,13 @@ func NewEvaluator(p config.Policy) *Evaluator {
 // cost-block change never resets a user's window.
 func (e *Evaluator) Replace(p config.Policy) {
 	e.swapMu.Lock()
-	defer e.swapMu.Unlock()
 	old := e.userLimits
 	e.load(p)
-	e.ub.dropChanged(old, e.userLimits)
+	changed := changedUserLimits(old, e.userLimits)
+	e.swapMu.Unlock()
+	if changed != nil {
+		e.dropUserBuckets(changed)
+	}
 }
 
 // CurrentPolicy returns a snapshot of the evaluator's live allow/deny lists.
