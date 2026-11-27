@@ -410,3 +410,38 @@ func TestBundleMetricsNilSafe(t *testing.T) {
 	m.RecordBundleRejected("bad_signature")
 	m.SetBundleState(1, time.Second, true)
 }
+
+func TestCPUserTokenMetrics(t *testing.T) {
+	m, h, shutdown := newWithHandler(t)
+	defer func() { _ = shutdown(context.Background()) }()
+
+	m.RecordCPUserTokenRefresh("google", "refreshed")
+	m.RecordCPUserTokenRefresh("other", "reconsent_required")
+	m.RecordCPUserTokenRefresh("google", "alice@example.com") // unbounded input: one "other" series
+	m.RecordCPUserTokenWritebackFailure()
+
+	body := scrape(t, h)
+	for _, want := range []string{
+		`warden_cp_user_token_refresh_total{`, `outcome="refreshed"`, `outcome="reconsent_required"`, `outcome="other"`,
+		`provider="google"`, "warden_cp_user_token_writeback_failures_total",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape lacks %q\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "alice@example.com") {
+		t.Error("an unbounded outcome reached a label")
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "warden_cp_user_token_") {
+			for _, bad := range []string{"sub=", "agent=", "agent_id=", "user=", "email="} {
+				if strings.Contains(strings.SplitN(line, " ", 2)[0], bad) {
+					t.Errorf("user-token series carries a %q label: %s", bad, line)
+				}
+			}
+		}
+	}
+	var nilM *Metrics
+	nilM.RecordCPUserTokenRefresh("google", "refreshed") // nil-safe
+	nilM.RecordCPUserTokenWritebackFailure()
+}

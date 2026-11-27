@@ -253,6 +253,10 @@ type Grant struct {
 	UpdatedAt  time.Time
 	LastUsedAt time.Time
 	RevokedAt  time.Time
+	// LastRefreshAt and LastRefreshStatus record the last refresh attempt of
+	// the grant's token (RefreshRecorder); zero/empty until one ran.
+	LastRefreshAt     time.Time
+	LastRefreshStatus string
 }
 
 // SweepResult is what one Sweep did.

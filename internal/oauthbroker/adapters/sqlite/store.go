@@ -334,7 +334,7 @@ func (s *Store) ConsumeAttempt(ctx context.Context, stateHash string) (oauthbrok
 // --- oauth_grants ---
 
 const grantCols = `user_key, iss, sub, provider, grant_id, prev_grant_id, state, scopes_json, provider_account_id,
-  provider_account_login, granted_at, updated_at, last_used_at, revoked_at`
+  provider_account_login, granted_at, updated_at, last_used_at, revoked_at, last_refresh_at, last_refresh_status`
 
 func scanGrant(r rowScanner) (oauthbroker.Grant, error) {
 	var (
@@ -344,9 +344,11 @@ func scanGrant(r rowScanner) (oauthbroker.Grant, error) {
 		prev              sql.NullString
 		granted, updated  int64
 		lastUsed, revoked sql.NullInt64
+		lastRefresh       sql.NullInt64
+		refreshStatus     sql.NullString
 	)
 	if err := r.Scan(&g.UserKey, &g.Iss, &g.Sub, &g.Provider, &g.GrantID, &prev, &state, &scopes,
-		&accID, &accLogin, &granted, &updated, &lastUsed, &revoked); err != nil {
+		&accID, &accLogin, &granted, &updated, &lastUsed, &revoked, &lastRefresh, &refreshStatus); err != nil {
 		return oauthbroker.Grant{}, err
 	}
 	sc, err := parseScopes(scopes)
@@ -357,6 +359,7 @@ func scanGrant(r rowScanner) (oauthbroker.Grant, error) {
 	g.Account = oauthbroker.Account{ID: accID.String, Login: accLogin.String}
 	g.GrantedAt, g.UpdatedAt = time.UnixMilli(granted).UTC(), time.UnixMilli(updated).UTC()
 	g.LastUsedAt, g.RevokedAt = fromMS(lastUsed), fromMS(revoked)
+	g.LastRefreshAt, g.LastRefreshStatus = fromMS(lastRefresh), refreshStatus.String
 	return g, nil
 }
 
@@ -523,6 +526,24 @@ func collectGrants(rows *sql.Rows) ([]oauthbroker.Grant, error) {
 		return nil, fmt.Errorf("oauthbroker store: list grants: %w", err)
 	}
 	return out, nil
+}
+
+// RecordRefresh implements oauthbroker.RefreshRecorder: it stamps the grant's
+// last_refresh_at and last_refresh_status, only for the row that still holds
+// grantID (a reconnect's new row is never stamped by a stale refresh).
+func (s *Store) RecordRefresh(ctx context.Context, userKey, provider, grantID, status string, at time.Time) error {
+	if !oauthbroker.ValidRefreshStatus(status) {
+		return fmt.Errorf("%w: unknown refresh status", oauthbroker.ErrInvalid)
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE oauth_grants SET last_refresh_at = ?, last_refresh_status = ?
+WHERE user_key = ? AND provider = ? AND grant_id = ?`, ms(at), status, userKey, provider, grantID)
+	if err != nil {
+		return fmt.Errorf("oauthbroker store: record refresh: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return oauthbroker.ErrNotFound
+	}
+	return nil
 }
 
 // TouchLastUsed implements oauthbroker.GrantStore. An in-memory throttle skips

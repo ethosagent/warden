@@ -10,12 +10,14 @@ const (
 	PendingMigrationID = "oauthbroker/0001"
 	AttemptMigrationID = "oauthbroker/0002"
 	GrantMigrationID   = "oauthbroker/0003"
+	// RefreshMigrationID adds the last-refresh bookkeeping columns (PUS-03).
+	RefreshMigrationID = "oauthbroker/0004"
 )
 
 // EnabledMigrationIDs lists every broker migration, for cpstate.Enable when the
 // broker is on (consent.providers set, W-P3-BRKR-03).
 func EnabledMigrationIDs() []string {
-	return []string{PendingMigrationID, AttemptMigrationID, GrantMigrationID}
+	return []string{PendingMigrationID, AttemptMigrationID, GrantMigrationID, RefreshMigrationID}
 }
 
 // migration0001 is the long-lived intent shared with JIT (W-P3-JIT-01, which
@@ -88,6 +90,13 @@ const migration0003 = `CREATE TABLE oauth_grants (
 );
 CREATE INDEX oauth_grants_state_updated ON oauth_grants (state, updated_at);`
 
+// migration0004 records the outcome of the last refresh of a grant for the
+// operator and the portal (W-P3-PUS-03). No value column: only a time and a
+// closed status word (ok, invalid_grant, error, writeback_failed). Each ALTER
+// adds one column; the migration id makes the pair run once.
+const migration0004 = `ALTER TABLE oauth_grants ADD COLUMN last_refresh_at INTEGER NULL; -- Unix epoch milliseconds (UTC)
+ALTER TABLE oauth_grants ADD COLUMN last_refresh_status TEXT NULL;`
+
 // Migrations returns the broker migrations. They are Optional: the control
 // plane registers them always (StateMigrations, so the downgrade guard knows
 // the ids) and applies them only when the broker is enabled, through
@@ -98,5 +107,6 @@ func Migrations() []cpstate.Migration {
 		{ID: PendingMigrationID, Optional: true, SQL: migration0001},
 		{ID: AttemptMigrationID, Optional: true, SQL: migration0002},
 		{ID: GrantMigrationID, Optional: true, SQL: migration0003},
+		{ID: RefreshMigrationID, Optional: true, SQL: migration0004},
 	}
 }
