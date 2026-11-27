@@ -628,7 +628,21 @@ Filter by user with `/dashboard/api/traffic?user=<sub or email>` (an exact
 without a Warden token never match). The control plane's fleet store keeps
 `user_act` and `identity_token_type` in the same-named columns; an older fleet
 database gains them, empty, the first time it is opened, and events from older
-workers store empty values.
+workers store empty values. It also keeps `agent_id` and `limit_rule`: the fleet
+traffic API returns them under the same `agent_id` and `limit_rule` keys as the
+worker, and an older fleet database gains `limit_rule`, empty, on first open.
+
+The control plane also keeps a per-user daily usage rollup in the fleet
+database (table `user_usage_daily`, sqlite provider). Each row is keyed by
+UTC day, `user_sub`, `agent_id` and `limit_rule`, and holds the email, request
+count, deny count per reason and summed estimated cost. Only events with a
+`user_sub`, or under the `anonymous` limit rule, are counted. Rows are added in
+the same transaction as the event, and only when the event was newly stored,
+so a worker retrying a batch never counts twice. The rollup keeps 35 UTC days,
+whatever the events retention or `maxEvents`, so pruning events never changes
+usage totals. It holds no URL, header, body or secret reference. It starts
+empty when an older fleet database is upgraded: events stored before the
+upgrade are not counted.
 
 The worker counts every verification in the metric
 `warden.identity.verify.total{result,reason,token_type}`, exported to Prometheus

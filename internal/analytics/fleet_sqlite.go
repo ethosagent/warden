@@ -26,6 +26,8 @@ type FleetSQLiteStore struct {
 	// sharedRO is true when ro aliases db (in-memory DSNs, where a separate ro
 	// handle cannot see the same in-memory database). Close then closes db once.
 	sharedRO bool
+	// now is the clock the usage rollup prune reads (a test seam).
+	now func() time.Time
 }
 
 var (
@@ -48,7 +50,7 @@ func NewFleetSQLiteStore(path string, retentionDays, maxEvents int) (*FleetSQLit
 	if maxEvents <= 0 {
 		maxEvents = defaultMaxEvents
 	}
-	s := &FleetSQLiteStore{db: db, retentionDays: retentionDays, maxEvents: maxEvents}
+	s := &FleetSQLiteStore{db: db, retentionDays: retentionDays, maxEvents: maxEvents, now: time.Now}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -120,8 +122,28 @@ CREATE INDEX IF NOT EXISTS idx_events_tool ON events(tool);`
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_user_email_lower ON events (lower(user_email))`); err != nil {
 		return fmt.Errorf("analytics: migrate user email index: %w", err)
 	}
+	// The per-user daily usage rollup (W-P3-PUL-07; see usage.go). WITHOUT
+	// ROWID makes the primary key the table's only b-tree, so every rollup
+	// query plans as a primary-key search on day with no second index for the
+	// planner to weigh.
+	if _, err := s.db.Exec(usageDailyDDL); err != nil {
+		return fmt.Errorf("analytics: fleet migrate usage rollup: %w", err)
+	}
 	return nil
 }
+
+const usageDailyDDL = `
+CREATE TABLE IF NOT EXISTS user_usage_daily (
+    day         TEXT    NOT NULL,
+    sub         TEXT    NOT NULL DEFAULT '',
+    agent_id    TEXT    NOT NULL DEFAULT '',
+    limit_rule  TEXT    NOT NULL DEFAULT '',
+    email       TEXT    NOT NULL DEFAULT '',
+    requests    INTEGER NOT NULL DEFAULT 0,
+    denies_json TEXT    NOT NULL DEFAULT '',
+    cost_usd    REAL    NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, sub, agent_id, limit_rule)
+) WITHOUT ROWID`
 
 // fleetColumnMigrations lists the columns added after the original fleet
 // schema. Later tickets append here and reuse addColumnIfAbsent.
@@ -137,6 +159,9 @@ var fleetColumnMigrations = []struct{ name, ddl string }{
 	// Agent ID and bounded enum only, never token content.
 	{"user_act", `ALTER TABLE events ADD COLUMN user_act TEXT NOT NULL DEFAULT ''`},
 	{"identity_token_type", `ALTER TABLE events ADD COLUMN identity_token_type TEXT NOT NULL DEFAULT ''`},
+	// W-P3-PUL-07: the per-user limit rule that applied (worker Event.LimitRule).
+	// agent_id was in the original schema; ingest now fills it.
+	{"limit_rule", `ALTER TABLE events ADD COLUMN limit_rule TEXT NOT NULL DEFAULT ''`},
 }
 
 // addColumnIfAbsent runs ddl (an ALTER TABLE ADD COLUMN) only when the events
@@ -191,24 +216,47 @@ func (s *FleetSQLiteStore) columnPresent(name string) (bool, error) {
 // so every such event inserts. When a non-empty uid conflicts — a worker
 // re-sending a batch whose ack was lost — the insert is a silent no-op, so a
 // retried batch never stores duplicates and never fails.
+//
+// The usage rollup is upserted in the same transaction, and only when the
+// insert stored a row, so a retried batch never double counts and a failed
+// insert never counts at all.
 func (s *FleetSQLiteStore) StoreAggregatedEvent(e AggregatedEvent) error {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now()
 	}
+	agent := e.resolvedAgentID()
+	e.AgentID, e.Event.AgentID = agent, agent
 	const ins = `INSERT INTO events
         (event_uid, proxy_id, agent_id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance,
-         user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type, limit_rule)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(event_uid) WHERE event_uid IS NOT NULL AND event_uid != '' DO NOTHING`
-	_, err := s.db.Exec(ins,
-		nullIfEmpty(e.EventUID()), e.ProxyID, e.AgentID, e.Timestamp.UnixNano(),
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("analytics: fleet insert event: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(ins,
+		nullIfEmpty(e.EventUID()), e.ProxyID, agent, e.Timestamp.UnixNano(),
 		e.Domain, e.Port, e.Protocol, e.Method, e.URL, e.Decision, e.ResponseStatus,
 		e.SecretRef, e.JudgeReason, e.Tool, e.Reason, e.CostUSD, e.Provider,
 		encodeCompliance(e.Compliance),
 		e.UserSub, e.UserEmail, EncodeGroups(e.UserGroups), boolToInt(e.UserGroupsTruncated),
-		e.UserSID, e.IdentityStatus, e.IdentityReason, e.UserAct, e.IdentityTokenType)
+		e.UserSID, e.IdentityStatus, e.IdentityReason, e.UserAct, e.IdentityTokenType, e.LimitRule)
 	if err != nil {
 		return fmt.Errorf("analytics: fleet insert event: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("analytics: fleet insert event: rows affected: %w", err)
+	}
+	if n > 0 {
+		if err := upsertUsage(tx, e.Event, s.now()); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("analytics: fleet insert event: commit: %w", err)
 	}
 	return s.prune()
 }
@@ -245,6 +293,11 @@ func (s *FleetSQLiteStore) prune() error {
 	if _, err := s.db.Exec(del, s.maxEvents); err != nil {
 		return fmt.Errorf("analytics: fleet prune cap: %w", err)
 	}
+	// The rollup has its own horizon, independent of retentionDays and
+	// maxEvents, so pruning events never changes usage totals.
+	if _, err := s.db.Exec(usagePruneSQL, usageCutoffDay(s.now())); err != nil {
+		return fmt.Errorf("analytics: fleet prune usage: %w", err)
+	}
 	return nil
 }
 
@@ -255,7 +308,8 @@ func (s *FleetSQLiteStore) PruneExpired() error { return s.prune() }
 // GetEvents returns events matching filter, newest first, with Event.ProxyID set.
 func (s *FleetSQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 	q := `SELECT proxy_id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance,
-                 user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type
+                 user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type,
+                 agent_id, limit_rule
           FROM events WHERE 1=1`
 	var args []any
 	if filter.Domain != "" {
@@ -314,7 +368,8 @@ func (s *FleetSQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 		if err := rows.Scan(&e.ProxyID, &ts, &e.Domain, &e.Port, &e.Protocol, &e.Method,
 			&e.URL, &e.Decision, &e.ResponseStatus, &e.SecretRef, &e.JudgeReason, &e.Tool, &e.Reason,
 			&e.CostUSD, &e.Provider, &compliance,
-			&e.UserSub, &e.UserEmail, &userGroups, &groupsTrunc, &e.UserSID, &e.IdentityStatus, &e.IdentityReason, &e.UserAct, &e.IdentityTokenType); err != nil {
+			&e.UserSub, &e.UserEmail, &userGroups, &groupsTrunc, &e.UserSID, &e.IdentityStatus, &e.IdentityReason, &e.UserAct, &e.IdentityTokenType,
+			&e.AgentID, &e.LimitRule); err != nil {
 			return nil, fmt.Errorf("analytics: fleet scan: %w", err)
 		}
 		e.Compliance = decodeCompliance(compliance)
@@ -333,7 +388,8 @@ func (s *FleetSQLiteStore) GetEvents(filter EventFilter) ([]Event, error) {
 // with ProxyID and AgentID populated. It additionally filters by agent_id.
 func (s *FleetSQLiteStore) GetAggregatedEvents(filter AggregatedFilter) ([]AggregatedEvent, error) {
 	q := `SELECT proxy_id, agent_id, ts, domain, port, protocol, method, url, decision, response_status, secret_ref, judge_reason, tool, reason, cost_usd, provider, compliance,
-                 user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type
+                 user_sub, user_email, user_groups, user_groups_truncated, user_sid, identity_status, identity_reason, user_act, identity_token_type,
+                 agent_id, limit_rule
           FROM events WHERE 1=1`
 	var args []any
 	if filter.Domain != "" {
@@ -401,7 +457,8 @@ func (s *FleetSQLiteStore) GetAggregatedEvents(filter AggregatedFilter) ([]Aggre
 		if err := rows.Scan(&a.ProxyID, &a.AgentID, &ts, &a.Domain, &a.Port, &a.Protocol, &a.Method,
 			&a.URL, &a.Decision, &a.ResponseStatus, &a.SecretRef, &a.JudgeReason, &a.Tool, &a.Reason,
 			&a.CostUSD, &a.Provider, &compliance,
-			&a.UserSub, &a.UserEmail, &userGroups, &groupsTrunc, &a.UserSID, &a.IdentityStatus, &a.IdentityReason, &a.UserAct, &a.IdentityTokenType); err != nil {
+			&a.UserSub, &a.UserEmail, &userGroups, &groupsTrunc, &a.UserSID, &a.IdentityStatus, &a.IdentityReason, &a.UserAct, &a.IdentityTokenType,
+			&a.Event.AgentID, &a.LimitRule); err != nil {
 			return nil, fmt.Errorf("analytics: fleet agg scan: %w", err)
 		}
 		a.Compliance = decodeCompliance(compliance)
