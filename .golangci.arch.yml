@@ -86,6 +86,7 @@ linters:
             - '!${base-path}/internal/identity/identitytest/**'
             - '!${base-path}/test/**'
             - '!${base-path}/internal/agentreg/agentregtest/**'
+            - '!${base-path}/internal/oauthbroker/oauthbrokertest/**'
             - '!**/*_test.go'
           deny:
             - pkg: net
@@ -163,6 +164,7 @@ linters:
             - '!${base-path}/internal/identity/identitytest/**'
             - '!${base-path}/test/**'
             - '!${base-path}/internal/agentreg/agentregtest/**'
+            - '!${base-path}/internal/oauthbroker/oauthbrokertest/**'
             - '!${base-path}/internal/identity/adapters/oidc/**'
             - '!${base-path}/internal/workerca/adapters/cpclient/**'
             - '!${base-path}/internal/config/**'
@@ -236,6 +238,7 @@ linters:
             - '!${base-path}/internal/identity/identitytest/**'
             - '!${base-path}/test/**'
             - '!${base-path}/internal/agentreg/agentregtest/**'
+            - '!${base-path}/internal/oauthbroker/oauthbrokertest/**'
             - '!**/*_test.go'
           deny:
             - pkg: database/sql
