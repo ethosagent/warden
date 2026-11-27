@@ -1041,6 +1041,13 @@ and no table, goroutine or wire field is added.
   (a relative `next` for a GET); the console cookie, the admin bearer, a worker
   token or a `wak_` key never authenticate (a POST carrying one gets `401`).
   CSRF and Origin are the portal rules above.
+- A blocked user is refused on every connect and portal entry point from one
+  shared in-memory snapshot (no per-request SQLite query), writing no
+  `portal_sessions`, `idp_links`, `oauth_grants` or consent.store row. Each
+  `/connect/start` or `/connect/callback` refusal, including a surviving session
+  caught by the middleware, writes one `connect.denied` admin audit row with
+  `{reason: user_blocked}`; a refused portal login is a `portal.login_failed`
+  row with `{reason: blocked}`.
 - `POST` form fields `provider`, `scopes` (space or comma separated, empty means
   the provider's `defaultScopes`) and optional `pending`. Checks in order: the
   provider exists (`404 unknown_provider`), the user is not blocked (`403

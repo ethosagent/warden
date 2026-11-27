@@ -102,6 +102,10 @@ var All = slices.Concat(
 		// start in a minute write nothing.
 		{Name: "connect_start", Opts: connectOpts(), Run: connectStart},
 		{Name: "connect_callback", Opts: connectCallbackOpts(), Run: connectCallback},
+		// Blocked-user refusals (W-P3-OFFB-06): a blocked sub's portal session,
+		// connect callback and fresh portal login are all refused, write
+		// nothing, and the login leaves its audit row.
+		{Name: "blocked_user_refusals", Opts: blockedUserRefusalsOpts(), Run: blockedUserRefusals},
 
 		// Break-glass login (W-P1-OPS1-08): a real argon2id login opens a Secure
 		// admin session with a signed row, an ERROR line and a Finding per

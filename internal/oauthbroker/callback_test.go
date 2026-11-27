@@ -1153,3 +1153,93 @@ func TestSweepOrphansNarrow(t *testing.T) {
 		t.Errorf("the deletion line must carry a user-key prefix only: %s", line)
 	}
 }
+
+// TestConnect_BlockedUser: a blocked user at /connect/start or
+// /connect/callback is refused 403 user_blocked with the connect.denied row
+// the audit names, and nothing is written: no consent.store Put, no
+// oauth_grants row, no provider call. The pending ends denied. An unreadable
+// block list refuses 503 and writes the same nothing.
+func TestConnect_BlockedUser(t *testing.T) {
+	t.Run("callback blocked sub", func(t *testing.T) {
+		e := newCBEnv(t)
+		ctx := context.Background()
+		f := e.connect(t, cbSub, "google", true, "drive.readonly")
+		e.blocks.from, e.blocks.calls = 1, 0
+		_, err := e.b.Callback(ctx, f.req)
+		if code, status := cbCode(t, err); code != oauthbroker.CodeUserBlocked || status != 403 {
+			t.Fatalf("callback = %s %d, want user_blocked 403", code, status)
+		}
+		if e.prov.TokenRequests() != 0 {
+			t.Fatal("a blocked user reached the provider")
+		}
+		if keys, _ := e.vault.List(ctx); len(keys) != 0 {
+			t.Fatalf("consent.store holds %d keys after a blocked callback", len(keys))
+		}
+		if _, err := e.grant(t, cbSub, "google"); !errors.Is(err, oauthbroker.ErrNotFound) {
+			t.Fatalf("oauth_grants row after a blocked callback: %v", err)
+		}
+		if p, _ := e.store.GetPending(ctx, f.pendingID); p.Status != oauthbroker.StatusDenied || p.Reason != oauthbroker.ReasonUserBlocked {
+			t.Fatalf("pending = %+v, want denied user_blocked", p)
+		}
+		var denied []oauthbroker.AuditEvent
+		for _, ev := range e.audit.all() {
+			if ev.Action == oauthbroker.AuditActionDenied {
+				denied = append(denied, ev)
+			}
+		}
+		if len(denied) != 1 || denied[0].Reason != oauthbroker.ReasonUserBlocked || denied[0].Outcome != oauthbroker.OutcomeDenied ||
+			denied[0].Status != 403 || denied[0].Sub != cbSub || denied[0].Provider != "google" {
+			t.Fatalf("connect.denied rows = %+v", denied)
+		}
+		if strings.Contains(e.logs.String(), cbSub+"@") {
+			t.Fatal("the log holds the user's email")
+		}
+	})
+	t.Run("start blocked sub", func(t *testing.T) {
+		e := newCBEnv(t)
+		ctx := context.Background()
+		e.blocks.from, e.blocks.calls = 1, 0
+		_, err := e.b.Start(ctx, req(cbSub, "google"))
+		if startCode(t, err) != oauthbroker.CodeUserBlocked {
+			t.Fatalf("start = %v, want user_blocked", err)
+		}
+		evs := e.audit.all()
+		if len(evs) != 1 || evs[0].Action != oauthbroker.AuditActionDenied || evs[0].Reason != oauthbroker.ReasonUserBlocked ||
+			evs[0].Outcome != oauthbroker.OutcomeDenied || evs[0].Status != 403 || evs[0].Sub != cbSub || evs[0].Provider != "google" {
+			t.Fatalf("audit = %+v, want one connect.denied user_blocked row", evs)
+		}
+		if keys, _ := e.vault.List(ctx); len(keys) != 0 {
+			t.Fatal("a blocked start wrote to consent.store")
+		}
+		if _, err := e.grant(t, cbSub, "google"); !errors.Is(err, oauthbroker.ErrNotFound) {
+			t.Fatalf("oauth_grants row after a blocked start: %v", err)
+		}
+	})
+	t.Run("list unavailable fails closed", func(t *testing.T) {
+		e := newCBEnv(t)
+		ctx := context.Background()
+		f := e.connect(t, cbSub, "google", false, "drive.readonly")
+		e.blocks.err = errors.New("snapshot not loaded")
+		if _, err := e.b.Start(ctx, req(cbSub, "google")); startCode(t, err) != oauthbroker.CodeBlockListUnavailable {
+			t.Fatalf("start = %v", err)
+		}
+		_, err := e.b.Callback(ctx, f.req)
+		if code, status := cbCode(t, err); code != oauthbroker.CodeBlockListUnavailable || status != 503 {
+			t.Fatalf("callback = %s %d, want block_list_unavailable 503", code, status)
+		}
+		if e.prov.TokenRequests() != 0 {
+			t.Fatal("the provider was called with an unreadable block list")
+		}
+		if keys, _ := e.vault.List(ctx); len(keys) != 0 {
+			t.Fatal("consent.store written with an unreadable block list")
+		}
+	})
+	t.Run("empty block list unchanged", func(t *testing.T) {
+		e := newCBEnv(t)
+		f := e.connect(t, cbSub, "google", false, "drive.readonly")
+		if _, err := e.b.Callback(context.Background(), f.req); err != nil {
+			t.Fatalf("callback with an empty block list: %v", err)
+		}
+		e.record(t, cbSub, "google")
+	})
+}

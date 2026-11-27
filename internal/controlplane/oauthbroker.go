@@ -47,28 +47,6 @@ func checkOAuthBrokerStore(c *config.ConsentConfig, st secrets.SecretStore) erro
 	return errBrokerNeedsStore
 }
 
-// BrokerBlockChecker adapts BlockStore to oauthbroker.BlockChecker, the same
-// way TokenBlockChecker serves the token service: an unloaded list is an
-// error (fail closed), never "not blocked".
-type BrokerBlockChecker struct{ store *BlockStore }
-
-// NewBrokerBlockChecker returns the adapter over store.
-func NewBrokerBlockChecker(store *BlockStore) *BrokerBlockChecker {
-	return &BrokerBlockChecker{store: store}
-}
-
-// IsBlocked reports whether sub (exact) or email (lowercased by the store) is
-// on the block list.
-func (c *BrokerBlockChecker) IsBlocked(ctx context.Context, sub, email string) (bool, error) {
-	if c == nil || c.store == nil || !c.store.Ready() {
-		return false, ErrBlockListNotReady
-	}
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	return c.store.IsBlocked(sub, email), nil
-}
-
 var _ oauthbroker.BlockChecker = (*BrokerBlockChecker)(nil)
 
 // initBroker builds the connect routes' broker when every gate input is
@@ -87,7 +65,7 @@ func (s *Server) initBroker() {
 	bc := oauthbroker.Config{
 		Registry:    cfg.OAuthRegistry,
 		Store:       cfg.GrantStore,
-		Blocks:      NewBrokerBlockChecker(s.blocks),
+		Blocks:      NewBlockChecker(s.blocks),
 		Limiter:     ratelimit.NewLimiter(oauthbroker.StartsPerMinute, time.Minute),
 		RedirectURL: cfg.Consent.Connect.RedirectURL,
 		UserKey:     secrets.UserKey,
