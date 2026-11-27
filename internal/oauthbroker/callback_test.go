@@ -1006,13 +1006,10 @@ func TestConnectCallbackSameStateRace(t *testing.T) {
 	wg.Wait()
 	ok, invalid := 0, 0
 	for _, err := range errs {
-		switch {
-		case err == nil:
+		if err == nil {
 			ok++
-		default:
-			if code, _ := cbCode(t, err); code == oauthbroker.CodeStateInvalid {
-				invalid++
-			}
+		} else if code, _ := cbCode(t, err); code == oauthbroker.CodeStateInvalid {
+			invalid++
 		}
 	}
 	if ok != 1 || invalid != 1 || e.prov.TokenRequests() != 1 {
