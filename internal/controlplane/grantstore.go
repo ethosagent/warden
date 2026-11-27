@@ -1,9 +1,11 @@
-// Package grantstore is the repository adapter behind the oauthbroker
-// GrantStore port: guarded read and write helpers for a user's grant record
-// on a secrets.SecretStore (the CP-only consent.store). Keys come only from
-// secrets.UserGrantKey and the record type is oauthbroker.TokenRecord, so
-// there is no second key scheme or record format. Control plane only.
-package grantstore
+// This file is the consent.store implementation of the oauthbroker.GrantStore
+// port: guarded read and write helpers for a user's grant record. Keys come
+// only from secrets.UserGrantKey and the record type is
+// oauthbroker.TokenRecord, so there is no second key scheme or record format.
+// It lives in the assembly layer because only assembly may import both the
+// oauthbroker domain and internal/secrets (archtest L1/L7).
+
+package controlplane
 
 import (
 	"context"
@@ -30,13 +32,13 @@ func grantKey(userKey, provider string) (string, error) {
 	return key, nil
 }
 
-// LoadGrant reads and parses the user's grant for provider. On a
+// loadGrant reads and parses the user's grant for provider. On a
 // secrets.VersionedStore the returned Version carries the backend version so
 // StoreRotated can compare-and-swap; on other stores it carries only the
 // grant_id. A missing key returns oauthbroker.ErrGrantMissing; any other store or parse
 // failure is returned wrapped and is not oauthbroker.ErrGrantMissing. Errors name the key
 // (and version), never a value.
-func LoadGrant(ctx context.Context, store secrets.SecretStore, userKey, provider string) (oauthbroker.TokenRecord, oauthbroker.Version, error) {
+func loadGrant(ctx context.Context, store secrets.SecretStore, userKey, provider string) (oauthbroker.TokenRecord, oauthbroker.Version, error) {
 	key, err := grantKey(userKey, provider)
 	if err != nil {
 		return oauthbroker.TokenRecord{}, oauthbroker.Version{}, err
@@ -73,7 +75,7 @@ func readError(key string, err error) error {
 	return fmt.Errorf("oauthbroker: read grant %q: %w", key, err)
 }
 
-// StoreRotated writes rec (a rotated copy of the record LoadGrant returned
+// storeRotated writes rec (a rotated copy of the record LoadGrant returned
 // with version read) back only while the stored grant is still the one that
 // was read.
 //
@@ -91,7 +93,7 @@ func readError(key string, err error) error {
 // Store failures other than a conflict are returned wrapped (not
 // oauthbroker.ErrGrantChanged) and the caller treats them as "token unavailable". Errors
 // carry only the key and version, never a value. The helper does not log.
-func StoreRotated(ctx context.Context, store secrets.SecretStore, userKey, provider string, rec oauthbroker.TokenRecord, read oauthbroker.Version) error {
+func storeRotated(ctx context.Context, store secrets.SecretStore, userKey, provider string, rec oauthbroker.TokenRecord, read oauthbroker.Version) error {
 	key, err := grantKey(userKey, provider)
 	if err != nil {
 		return err
@@ -173,21 +175,21 @@ func grantIDOf(raw string) (string, bool) {
 	return rec.GrantID, true
 }
 
-// Store binds the helpers to one consent.store; it implements
+// grantStore binds the helpers to one consent.store; it implements
 // oauthbroker.GrantStore.
-type Store struct{ s secrets.SecretStore }
+type grantStore struct{ s secrets.SecretStore }
 
-var _ oauthbroker.GrantStore = Store{}
+var _ oauthbroker.GrantStore = grantStore{}
 
-// New returns the GrantStore over store.
-func New(store secrets.SecretStore) Store { return Store{s: store} }
+// NewGrantStore returns the GrantStore over store.
+func NewGrantStore(store secrets.SecretStore) oauthbroker.GrantStore { return grantStore{s: store} }
 
 // LoadGrant implements oauthbroker.GrantStore.
-func (g Store) LoadGrant(ctx context.Context, userKey, provider string) (oauthbroker.TokenRecord, oauthbroker.Version, error) {
-	return LoadGrant(ctx, g.s, userKey, provider)
+func (g grantStore) LoadGrant(ctx context.Context, userKey, provider string) (oauthbroker.TokenRecord, oauthbroker.Version, error) {
+	return loadGrant(ctx, g.s, userKey, provider)
 }
 
 // StoreRotated implements oauthbroker.GrantStore.
-func (g Store) StoreRotated(ctx context.Context, userKey, provider string, rec oauthbroker.TokenRecord, read oauthbroker.Version) error {
-	return StoreRotated(ctx, g.s, userKey, provider, rec, read)
+func (g grantStore) StoreRotated(ctx context.Context, userKey, provider string, rec oauthbroker.TokenRecord, read oauthbroker.Version) error {
+	return storeRotated(ctx, g.s, userKey, provider, rec, read)
 }
