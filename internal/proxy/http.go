@@ -139,20 +139,19 @@ type requestScope struct {
 
 	// Decision state threaded between stages. policyAllowed is set by
 	// constraintGate when the policy verdict for this request was Allow (not
-	// NoMatch): only then does userLimitStage charge a per-user limit.
-	// limitRule is the per-user limit rule that stage resolved; it rides every
-	// event of the request.
-	// chargeAfterJudge marks a judge-decided (NoMatch) request whose limit
-	// is charged only after the judge allowed it (judgedUserLimitStage).
-	policyAllowed    bool
-	chargeAfterJudge bool
-	limitRule        string
-	judgeReason      string
-	wasMCP           bool
-	mcpTool          string
-	mcpReason        string
-	mcpSessKey       string
-	closeAfter       bool
+	// NoMatch). chargeLimit marks a request userLimitStage peeked (a policy
+	// Allow, or a NoMatch for the judge) whose limit forward charges just
+	// before sending. limitRule is the rule of that charge (or of a limit
+	// deny); it rides every later event of the request.
+	policyAllowed bool
+	chargeLimit   bool
+	limitRule     string
+	judgeReason   string
+	wasMCP        bool
+	mcpTool       string
+	mcpReason     string
+	mcpSessKey    string
+	closeAfter    bool
 
 	// sess is the connection's registry session (nil for none): blockStage binds
 	// the request's identities to it.
@@ -470,9 +469,6 @@ func (p *Proxy) runRequestStages(s *requestScope) (endSession bool) {
 		return true
 	}
 	if p.judgeGate(s) {
-		return true
-	}
-	if p.judgedUserLimitStage(s) {
 		return true
 	}
 	if p.mcpRequestScan(s) {
@@ -1118,13 +1114,23 @@ func (p *Proxy) forward(s *requestScope) (endSession bool) {
 		if err := p.dialUpstream(s); err != nil {
 			return p.badGateway(s)
 		}
+		// The per-user limit is charged here, after every refusal a request can
+		// meet before it is sent (judge, MCP, DLP, swap, SSRF dial).
+		if p.chargeUserLimitNow(s) {
+			return true
+		}
 		if err := s.req.Write(s.upstream); err != nil || !p.readUpstreamResponse(s) {
 			return p.badGateway(s)
 		}
 		return false
 	}
 
-	// Reused conn: serialize once so a stale redial can re-send identical bytes.
+	// Reused conn: charge the per-user limit once (a stale redial below re-sends
+	// the same request and is not charged again), then serialize once so a
+	// stale redial can re-send identical bytes.
+	if p.chargeUserLimitNow(s) {
+		return true
+	}
 	var buf bytes.Buffer
 	if err := s.req.Write(&buf); err != nil {
 		return p.badGateway(s)

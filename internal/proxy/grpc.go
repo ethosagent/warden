@@ -195,6 +195,12 @@ func (p *Proxy) forwardH2(s *requestScope) (endSession bool) {
 	if ref, ok := s.grpcGuard.Refusal(); ok {
 		return p.answerGRPCRefusal(s, ref)
 	}
+	// The per-user limit is charged here, before the round trip. The h2
+	// transport dials inside RoundTrip, so unlike HTTP/1.1 a stream whose dial
+	// the SSRF dialer refuses has already been charged.
+	if p.chargeUserLimitNow(s) {
+		return true
+	}
 	outReq, err := http.NewRequestWithContext(s.req.Context(), s.req.Method, outURL.String(), s.req.Body)
 	if err != nil {
 		return p.badGateway(s)

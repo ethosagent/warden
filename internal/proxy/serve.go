@@ -364,7 +364,7 @@ func (p *Proxy) handleConn(conn net.Conn) {
 		// identities of many users, so it is never refused on the anonymous
 		// bucket here; each of its requests is charged to its own subject.
 		if g.verdict.Decision == policy.Allow && ci.status() == identity.StatusValid {
-			if _, denied := p.connectUserLimit(conn, ci, domain, port, false); denied {
+			if p.connectUserLimitPeek(conn, ci, domain, port) {
 				return
 			}
 		}
@@ -397,14 +397,14 @@ func (p *Proxy) handleConn(conn net.Conn) {
 		return
 	}
 
-	// Every branch that reaches here is a policy Allow. An opaque tunnel shows
-	// no requests, so the per-user limit is charged once, here, before the 200.
-	limitRule, denied := p.connectUserLimit(conn, ci, domain, port, true)
-	if denied {
+	// Every branch that reaches here is a policy Allow. A raw tunnel carries
+	// only the CONNECT identity, so an exhausted user (or anonymous bucket) is
+	// refused here, before the 200; tunnel charges it once it is dialed.
+	if p.connectUserLimitPeek(conn, ci, domain, port) {
 		return
 	}
 	_, _ = fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-	p.tunnel(conn, br, domain, port, ci, tunnelUntil, limitRule)
+	p.tunnel(conn, br, domain, port, ci, tunnelUntil)
 }
 
 // connSubject is the policy subject of the connection's verified identity: nil
@@ -516,7 +516,7 @@ func (p *Proxy) storeAllow(ci connIdentity, domain string, port int, protocol, l
 //
 // A raw tunnel is opaque and records no per-request identity (stamping events
 // is W-P1-VRFY-09); the CONNECT identity only registers it for a block-list cut.
-func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int, ci connIdentity, until time.Time, limitRule string) {
+func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port int, ci connIdentity, until time.Time) {
 	p.reach(PathTunnel)
 	// Only an attributed tunnel registers, unless every session is tracked
 	// (agent kill switch): an anonymous one costs nothing here otherwise.
@@ -533,8 +533,15 @@ func (p *Proxy) tunnel(client net.Conn, br *bufio.Reader, domain string, port in
 	remote, err := p.dialFunc("tcp", net.JoinHostPort(domain, fmt.Sprintf("%d", port)))
 	if err != nil {
 		if !p.storeSSRFDeny(ci, domain, port, "tcp", err) {
-			p.storeAllow(ci, domain, port, "tcp", limitRule)
+			p.storeAllow(ci, domain, port, "tcp", "")
 		}
+		return
+	}
+	// Charged once the tunnel is registered and dialed: a refused tunnel
+	// costs nothing.
+	limitRule, denied := p.tunnelUserLimitCharge(ci, domain, port)
+	if denied {
+		_ = remote.Close()
 		return
 	}
 	p.storeAllow(ci, domain, port, "tcp", limitRule)

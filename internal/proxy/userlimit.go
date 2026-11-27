@@ -14,23 +14,24 @@ import (
 // userlimit.go) picks the one rule that applies and owns the buckets; this
 // file decides WHEN to charge and how a refusal is answered.
 //
-// A limit is charged once per unit of work the proxy can see:
+// A limit is charged once per unit of work the proxy forwards, at the last
+// moment before it goes upstream, so a refused unit costs nothing:
 //   - every HTTP/1.1 request, HTTP/2 or gRPC stream and WebSocket upgrade, in
-//     userLimitStage (each request carries its own subject, so one keep-alive
-//     session carrying several users charges each of them);
-//   - a raw tunnel (no CA) once at CONNECT, before the 200;
-//   - an opaque passthrough on a TLS-terminating worker (non-TLS bytes, or
-//     non-HTTP inside TLS) once, before the dial, since no request in it can
-//     be seen.
+//     forward (each request carries its own subject, so one keep-alive session
+//     carrying several users charges each of them). userLimitStage peeks first,
+//     before the judge, so an exhausted user skips the judge and every scan;
+//   - a raw tunnel (no CA) or an opaque passthrough on a TLS-terminating worker
+//     (non-TLS bytes, or non-HTTP inside TLS) once, after its session
+//     registered and its dial succeeded, since no request in it can be seen.
 //
-// A TLS-terminated CONNECT only peeks (PeekUserLimit): the per-request charge
-// is authoritative and a tunnel must not cost a request of its own.
+// CONNECT only peeks, so an exhausted user is refused before the 200; a
+// TLS-terminated CONNECT peeks only with a verified identity (a token-less one
+// may carry several users' per-request identities).
 //
-// Limits are checked only when the policy verdict was Allow, after the
-// identity, block-list and policy stages and before the judge: they can turn
-// an allow into a deny, never anything into an allow, and they never see a
-// secret (they run before the swap). The agent id is always the worker's
-// bound agent (Config.AgentID), never a request or token value.
+// Limits apply only to a request the policy allowed or the judge allowed:
+// they can turn an allow into a deny, never anything into an allow. The agent
+// id is always the worker's bound agent (Config.AgentID), never a request or
+// token value.
 
 // userLimitKindRate is the kind label of warden.user_limit.denied.total for a
 // rate refusal (W-P3-PUL-04 adds cost and unmeasurable).
@@ -79,62 +80,61 @@ func (p *Proxy) recordUserLimitDenied(v policy.RequestVerdict) {
 	}
 }
 
-// userLimitStage applies the per-user limit rule that matches the request's
-// subject (nil for no, invalid or expired token: the anonymous rule). It runs
-// after constraintGate and before judgeGate, and only charges a request that
-// will be forwarded:
-//   - a policy Allow is charged here; over the limit the judge is not called,
-//     nothing is swapped and nothing is dialed;
-//   - a NoMatch the judge decides is only peeked here (no budget consumed), so
-//     an already-exhausted user costs no judge call, and is charged by
-//     judgedUserLimitStage once the judge allowed it: a judge-denied request is
-//     never charged;
-//   - a Deny or Conditional never reaches this stage (constraintGate ended it).
+// userLimitStage is the pre-check: it runs after constraintGate and before
+// judgeGate and only PEEKS (no budget is consumed), for a policy Allow and for
+// a NoMatch the judge will decide. A user whose bucket is already exhausted is
+// refused here, before the judge, the scans, the swap and any dial; otherwise
+// the request is marked for the authoritative charge (chargeUserLimitNow),
+// which runs just before the request is sent upstream, so a request refused
+// by the judge, MCP, DLP, the swap or the SSRF dialer never consumes budget.
+// A Deny or Conditional never reaches this stage (constraintGate ended it).
 //
 // A limit verdict can only deny; it never overrides the policy or judge
 // verdict. With no limits configured it is one read lock in the evaluator and
 // changes nothing on the request or its events.
 func (p *Proxy) userLimitStage(s *requestScope) (endSession bool) {
-	switch {
-	case s.policyAllowed:
-		return p.applyUserLimit(s, false)
-	case s.deferred == deferJudge:
-		s.chargeAfterJudge = true
-		return p.applyUserLimit(s, true)
-	}
-	return false
-}
-
-// judgedUserLimitStage charges a judge-decided (NoMatch) request after the
-// judge allowed it (judgeGate already ended every judge deny), before any
-// swap or upstream byte. An over-limit user still costs at most one judge
-// call per request here: userLimitStage's peek refuses them before the judge
-// once their bucket is exhausted, so only the request that exhausts it races
-// past the peek.
-func (p *Proxy) judgedUserLimitStage(s *requestScope) (endSession bool) {
-	if !s.chargeAfterJudge {
+	if !s.policyAllowed && s.deferred != deferJudge {
 		return false
 	}
-	return p.applyUserLimit(s, false)
+	s.chargeLimit = true
+	v := p.cfg.Policy.PeekUserLimit(p.userLimitRC(s), p.cfg.AgentID)
+	if v.Decision != policy.Deny {
+		// A peek is not a charge: limit_rule is set only once the request is
+		// charged, so a request refused later carries none.
+		return false
+	}
+	return p.denyUserLimit(s, v)
 }
 
-// applyUserLimit charges (or, with peek, only checks) the request's per-user
-// limit and answers the refusal when it is out of budget.
-func (p *Proxy) applyUserLimit(s *requestScope, peek bool) (endSession bool) {
-	rc := policy.RequestContext{Domain: s.domain, Port: s.port, Scheme: s.scheme, Subject: s.subject}
-	var v policy.RequestVerdict
-	if peek {
-		v = p.cfg.Policy.PeekUserLimit(rc, p.cfg.AgentID)
-	} else {
-		v = p.cfg.Policy.ChargeUserLimit(rc, p.cfg.AgentID)
+// chargeUserLimitNow is the authoritative charge, made once per request just
+// before its first byte goes upstream (forward: after the upstream dial on
+// HTTP/1.1; before the round trip on HTTP/2, whose transport dials inside it).
+// It reports whether the request was refused (the response is written). A
+// redial of a stale keep-alive conn re-sends the same request and is not
+// charged again.
+func (p *Proxy) chargeUserLimitNow(s *requestScope) (denied bool) {
+	if !s.chargeLimit {
+		return false
 	}
+	s.chargeLimit = false
+	v := p.cfg.Policy.ChargeUserLimit(p.userLimitRC(s), p.cfg.AgentID)
 	// Set before any event of this request is recorded (the deny below and the
 	// allow at the end both read it).
 	s.limitRule = v.LimitRule
 	if v.Decision != policy.Deny {
 		return false
 	}
-	p.emitDeny(s, v.Reason, denyExtra{LatencyMs: s.latencyMs(), JudgeReason: s.judgeReason})
+	return p.denyUserLimit(s, v)
+}
+
+func (p *Proxy) userLimitRC(s *requestScope) policy.RequestContext {
+	return policy.RequestContext{Domain: s.domain, Port: s.port, Scheme: s.scheme, Subject: s.subject}
+}
+
+// denyUserLimit records and answers a user-limit refusal of a request.
+func (p *Proxy) denyUserLimit(s *requestScope, v policy.RequestVerdict) bool {
+	s.limitRule = v.LimitRule
+	p.emitDeny(s, v.Reason, denyExtra{LatencyMs: s.latencyMs(), JudgeReason: s.judgeReason, SwappedRefs: s.swappedNames})
 	p.recordUserLimitDenied(v)
 	status, body, retry := userLimitResponse(v)
 	if retry > 0 {
@@ -171,28 +171,29 @@ func (p *Proxy) recordConnUserLimitDeny(ci connIdentity, domain string, port int
 	p.recordUserLimitDenied(v)
 }
 
-// connectUserLimit is the CONNECT-time check, after the policy admitted the
-// destination and before the 200: a raw tunnel (charge) is charged here once
-// for its whole life; a TLS-terminated tunnel (peek) is refused only when the
-// rule's bucket is already exhausted. A refusal answers the CONNECT with the
-// same JSON as a request-level refusal (429 + Retry-After, or 403) and
-// Connection: close. It returns the rule (for the tunnel's allow event) and
-// whether the CONNECT was refused.
-func (p *Proxy) connectUserLimit(w io.Writer, ci connIdentity, domain string, port int, charge bool) (rule string, denied bool) {
-	v := p.connUserLimit(ci, domain, port, charge)
+// connectUserLimitPeek is the CONNECT-time pre-check, after the policy
+// admitted the destination and before the 200: a user whose bucket is already
+// exhausted is refused with the same JSON as a request-level refusal (429 +
+// Retry-After, or 403) and Connection: close. It consumes nothing; a tunnel is
+// charged by tunnelUserLimitCharge once it is registered and dialed, and a
+// terminated tunnel's requests are charged one by one.
+func (p *Proxy) connectUserLimitPeek(w io.Writer, ci connIdentity, domain string, port int) (denied bool) {
+	v := p.connUserLimit(ci, domain, port, false)
 	if v.Decision != policy.Deny {
-		return v.LimitRule, false
+		return false
 	}
 	p.recordConnUserLimitDeny(ci, domain, port, v)
 	status, body, retry := userLimitResponse(v)
 	writeJSONResponseRetry(w, status, body, retry)
-	return v.LimitRule, true
+	return true
 }
 
-// passthroughUserLimit charges an opaque passthrough on a TLS-terminating
-// worker (the client already has its 200, so there is no response to write:
-// a refusal is the audited close). It returns the rule and whether it refused.
-func (p *Proxy) passthroughUserLimit(ci connIdentity, domain string, port int) (rule string, denied bool) {
+// tunnelUserLimitCharge charges an opaque tunnel (a raw tunnel without a CA,
+// or a passthrough on a TLS-terminating worker) once for its whole life,
+// after its session registered and its dial succeeded, so a refused tunnel
+// costs nothing. The client already has its 200, so a refusal is the audited
+// close. It returns the rule and whether it refused.
+func (p *Proxy) tunnelUserLimitCharge(ci connIdentity, domain string, port int) (rule string, denied bool) {
 	v := p.connUserLimit(ci, domain, port, true)
 	if v.Decision != policy.Deny {
 		return v.LimitRule, false

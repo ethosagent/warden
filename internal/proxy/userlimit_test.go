@@ -432,6 +432,9 @@ func TestUserLimit_OnlyAfterPolicyAllow(t *testing.T) {
 		if d.Reason != string(denyreason.Judge) {
 			t.Errorf("deny reason = %q, want judge (a limit never overwrites it)", d.Reason)
 		}
+		if d.LimitRule != "" {
+			t.Errorf("judge deny carries limit_rule %q: a peek is not a charge", d.LimitRule)
+		}
 	}
 	if n := e.p.cfg.Policy.(*policy.Evaluator).UserLimitBuckets(); n != 0 {
 		t.Errorf("buckets = %d, want 0: a judge-denied request is never charged", n)
@@ -516,5 +519,119 @@ func TestRetryAfterSeconds(t *testing.T) {
 		if got := retryAfterSeconds(d); got != want {
 			t.Errorf("retryAfterSeconds(%v) = %d, want %d", d, got, want)
 		}
+	}
+}
+
+// bucketsOf is the env evaluator's open per-user bucket count.
+func bucketsOf(e *idEnv) int { return e.p.cfg.Policy.(*policy.Evaluator).UserLimitBuckets() }
+
+// The authoritative charge is made just before the request is sent: a request
+// refused by DLP after the pre-judge peek consumes no budget and its deny
+// carries no limit_rule.
+func TestUserLimit_DLPDeniedNotCharged(t *testing.T) {
+	dlp := NewDLPScanner(config.DLPConfig{
+		Mode:  config.DLPModeEnforce,
+		Rules: []config.DLPRule{{Class: "pii.*", Action: config.DLPActionBlock}},
+	}, false, false)
+	e := newIDEnvCfg(t, IdentityModeAttribute, limitEdit(config.Policy{UserLimits: []config.UserLimit{engRule("1/hour")}}, nil,
+		func(c *Config) { c.DLP = dlp }))
+	post := func() int {
+		c := e.h1("")
+		body := "contact: alice@example.com please"
+		_, _ = io.WriteString(c.tc, "POST /x HTTP/1.1\r\nHost: "+idHost+"\r\nX-Warden-Identity: Bearer tok-alice\r\n"+
+			"Content-Type: text/plain\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+		resp, err := http.ReadResponse(c.br, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	for i := 0; i < 2; i++ {
+		if st := post(); st != http.StatusForbidden {
+			t.Fatalf("DLP-blocked request %d = %d, want 403", i, st)
+		}
+	}
+	if n := bucketsOf(e); n != 0 {
+		t.Errorf("buckets = %d, want 0: a DLP-denied request is never charged", n)
+	}
+	for _, ev := range waitEvents(t, e.store, 2) {
+		if ev.LimitRule != "" {
+			t.Errorf("DLP deny carries limit_rule %q", ev.LimitRule)
+		}
+	}
+	if st := e.h1("").get("X-Warden-Identity: Bearer tok-alice\r\n"); st != http.StatusOK {
+		t.Errorf("first clean request = %d, want 200 (budget intact)", st)
+	}
+}
+
+// A request whose upstream dial the SSRF dialer refuses is never charged.
+func TestUserLimit_SSRFDeniedNotCharged(t *testing.T) {
+	e := newIDEnvCfg(t, IdentityModeAttribute, limitEdit(config.Policy{UserLimits: []config.UserLimit{engRule("1/hour")}}, nil))
+	inner := e.p.dialTLS
+	var refuse atomic.Bool
+	refuse.Store(true)
+	e.p.dialTLS = func(n, a string, c *tls.Config) (*tls.Conn, error) {
+		if refuse.Load() {
+			return nil, &SSRFError{Reason: SSRFReasonBlocked, AddrClass: "private"}
+		}
+		return inner(n, a, c)
+	}
+	for i := 0; i < 2; i++ {
+		if st := e.h1("").get("X-Warden-Identity: Bearer tok-alice\r\n"); st != http.StatusBadGateway {
+			t.Fatalf("SSRF-refused request %d = %d, want 502", i, st)
+		}
+	}
+	if n := bucketsOf(e); n != 0 {
+		t.Errorf("buckets = %d, want 0: an SSRF-refused request is never charged", n)
+	}
+	refuse.Store(false)
+	if st := e.h1("").get("X-Warden-Identity: Bearer tok-alice\r\n"); st != http.StatusOK {
+		t.Errorf("first dialable request = %d, want 200 (budget intact)", st)
+	}
+}
+
+// A raw tunnel whose dial fails is never charged; one that is dialed is.
+func TestUserLimit_RefusedTunnelNotCharged(t *testing.T) {
+	e := newIDEnvCfg(t, IdentityModeAttribute, limitEdit(config.Policy{UserLimits: []config.UserLimit{engRule("1/hour")}}, nil, noCA))
+	auth := "Proxy-Authorization: " + basicAuth("tok-alice") + "\r\n"
+	// No raw upstream: every dial fails after the 200.
+	for i := 0; i < 2; i++ {
+		conn, br, status := e.connect(auth)
+		if !strings.Contains(status, "200") {
+			t.Fatalf("CONNECT %d = %q, want 200", i, status)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, _ = br.ReadByte() // the tunnel closes when the dial fails
+	}
+	if n := bucketsOf(e); n != 0 {
+		t.Errorf("buckets = %d, want 0: a tunnel that never dialed is never charged", n)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer func() { _ = c.Close() }(); _, _ = io.Copy(c, c) }()
+		}
+	}()
+	e.setRaw(func() (net.Conn, error) { return net.Dial("tcp", ln.Addr().String()) })
+	conn, br, status := e.connect(auth)
+	if !strings.Contains(status, "200") {
+		t.Fatalf("dialable CONNECT = %q, want 200", status)
+	}
+	_, _ = io.WriteString(conn, "ping")
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(br, buf); err != nil {
+		t.Fatalf("echo: %v", err)
+	}
+	if n := bucketsOf(e); n != 1 {
+		t.Errorf("buckets = %d, want 1 after one dialed tunnel", n)
 	}
 }

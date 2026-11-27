@@ -90,12 +90,6 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			return
 		}
 		p.reach(PathTunnel)
-		// An opaque passthrough shows no requests: charge the per-user limit
-		// once, before the dial (d is deferNone here, a policy Allow).
-		limitRule, denied := p.passthroughUserLimit(ci, domain, port)
-		if denied {
-			return
-		}
 		// Only an attributed tunnel registers (see tunnel): a block-list cut must
 		// reach this opaque passthrough, the form a CONNECT takes on a worker
 		// with TLS termination, as well as the CA-less one.
@@ -115,6 +109,14 @@ func (p *Proxy) handleTLS(clientConn net.Conn, br *bufio.Reader, domain string, 
 			// (silent before #391). Ordinary dial failures stay silent — this
 			// passthrough never wrote an event for them either.
 			p.storeSSRFDeny(ci, domain, port, "tcp", dialErr)
+			return
+		}
+		// An opaque passthrough shows no requests: charge the per-user limit
+		// once, now that it is registered and dialed (d is deferNone here, a
+		// policy Allow), so a refused passthrough costs nothing.
+		limitRule, denied := p.tunnelUserLimitCharge(ci, domain, port)
+		if denied {
+			_ = remote.Close()
 			return
 		}
 		sess.addCloser(remote)
@@ -237,12 +239,6 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 		proto = "raw"
 	}
 	p.reach(PathRawTLS)
-	// Non-HTTP inside TLS shows no requests either: charge the per-user limit
-	// once, before the dial (d is deferNone here, a policy Allow).
-	limitRule, denied := p.passthroughUserLimit(ci, domain, port)
-	if denied {
-		return
-	}
 	// Register like a tunnel so a block-list or agent cut reaches this path, and
 	// never dial for a session the registry already refused.
 	var sess *session
@@ -264,6 +260,12 @@ func (p *Proxy) terminateAndDispatch(clientConn net.Conn, firstBytes io.Reader, 
 		return
 	}
 	defer remote.Close()
+	// Non-HTTP inside TLS shows no requests either: charge the per-user limit
+	// once, now that it is registered and dialed (d is deferNone here).
+	limitRule, denied := p.tunnelUserLimitCharge(ci, domain, port)
+	if denied {
+		return
+	}
 	sess.addCloser(remote)
 	p.recordEvent(ci, analytics.Event{
 		Timestamp: time.Now(),
