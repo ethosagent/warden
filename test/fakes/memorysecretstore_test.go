@@ -14,7 +14,7 @@ func TestMemorySecretStore(t *testing.T) {
 	if !secrets.IsPersistent(m) {
 		t.Fatal("MemorySecretStore must be persistent")
 	}
-	if _, err := m.Get(ctx, "idp/k"); !errors.Is(err, secrets.ErrSecretNotFound) {
+	if _, err := m.Get(ctx, "idp/k"); !errors.Is(err, secrets.ErrSecretNotFound) || !errors.Is(err, secrets.ErrNotFound) {
 		t.Fatalf("absent Get err = %v", err)
 	}
 	if err := m.Put(ctx, "idp/k", "v1"); err != nil {

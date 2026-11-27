@@ -7,9 +7,8 @@ import (
 	"strings"
 )
 
-// consent.store backend selectors. vault is parsed and shape-checked now, but
-// the control plane refuses to start with it until the Vault KV v2 store
-// (W-P3-PUS-01) is wired in (W-P3-PUS-02).
+// consent.store backend selectors. vault builds the Vault KV v2 store
+// (W-P3-PUS-01, wired by W-P3-PUS-02 in controlplane.NewUserStore).
 const (
 	ConsentStoreBackendAWS   = "aws"
 	ConsentStoreBackendVault = "vault"
@@ -110,11 +109,16 @@ func parseConsentStore(r *rawConsentStore) *ConsentStore {
 // secret name and in a Vault path, no leading slash, ending in a slash.
 var consentStorePrefixRE = regexp.MustCompile(`^[A-Za-z0-9_+=.@-][A-Za-z0-9_+=.@/-]*/$`)
 
+// reservedVaultMountRoots are Vault system paths that are never a KV mount; the
+// Vault store (secrets.NewVaultSecretStore) refuses the same roots.
+var reservedVaultMountRoots = map[string]bool{"sys": true, "auth": true, "identity": true, "cubbyhole": true}
+
 // envNameRE is a POSIX-style environment variable name.
 var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // validateConsentStore checks the shape of consent.store. Whether the backend
-// may be used at all (echo needs --dev, vault needs W-P3-PUS-02) and whether it
+// may be used at all (echo needs --dev; vault needs its token and a reachable
+// KV v2 mount) and whether it
 // overlaps the distributed secretStore are control-plane startup checks
 // (controlplane.NewUserStore), because they depend on flags and on the served
 // secretStore.
@@ -155,8 +159,16 @@ func validateConsentStore(s *ConsentStore) error {
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("config: consent.store.vault.addr %q must not carry userinfo, query or fragment", v.Addr)
 	}
+	// Vault sends the token in X-Vault-Token on every request: plain http is
+	// accepted only to a loopback Vault (a local dev server or agent).
+	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("config: consent.store.vault.addr %q must use https unless its host is loopback (the token travels on every request)", v.Addr)
+	}
 	if v.Mount == "" {
 		return fmt.Errorf("config: consent.store.vault.mount is required")
+	}
+	if root, _, _ := strings.Cut(v.Mount, "/"); reservedVaultMountRoots[strings.ToLower(root)] {
+		return fmt.Errorf("config: consent.store.vault.mount %q is a reserved Vault system path (sys, auth, identity, cubbyhole), not a KV v2 mount", v.Mount)
 	}
 	if !envNameRE.MatchString(v.TokenEnv) {
 		return fmt.Errorf("config: consent.store.vault.tokenEnv %q must be an environment variable name", v.TokenEnv)

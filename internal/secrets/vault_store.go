@@ -206,6 +206,13 @@ func (s *vaultSecretStore) ensureKV2(ctx context.Context) error {
 	}
 }
 
+// Probe runs the mount preflight now instead of before the first request: it
+// fails unless the mount is a KV v2 engine rooted at the configured path and
+// reachable with the store's token and namespace. A 404 (no such mount or
+// namespace) is an error, never an empty store. Success is cached like the
+// lazy preflight's. The control plane calls it at startup (fail closed).
+func (s *vaultSecretStore) Probe(ctx context.Context) error { return s.ensureKV2(ctx) }
+
 // probeKV2 asks Vault what engine serves the mount. It refuses anything but a
 // KV v2 mount rooted exactly at the configured mount path, so a sub-path of a
 // KV v2 mount (e.g. "secret/app" for mount "secret/") is refused.
@@ -214,7 +221,14 @@ func (s *vaultSecretStore) probeKV2(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("mount check: %w", err)
 	}
-	if status != http.StatusOK {
+	switch status {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		// Never an empty store: the mount, or the namespace, does not exist.
+		return fmt.Errorf("mount check: mount %q not found in this namespace (status 404)", s.mount)
+	case http.StatusForbidden:
+		return fmt.Errorf("mount check: permission denied on mount %q (status 403): check the token and namespace", s.mount)
+	default:
 		return fmt.Errorf("mount check: unexpected status %d", status)
 	}
 	var r struct {
