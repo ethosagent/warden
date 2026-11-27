@@ -253,7 +253,7 @@ func TestBreakGlass_Success(t *testing.T) {
 
 	// Activity never extends the absolute expiry.
 	r.clk.Advance(30 * time.Minute)
-	r.srv.sessions.now = r.clk.Now
+	r.srv.sessions.SetNow(r.clk.Now)
 	if r.me(ck.Value).Code != http.StatusOK {
 		t.Fatal("session dead at +30m")
 	}
@@ -560,7 +560,7 @@ func TestBreakGlass_HashReload(t *testing.T) {
 func TestBreakGlass_SessionSweepKeepsLiveSession(t *testing.T) {
 	r := newBGRig(t, bgOpts{})
 	ck := r.cookie(r.post("192.0.2.1", bgUser, bgPassword))
-	r.srv.sessions.now = r.clk.Now
+	r.srv.sessions.SetNow(r.clk.Now)
 	r.clk.Advance(45 * time.Minute) // past the 30m idle limit of other sessions
 	if n, err := r.srv.sessions.SweepExpired(context.Background()); err != nil || n != 0 {
 		t.Fatalf("sweep removed %d (%v)", n, err)

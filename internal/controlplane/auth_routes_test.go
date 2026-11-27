@@ -124,8 +124,8 @@ func TestAuthMe(t *testing.T) {
 	})
 	t.Run("expired session", func(t *testing.T) {
 		clk := newFakeClock()
-		srv.sessions.now = clk.Now
-		t.Cleanup(func() { srv.sessions.now = time.Now })
+		srv.sessions.SetNow(clk.Now)
+		t.Cleanup(func() { srv.sessions.SetNow(time.Now) })
 		raw, _ := login(t, srv, "warden-admins")
 		clk.Advance(2 * time.Hour)
 		if rec := authReq(h, srv, http.MethodGet, "/auth/me", raw, ""); rec.Code != http.StatusUnauthorized {
