@@ -51,6 +51,9 @@ func newRefreshFixture(t *testing.T, typ string, reply func(w http.ResponseWrite
 	}))
 	t.Cleanup(f.srv.Close)
 	cfg := config.OAuthProviderConfig{ID: "prov", Type: typ, ClientID: "cid", ClientSecretEnv: "SEC", TokenURL: f.srv.URL + "/token"}
+	if typ == config.OAuthProviderGitHub || typ == config.OAuthProviderGitHubApp {
+		cfg.RevokeURL = f.srv.URL + "/applications/{client_id}/grant" // a non-github.com token URL needs one
+	}
 	switch typ {
 	case config.OAuthProviderGoogle, config.OAuthProviderGitHub:
 		cfg.AllowedScopes = []string{"a", "b"}

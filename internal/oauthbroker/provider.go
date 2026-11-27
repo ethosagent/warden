@@ -106,13 +106,15 @@ type Provider struct {
 	failTTL time.Duration
 	now     func() time.Time
 
-	httpc    FormPoster
-	logger   *slog.Logger
-	counters *RefreshCounters
+	httpc          FormPoster
+	logger         *slog.Logger
+	counters       *RefreshCounters
+	revokeCounters *RevokeCounters
 
 	// hinted and blockedLogged rate-limit the operator log lines to one per
 	// provider until a refresh succeeds.
 	hinted, blockedLogged atomic.Bool
+	revokeBlockedLogged   atomic.Bool
 }
 
 // RevokeEndpoint returns RevokeURL with {client_id} replaced by the
@@ -225,6 +227,7 @@ type Registry struct {
 	byID    map[string]*Provider
 	ids     []string
 	refresh RefreshCounters
+	revoke  RevokeCounters
 }
 
 // NewRegistry validates cfgs (the same rules as config load), applies the
@@ -243,7 +246,7 @@ func NewRegistry(cfgs []config.OAuthProviderConfig, opts Options) (*Registry, er
 	}
 	r := &Registry{byID: make(map[string]*Provider, len(cfgs))}
 	for _, c := range cfgs {
-		p, err := buildProvider(c, opts, logger, &r.refresh)
+		p, err := buildProvider(c, opts, logger, &r.refresh, &r.revoke)
 		if err != nil {
 			return nil, err
 		}
@@ -257,7 +260,7 @@ func NewRegistry(cfgs []config.OAuthProviderConfig, opts Options) (*Registry, er
 	return r, nil
 }
 
-func buildProvider(c config.OAuthProviderConfig, opts Options, logger *slog.Logger, counters *RefreshCounters) (*Provider, error) {
+func buildProvider(c config.OAuthProviderConfig, opts Options, logger *slog.Logger, counters *RefreshCounters, revoke *RevokeCounters) (*Provider, error) {
 	p := &Provider{
 		ID:                    c.ID,
 		Type:                  c.Type,
@@ -276,6 +279,7 @@ func buildProvider(c config.OAuthProviderConfig, opts Options, logger *slog.Logg
 		httpc:                 opts.HTTPClient,
 		logger:                logger,
 		counters:              counters,
+		revokeCounters:        revoke,
 	}
 	switch c.Type {
 	case config.OAuthProviderGoogle:

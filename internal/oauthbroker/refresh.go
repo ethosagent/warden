@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/netip"
 	"net/url"
@@ -86,6 +87,12 @@ type FormRequest struct {
 	// Authorization header (client_secret_basic), already form-urlencoded.
 	BasicUser, BasicPass string
 }
+
+// String, GoString and LogValue print a placeholder: a FormRequest holds the
+// refresh token and the client secret.
+func (FormRequest) String() string       { return redacted }
+func (FormRequest) GoString() string     { return redacted }
+func (FormRequest) LogValue() slog.Value { return slog.StringValue(redacted) }
 
 // FormPoster is the provider HTTP port. Callers must pass a context with a
 // deadline (Refresh applies RefreshTimeout); implementations also cap a call
