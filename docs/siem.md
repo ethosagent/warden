@@ -86,7 +86,7 @@ One object per line. `ts` is the worker's wall clock at event time. "Required" m
 | `ts` | string | yes | UTC RFC 3339 with nanoseconds, the worker's wall clock at event time. Sort by this. |
 | `proxy_id` | string | yes | The worker that wrote the line (`central.proxyID`, else the hostname). |
 | `proxy_id_source` | string | yes | Where `proxy_id` came from: `config` or `hostname`. |
-| `agent_id` | string | yes | The agent that made the request: the verified token's agent when present (`schema_rev` 5), else the wrapped agent this worker serves. |
+| `agent_id` | string | yes | The agent this worker serves (a verified Warden token is bound to it). |
 | `boot_id` | string | yes | Random per-process id; `seq` restarts at 1 for each `boot_id`. |
 | `seq` | integer | yes | Per-boot line counter; a gap means dropped lines. |
 | `decision` | string | yes | `allow` or `deny`. |

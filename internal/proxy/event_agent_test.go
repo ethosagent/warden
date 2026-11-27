@@ -3,7 +3,6 @@ package proxy
 import (
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/ethosagent/warden/internal/analytics"
 	"github.com/ethosagent/warden/internal/identity"
@@ -18,32 +17,37 @@ func TestEventAgentID(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	sync := &syncStore{}
 	e := newIDEnvCfg(t, IdentityModeAttribute, func(c *Config) {
 		c.AgentID = "claude-code"
-		c.Analytics = st
+		c.Analytics = &teeStore{SQLiteStore: st, sync: sync}
 	})
 	if code := e.h1("Proxy-Authorization: " + basicAuth("tok-alice") + "\r\n").get(""); code != 200 {
 		t.Fatalf("status = %d", code)
 	}
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		_, evs, err := st.GetOldestEventIDs(10)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(evs) > 0 {
-			for _, ev := range evs {
-				if ev.AgentID != "claude-code" || ev.LimitRule != "" {
-					t.Errorf("event agent %q rule %q; want claude-code and empty", ev.AgentID, ev.LimitRule)
-				}
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("no event stored")
-		}
-		time.Sleep(10 * time.Millisecond)
+	waitEvent(t, sync, "allow", func(ev analytics.Event) bool { return ev.Decision == "allow" })
+	_, evs, err := st.GetOldestEventIDs(10)
+	if err != nil || len(evs) == 0 {
+		t.Fatalf("GetOldestEventIDs: %d events, err %v", len(evs), err)
 	}
+	for _, ev := range evs {
+		if ev.AgentID != "claude-code" || ev.LimitRule != "" {
+			t.Errorf("event agent %q rule %q; want claude-code and empty", ev.AgentID, ev.LimitRule)
+		}
+	}
+}
+
+// teeStore writes to the SQLite store first, then signals the syncStore, so a
+// waitEvent hit means the row is readable from SQLite.
+type teeStore struct {
+	*analytics.SQLiteStore
+	sync *syncStore
+}
+
+func (s *teeStore) StoreEvent(e analytics.Event) error {
+	err := s.SQLiteStore.StoreEvent(e)
+	_ = s.sync.StoreEvent(e)
+	return err
 }
 
 func TestAgentIDFor(t *testing.T) {

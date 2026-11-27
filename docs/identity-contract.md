@@ -617,6 +617,8 @@ Event fields (on `/dashboard/api/traffic` and in the fleet view):
 | `user_sid` | Status `valid` and the token has `sid` |
 | `user_act` | Status `valid` and the token is a Warden token: the agent it was minted for (`act.sub`) |
 | `identity_token_type` | Status `valid` and the verifier says which kind: `warden` or `idp` |
+| `agent_id` | Every event when the worker has a resolved agent id: the agent that made the request (the token's `act.sub` for a valid Warden token, else the worker's agent) |
+| `limit_rule` | The per-user limit rule that applied; empty until per-user limits are enabled |
 
 The unverified `sub` or `email` of an expired or invalid token is never stored.
 

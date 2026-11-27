@@ -55,10 +55,30 @@ func TestMigrate_AgentIDLimitRule(t *testing.T) {
 	if err != nil || len(oldest) != 3 || count(oldest) != 2 {
 		t.Fatalf("GetOldestEventIDs: %d events, %d tagged, err %v; want 3 and 2", len(oldest), count(oldest), err)
 	}
+	shape := func(st *SQLiteStore) [3]int {
+		var rows, cols, idxs int
+		if err := st.db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('events')`).Scan(&cols); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='events'`).Scan(&idxs); err != nil {
+			t.Fatal(err)
+		}
+		return [3]int{rows, cols, idxs}
+	}
+	before := shape(s)
+	if before[0] != 3 {
+		t.Fatalf("rows = %d, want 3", before[0])
+	}
 	_ = s.Close()
 	s2, err := NewSQLiteStore(dsn, 0)
 	if err != nil {
 		t.Fatalf("second open must be a no-op: %v", err)
+	}
+	if after := shape(s2); after != before {
+		t.Errorf("second open changed rows/columns/indexes: %v -> %v", before, after)
 	}
 	_ = s2.Close()
 }
