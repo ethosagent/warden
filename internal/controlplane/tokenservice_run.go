@@ -18,6 +18,7 @@ import (
 	"github.com/ethosagent/warden/internal/identity/adapters/oidc"
 	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/policy"
+	"github.com/ethosagent/warden/internal/ratelimit"
 	"github.com/ethosagent/warden/internal/tokensvc"
 	tokensvcsqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
 )
@@ -170,7 +171,7 @@ const tokenRetentionInterval = time.Hour
 type TokenEdge struct {
 	// IP limits requests per client IP before the body is parsed. nil allows
 	// everything.
-	IP tokensvc.RateLimiter
+	IP ratelimit.RateLimiter
 	// MaxInFlight caps concurrent requests; 0 means no cap.
 	MaxInFlight int
 	// Metrics is the service's Metrics, so a refusal before the service is
@@ -295,12 +296,12 @@ func newTokenService(tc config.TokenServiceConfig, id config.IdentitySettings, s
 	replay := tokensvcsqlite.New(state)
 	events := tokensvcsqlite.NewEvents(state, logger)
 	metrics := tokensvc.NewMetrics()
-	limiter := func(name, rate string) (*tokensvc.Limiter, error) {
+	limiter := func(name, rate string) (*ratelimit.Limiter, error) {
 		rl, err := policy.ParseRateLimit(rate)
 		if err != nil {
 			return nil, fmt.Errorf("control-plane: tokenService.rateLimit.%s: %w", name, err)
 		}
-		return tokensvc.NewLimiter(rl.Limit, rl.Window), nil
+		return ratelimit.NewLimiter(rl.Limit, rl.Window), nil
 	}
 	ipLim, err := limiter("perIP", tc.RateLimit.PerIP)
 	if err != nil {

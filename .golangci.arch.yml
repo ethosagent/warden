@@ -42,6 +42,7 @@ linters:
             - ${base-path}/internal/approvals/**
             - ${base-path}/internal/bundle/**
             - ${base-path}/internal/workerca/**
+            - ${base-path}/internal/ratelimit/**
             - ${base-path}/internal/oauthbroker/**
             - ${base-path}/internal/apikeys/**
             - ${base-path}/internal/portal/**
@@ -123,6 +124,7 @@ linters:
             - ${base-path}/internal/approvals/**
             - ${base-path}/internal/bundle/**
             - ${base-path}/internal/workerca/**
+            - ${base-path}/internal/ratelimit/**
             - ${base-path}/internal/oauthbroker/**
             - ${base-path}/internal/apikeys/**
             - ${base-path}/internal/portal/**
@@ -236,6 +238,7 @@ linters:
             - '!${base-path}/internal/approvals/**'
             - '!${base-path}/internal/bundle/**'
             - '!${base-path}/internal/workerca/**'
+            - '!${base-path}/internal/ratelimit/**'
             - '!${base-path}/internal/oauthbroker/**'
             - '!${base-path}/internal/apikeys/**'
             - '!${base-path}/internal/portal/**'

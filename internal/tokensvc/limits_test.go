@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/identity"
+	"github.com/ethosagent/warden/internal/ratelimit"
 	"github.com/ethosagent/warden/internal/tokensvc"
 )
 
@@ -39,7 +40,7 @@ func (m *memRecorder) all() []tokensvc.Event {
 }
 
 func TestLimiterBucket(t *testing.T) {
-	l := tokensvc.NewLimiter(30, time.Minute)
+	l := ratelimit.NewLimiter(30, time.Minute)
 	now := time.Unix(1_700_000_000, 0)
 	for i := 0; i < 30; i++ {
 		if ok, _ := l.Allow("a", now); !ok {
@@ -66,7 +67,7 @@ func TestLimiterBucket(t *testing.T) {
 }
 
 func TestLimiterRetryAfterIsAtLeastOneSecond(t *testing.T) {
-	l := tokensvc.NewLimiter(1, time.Second/2) // 2 per second: the raw wait is 0.5s
+	l := ratelimit.NewLimiter(1, time.Second/2) // 2 per second: the raw wait is 0.5s
 	now := time.Unix(1_700_000_000, 0)
 	l.Allow("k", now)
 	if ok, wait := l.Allow("k", now); ok || wait < time.Second {
@@ -75,7 +76,7 @@ func TestLimiterRetryAfterIsAtLeastOneSecond(t *testing.T) {
 }
 
 func TestLimiterBoundedAndEvictsIdleFirst(t *testing.T) {
-	l := tokensvc.NewLimiterSize(1, time.Minute, 3)
+	l := ratelimit.NewLimiterSize(1, time.Minute, 3)
 	now := time.Unix(1_700_000_000, 0)
 	l.Allow("old", now)
 	for i := 0; i < 100; i++ {
@@ -85,7 +86,7 @@ func TestLimiterBoundedAndEvictsIdleFirst(t *testing.T) {
 		}
 	}
 	// A key idle for a full window is dropped even with room to spare.
-	l2 := tokensvc.NewLimiterSize(1, time.Minute, 10)
+	l2 := ratelimit.NewLimiterSize(1, time.Minute, 10)
 	l2.Allow("idle", now)
 	l2.Allow("fresh", now.Add(2*time.Minute))
 	if l2.Len() != 1 {
@@ -97,7 +98,7 @@ func TestRateLimitBuckets(t *testing.T) {
 	rec := &memRecorder{}
 	m := tokensvc.NewMetrics()
 	e := newSvcEnvWith(t, func(c *tokensvc.Config) {
-		c.AgentLimiter = tokensvc.NewLimiter(30, time.Minute)
+		c.AgentLimiter = ratelimit.NewLimiter(30, time.Minute)
 		c.Recorder, c.Metrics = rec, m
 	})
 	ctx := context.Background()
@@ -131,7 +132,7 @@ func TestRateLimitBuckets(t *testing.T) {
 }
 
 func TestRateLimitPerUser(t *testing.T) {
-	e := newSvcEnvWith(t, func(c *tokensvc.Config) { c.UserLimiter = tokensvc.NewLimiter(2, time.Minute) })
+	e := newSvcEnvWith(t, func(c *tokensvc.Config) { c.UserLimiter = ratelimit.NewLimiter(2, time.Minute) })
 	ctx := context.Background()
 	for i := 0; i < 2; i++ {
 		if _, err := e.svc.Exchange(ctx, e.req()); err != nil {
@@ -150,7 +151,7 @@ func TestRateLimitPerUser(t *testing.T) {
 }
 
 func TestRateLimitedAgentDoesNotReachTheIdP(t *testing.T) {
-	e := newSvcEnvWith(t, func(c *tokensvc.Config) { c.AgentLimiter = tokensvc.NewLimiter(1, time.Hour) })
+	e := newSvcEnvWith(t, func(c *tokensvc.Config) { c.AgentLimiter = ratelimit.NewLimiter(1, time.Hour) })
 	ctx := context.Background()
 	if _, err := e.svc.Exchange(ctx, e.req()); err != nil {
 		t.Fatal(err)
