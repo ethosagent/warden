@@ -35,6 +35,7 @@ func controlPlaneParams(cmd *cobra.Command) (controlplane.Params, error) {
 	bundleSeqFloor, _ := cmd.Flags().GetInt64("bundle-seq-floor")
 	auditKeyFile, _ := cmd.Flags().GetString("admin-audit-key-file")
 	auditNewSegment, _ := cmd.Flags().GetString("admin-audit-new-segment")
+	dev, _ := cmd.Flags().GetBool("dev")
 	backup, err := backupConfig(cmd)
 	if err != nil {
 		return controlplane.Params{}, err
@@ -54,6 +55,7 @@ func controlPlaneParams(cmd *cobra.Command) (controlplane.Params, error) {
 		PolicyStore:        policyStore,
 		Bundles:            bundles, BundleMaxAge: bundleMaxAge, BundleSeqFloor: bundleSeqFloor,
 		AdminAuditKeyFile: auditKeyFile, AdminAuditNewSegment: auditNewSegment,
+		Dev: dev,
 	}, nil
 }
 
@@ -118,6 +120,7 @@ func newControlPlaneCmd() *cobra.Command {
 	cmd.Flags().String("bundles", controlplane.BundlesDefault, "signed policy bundles on GET /policy. Unset = require when --state-dir, --policy-store=versioned and keys.enabled are all present (otherwise the legacy unsigned policy and a startup WARN naming what is missing). require = a request without the Accept header "+controlplane.BundleMediaType+" gets 406; offer = envelope for workers that send that header, legacy policy for the rest (use while pinning the fleet); off = legacy policy only, a temporary opt-out that logs a WARN. require and offer need --state-dir, --policy-store=versioned and keys.enabled")
 	cmd.Flags().Duration("bundle-max-age", controlplane.DefaultBundleMaxAge, "how long a signed bundle is valid; the control plane re-signs every quarter of it (minimum 1h; with signed bundles on)")
 	cmd.Flags().Int64("bundle-seq-floor", 0, "with --bundles offer|require, append a restore row at this seq at startup when the publish log is below it (after restoring a backup; 0 = never)")
+	cmd.Flags().Bool("dev", false, "development mode: allows the non-production echo consent.store backend (it keeps no value; never use in production)")
 	cmd.Flags().Bool("require-console-auth", false, "refuse to start unless console.auth is oidc (no open dashboard)")
 	cmd.Flags().String("admin-audit-key-file", "", "admin audit signing key (default <state-dir>/cp-audit.key; the HMAC key sits beside it); used when console.adminAudit.enabled")
 	cmd.Flags().String("admin-audit-new-segment", "", "key_id of a new admin audit signing key: start a new chain segment for it (manual rotation; no-op once the chain head is on that key)")

@@ -906,6 +906,167 @@ runs in the background with backoff, so an unreachable IdP never blocks startup 
 one `console_login` line (`result`, `reason`, `sub`, `duration_ms`), never a code, state,
 verifier, nonce or token.
 
+## Consent sign-in config (`consent:`)
+
+The `consent:` block configures the employee consent portal's sign-in: a
+dedicated `warden-portal` OIDC client, separate from the console's. Like
+`console:` it is control-plane-local: read from `--config` only (never the
+served copy under `--state-dir`, where a different block is ignored with a
+warning), never sent to workers, and kept byte-identical by the dashboard
+writers. An absent block or `enabled: false` changes nothing and mounts no
+route. The portal's sign-in routes are described under "Consent portal sign-in"
+below; the IdP link storage, the session middleware and logout arrive in later
+tickets of the consent sign-in feature.
+
+```yaml
+consent:
+  enabled: true
+  oidc:
+    issuer: https://idp.example.com        # must equal identity.issuer
+    clientID: warden-portal                # default
+    clientSecretEnv: WARDEN_PORTAL_DEX_CLIENT_SECRET   # env var NAME, never the secret
+    redirectURL: https://warden.example.com/portal/callback  # path exactly /portal/callback
+    # internalIssuerURL: http://dex:5556   # development split-horizon only
+  allowedGroups: []                        # empty: any user of the issuer
+  session:
+    idle: 30m                              # 0 < idle <= absolute <= 24h
+    absolute: 8h
+  idpLink:
+    enabled: true                          # request offline_access, keep the refresh token
+    refreshLifetime: 720h                  # the IdP's absolute refresh lifetime
+```
+
+- Scopes are fixed: `openid email profile groups`, plus `offline_access` while
+  `idpLink` is enabled.
+- The session defaults are shorter than the console's (1h / 12h) because a portal
+  session can approve third-party access for agents.
+- Startup refuses to run an enabled block unless `console.auth` is `oidc`,
+  `--state-dir` is set, the `clientSecretEnv` variable is non-empty (the error
+  names the variable, never its value), and `consent.oidc.issuer` equals
+  `identity.issuer` (a portal `sub` must match a data-plane `sub`). There is no dev
+  or demo bypass: use the Dex compose recipe (`deploy/compose/dex`).
+- While consent is enabled, a settings write that changes `identity.issuer` away
+  from `consent.oidc.issuer` is refused with 400 `identity_issuer_mismatch`.
+- `https` issuer unless `internalIssuerURL` is set; `redirectURL` is `https`
+  unless its host is loopback, and must differ from `console.oidc.redirectURL`.
+- `consent.store` is the CP-only user credential store; see
+  [CP-only user credential store](#cp-only-user-credential-store-consentstore).
+
+### Consent portal sign-in
+
+With the block enabled and `--state-dir` set the control plane mounts:
+
+| Route | What it does |
+|---|---|
+| `GET /portal/login?next=<path>` | stores a `purpose=portal` row in `oidc_pending` (10 min TTL, single use, its own 10,000 cap), sets the `__Host-warden_portal_login` binding cookie and redirects to the IdP (S256 PKCE, state, nonce) as the portal client |
+| `GET /portal/callback` | consumes only a `purpose=portal` row (a console state, or a missing or wrong binding cookie, is `state_invalid`), exchanges the code and verifies the ID token for the portal client (audience and `azp` = `consent.oidc.clientID`, RS256/ES256, nonce, 60s skew), admits the user and creates a `portal_sessions` row |
+| `GET /portal` | a minimal no-store page: the signed-in email and a sign-out form, or a sign-in link |
+| `GET /portal/api/me` | portal session: `{sub, email, expiresAt, csrf, link:{status, relinkDueAt}}`, `Cache-Control: no-store`; `401` without a session |
+| `POST /portal/logout` | portal session + CSRF: deletes the `portal_sessions` row and clears the cookie (`204`; a form post is redirected `303` to `/portal`); the IdP link and its stored refresh token stay |
+| `/portal/*` (any other path) | portal session, then `404` until a later page is mounted there |
+
+- `next` is kept only for a same-origin path under `/portal/` or `/connect/` (no
+  scheme, no `//`, no backslash, no dot segment); anything else lands on `/portal`.
+- Admission: no session, and nothing written, when the `sub` or `email` is on the
+  user block list (`login_error=blocked`), when `allowedGroups` is set and none of the
+  user's groups (first 256) matches (`not_allowed`), or when `idpLink` is enabled and
+  the token response has no refresh token (502 `{"error":"offline_access_not_granted"}`).
+  While no block list has loaded both routes refuse with 503 `block_list_unavailable`
+  and no existing portal session authenticates. A failed `portal_sessions` insert is
+  503 `session_store_unavailable` (an IdP link stored just before may then exist
+  without a session).
+- Other failures redirect to `/portal?login_error=<code>` with a code from
+  `state_invalid`, `nonce_mismatch`, `token_invalid`, `exchange_failed`, `idp_error`,
+  `idp_unavailable`; IdP error text is never echoed. Until discovery succeeds both
+  routes answer 503 `idp_unavailable`; startup and the worker routes are unaffected.
+- `portal_sessions` (migration `portal_sessions/0001`) holds `id_hash` (sha256 of a
+  fresh 32-byte id), `iss`, `sub`, `email`, `groups_json`, `created_at`,
+  `last_seen_at` (written at most once a minute) and `expires_at`. Idle and absolute
+  expiry use the control plane's clock; expired rows are swept every minute; sessions
+  survive restarts and are cleared by `warden-cp restore`. The cookie is
+  `__Host-warden_portal` (Secure, HttpOnly, SameSite=Lax, Path=/, no Domain) for an
+  https `redirectURL`; `warden_portal` only for an http loopback one, with a startup
+  warning. A portal session is not a console session: the console reads only
+  `__Host-warden_console` and `sessions`.
+- Each callback logs one `portal_login` line (`result`, `reason`, `sub`,
+  `duration_ms`); with admin audit on it records `portal.login` (target
+  `portal_session`, `target_ref` the session's short hash) or, after a portal state
+  was consumed, `portal.login_failed` with `{reason: <login_error code>}`, rate-limited
+  to 20 rows per address per minute by its own limiter (a portal flood does not use up
+  the `auth.login_failed` budget). No code, state, verifier, nonce, token or
+  cookie value is logged or recorded.
+
+### Portal session middleware
+
+Every portal route but `/portal/login`, `/portal/callback` and `/portal` runs behind
+the portal session middleware (and `/connect/*` will):
+
+- It reads only the `__Host-warden_portal` cookie and `portal_sessions`. A console
+  session cookie, the `WARDEN_CP_TOKEN` bearer, a worker token or certificate and a
+  `wak_` API key are never read, so none of them opens a portal route (the
+  `Authorization` header and the console cookie are also stripped before a portal
+  handler runs); and the
+  console's middleware never reads the portal cookie, so a portal session gets `401`
+  on every `/dashboard/api/*` route, on `/central/secrets` and on `/auth/me`. The
+  worker routes (`/policy`, `/control/heartbeat`, `/central/ingest`) never touch the
+  portal store.
+- No session: a browser `GET`/`HEAD` outside `/portal/api/` is redirected `302` to
+  `/portal/login?next=<path>`; anything else is `401 {"error":"unauthenticated"}`.
+- The block list is rechecked on every request from the in-memory snapshot: a blocked
+  `sub` or email gets `403 {"error":"user_blocked"}` and all of that principal's portal
+  sessions are deleted. Adding a block entry (API, CLI or offboarding) also deletes
+  them at once. While no block list has loaded, or the session store fails, the answer
+  is `503` (`block_list_unavailable`, `session_store_unavailable`).
+- CSRF: every request other than `GET`, `HEAD` and `OPTIONS` must send
+  `X-Warden-CSRF` (or a `csrf` field in an `application/x-www-form-urlencoded` body)
+  equal to `HMAC-SHA256(raw portal session id, "warden-portal-csrf")`, the token
+  `/portal/api/me` serves. The console's token (label `warden-csrf`) never validates
+  here. An `Origin` header, when sent, must equal the `consent.oidc.redirectURL`
+  origin. Failures are `403 {"error":"csrf"}` and log `portal_csrf_denied` (session
+  short hash, method, path). Bodies of state-changing requests are capped at 64 KiB.
+- Logs: `portal_logout`, `portal_csrf_denied` and `portal_session_revoked` (`by_sub`,
+  `target_sub`, `count`); never a cookie value, CSRF token or full session handle. With
+  admin audit on a logout records `portal.logout` (target `portal_session`).
+- With consent disabled every `/portal/*` path is `404`.
+
+### OAuth broker: `POST /connect/start`
+
+Mounted only when `consent.providers` is non-empty, `--state-dir` is set and
+`consent.store` is persistent (aws). With providers and no store, or the echo
+store, the control plane refuses to start with `oauth broker requires a
+persistent consent.store`; with no providers every `/connect/*` path is `404`
+and no table, goroutine or wire field is added.
+
+- Auth: the portal session middleware. No session is `303` to `/portal/login`
+  (a relative `next` for a GET); the console cookie, the admin bearer, a worker
+  token or a `wak_` key never authenticate (a POST carrying one gets `401`).
+  CSRF and Origin are the portal rules above.
+- `POST` form fields `provider`, `scopes` (space or comma separated, empty means
+  the provider's `defaultScopes`) and optional `pending`. Checks in order: the
+  provider exists (`404 unknown_provider`), the user is not blocked (`403
+  user_blocked`, `503 block_list_unavailable` while the list is unreadable),
+  10 starts per minute per user (`429 rate_limited` with `Retry-After`), the
+  pending belongs to this user (`404 pending_not_found`, identical to an unknown
+  id) and is open (`409 pending_not_active`), then the scope cap: requested
+  scopes must be inside the provider's `allowedScopes` and the pending's scopes
+  (`400 scope_not_allowed` listing the names). A user with 20 open attempts gets
+  `429 too_many_attempts`. No row is written for any refusal.
+- Success is `303` to the provider with `response_type=code`, `client_id`,
+  `redirect_uri` (`consent.connect.redirectURL`), a 32-byte `state`, a PKCE
+  `code_challenge` (S256) and the scopes (the union with the active grant's
+  scopes; a `githubApp` sends none), plus the provider's `extraAuthParams`, which
+  can never replace those. The response sets `__Host-warden_connect` (Secure,
+  HttpOnly, SameSite=Lax, Path=/, Max-Age 600) and `Cache-Control: no-store`,
+  `Referrer-Policy: no-referrer`. The state database keeps only the state's
+  SHA-256, the verifier and the cookie's SHA-256 (`connect_attempts`); the handler
+  makes no outbound call.
+- `GET /connect/start[?pending=<id>]` changes nothing: `303` to
+  `/portal/connect/<id>` or `/portal`.
+- Logs `oauth_connect_start` (`provider`, `user_key`, `pending_id`,
+  `scopes_count`, `outcome`, `reason`); never a state, verifier, challenge or
+  cookie value. The in-memory counter `warden_cp_oauth_connect_total{provider,
+  stage, outcome}` is exposed by `Server.OAuthConnectCounts`.
+
 ## API keys (`console.apiKeys`)
 
 Scripts and CI can call the admin API with a scoped, expiring `wak_` key instead of
@@ -1341,6 +1502,12 @@ The *Console sessions* card on the Settings page uses the same API:
   tokens never reach them (`401` without a session). Each revoke logs
   `console_session_revoked` with `by_sub`, `target_sub` and `count` (and the first 8
   hex characters of a revoked handle), never a cookie value.
+- `?kind=portal` lists and revokes consent portal sessions (`portal_sessions`) the
+  same way, with the same admin gate, CSRF rule and value-free fields (each row also
+  carries `"kind":"portal"`); `?kind=console` or no `kind` is the console. A portal
+  revoke by `sub` ends portal sign-ins only (API keys and the IdP link stay) and logs
+  `portal_session_revoked`. `404 portal_disabled` when the portal is off; any other
+  `kind` is `400 invalid_kind`.
 
 **The UI follows the role.** After `GET /auth/me` succeeds the dashboard shows the
 signed-in email, the role and a *Log out* button, and hides every control whose
@@ -2644,6 +2811,132 @@ widened:
 Upgrade note: rename any existing `cp` or `cp/...` placeholder, `auth[]`
 credential value or stored secret before upgrading. The control plane and the
 workers refuse to load a config that names the reserved namespace.
+
+### CP-only user credential store (`consent.store`)
+
+Every per-user credential in P3 (IdP refresh tokens, provider grants, parked
+revokes and OAuth client secrets) lives in one CP-only store, `consent.store`,
+never in the distributed `secretStore`. The control plane hands workers its
+`secretStore` selector (and, when configured, its explicit credential) over the
+settings wire, so anything written there is readable by every worker; nothing
+hands a worker a credential for `consent.store`. The block is part of the
+CP-local `consent:` block: read from `--config` only, never on `/policy` or the
+settings wire, and never mounted on `/central/secrets` or the dashboard secret
+store tab.
+
+```yaml
+consent:
+  enabled: true
+  # oidc, session, idpLink ... as above
+  store:
+    backend: aws                 # aws | vault (not yet available) | echo (--dev only)
+    namePrefix: warden-cp/       # default; must end with /
+    aws:
+      region: us-east-1          # required for aws
+    # vault:                     # accepted once the Vault KV v2 store lands
+    #   addr: https://vault.example.com:8200
+    #   mount: secret
+    #   namespace: team          # optional
+    #   tokenEnv: VAULT_TOKEN    # env var NAME, never the token
+```
+
+Logical keys (built only by the `secrets.UserKey` helpers; `<userKey>` is a
+fixed 32-hex pseudonym of the user's issuer and subject):
+
+| Key | Holds |
+|-----|-------|
+| `idp/<userKey>` | the user's IdP refresh token |
+| `users/<userKey>/<provider>` | the user's grant for a provider |
+| `revoking/<userKey>/<provider>` | a grant parked until its provider revoke succeeds |
+| `oauth-clients/<provider>` | a provider's OAuth client secret |
+
+With the default prefix the backend name of `idp/<userKey>` is
+`warden-cp/idp/<userKey>`.
+
+- **Credentials.** The AWS client takes credentials from the control plane's
+  environment or instance role only (env, then IMDS); the Vault token is read
+  from the CP environment variable named by `tokenEnv`. The block has no key or
+  token field, and the strict parser rejects one.
+- **Persistence.** With `consent.idpLink.enabled` (the default) the control
+  plane refuses to start unless `consent.store` is configured with a backend
+  that keeps values (aws today); no store and `echo` are refused, naming
+  `consent.idpLink.enabled` and `consent.store.backend`. Set
+  `idpLink.enabled: false` to run consent sign-in without a store.
+- **Startup refusals.** The control plane refuses to start, naming both keys,
+  when `consent.store.namePrefix` equals, starts with, or is a prefix of
+  `secretStore.aws.namePrefix` on the same backend (compared after trimming,
+  case-insensitively, and with the default prefix filled in). For AWS the region and
+  account are not taken into account: a worker grant on a prefix usually spans
+  regions, and the account behind a credential is not known before calling AWS.
+  It also refuses a `consent.store` that nests with `keys.store.aws.namePrefix`,
+  `backend: echo` without `--dev` (echo keeps no value), and, for now,
+  `backend: vault`. A settings write, rollback, applied draft or `warden policy
+  import` that would move `secretStore` onto the `consent.store` namespace is
+  refused with 400 `{"error":"user_store_overlap","detail":...}`.
+- **Reserved namespaces.** `idp/`, `users/`, `revoking/` and `oauth-clients/`
+  are reserved everywhere else, exactly like `cp/` above: config validation
+  rejects a `secrets[]` placeholder under one with `invalid_secret_key: reserved
+  namespace "<ns>/"`, a worker refuses one before any backend call, and
+  `/central/secrets` and `/dashboard/api/secretstore` leave them out of `GET`
+  and answer `POST` and `DELETE` with 403 `reserved_key`. No policy or console
+  edit can make a worker swap in, read or overwrite a per-user credential.
+
+Give only the control plane's role access to `warden-cp/*`. Worker roles, and
+any credential you put in `secretStore.aws`, must never cover it. Example IAM
+statements for the control plane role (use your own prefix if you changed it;
+keep `warden-cp/*` with the slash, so it does not also match
+`warden-cp-keys/`). `secretsmanager:ListSecrets` has no resource-level
+permissions, so it needs its own statement on `"*"`; listing returns names and
+metadata only, never values, and the names under `warden-cp/` carry only the
+pseudonymous `<userKey>` and provider ids, never a subject or email:
+
+```json
+[
+  {
+    "Sid": "WardenCpUserCredentialStore",
+    "Effect": "Allow",
+    "Action": [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:PutSecretValue",
+      "secretsmanager:CreateSecret",
+      "secretsmanager:DeleteSecret"
+    ],
+    "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp/*"
+  },
+  {
+    "Sid": "WardenCpListSecrets",
+    "Effect": "Allow",
+    "Action": "secretsmanager:ListSecrets",
+    "Resource": "*"
+  }
+]
+```
+
+And an explicit deny on every worker role, so it holds even if a later grant
+is widened:
+
+```json
+{
+  "Sid": "NeverTheUserCredentialStore",
+  "Effect": "Deny",
+  "Action": "secretsmanager:*",
+  "Resource": "arn:aws:secretsmanager:*:ACCOUNT_ID:secret:warden-cp/*"
+}
+```
+
+The Vault equivalent, once the Vault backend lands: a policy attached only to
+the control plane's token, and no worker policy that names the path.
+
+```hcl
+# warden-cp: the control plane token only
+path "secret/data/warden-cp/*"     { capabilities = ["create", "read", "update", "delete"] }
+path "secret/metadata/warden-cp/*" { capabilities = ["read", "list", "delete"] }
+```
+
+Upgrade note: an existing `secrets[]` placeholder or `auth[]` credential value
+under `idp/`, `users/`, `revoking/` or `oauth-clients/` now fails validation with
+the message above; rename it before upgrading. Other placeholders are
+unaffected.
 
 ## Worker CA (`workerCA:`)
 

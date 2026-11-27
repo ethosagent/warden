@@ -34,6 +34,8 @@ import (
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/oauthbroker"
+	oauthbrokersqlite "github.com/ethosagent/warden/internal/oauthbroker/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/observability"
 	"github.com/ethosagent/warden/internal/secrets"
 )
@@ -155,6 +157,16 @@ type Params struct {
 	// keys.enabled is true and keys.store.backend is aws, and KeyStore is nil.
 	KeysAWSClient secrets.AWSSecretsClient
 
+	// UserStoreAWSClient, when set, is the AWS Secrets Manager client
+	// consent.store uses instead of one built from the CP environment or
+	// instance role (tests and the harness inject a fake). It is only read when
+	// consent is enabled with consent.store.backend aws.
+	UserStoreAWSClient secrets.AWSSecretsClient
+
+	// Dev (--dev) is development mode. Today it only allows the
+	// non-production echo consent.store backend.
+	Dev bool
+
 	// ErrOut receives the operational log while audit.jsonLog writes to
 	// stdout (the log moves off stdout so it carries only warden.admin.v1
 	// lines). Nil means os.Stderr. Tests pass a buffer.
@@ -179,6 +191,9 @@ func activeTestHooks(p Params) []string {
 	}
 	if p.KeysAWSClient != nil {
 		hooks = append(hooks, "KeysAWSClient")
+	}
+	if p.UserStoreAWSClient != nil {
+		hooks = append(hooks, "UserStoreAWSClient")
 	}
 	return hooks
 }
@@ -313,6 +328,13 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			"hint", "set console.auth: oidc (see docs/control-plane.md, \"Migrating from none to oidc\")")
 	}
 
+	// The consent block, like console:, comes from --config only. Nil (absent or
+	// enabled: false) means no portal route, table or goroutine below.
+	consentCfg, err := resolveConsent(logger, configPath, servedPath, stateDir, consoleCfg, pol.Identity.Issuer, os.Getenv)
+	if err != nil {
+		return fail(err)
+	}
+
 	if err := checkAdminAuditFlags(consoleCfg, stateDir, p); err != nil {
 		return fail(err)
 	}
@@ -373,7 +395,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// --policy-store or console.adminAudit never trips the downgrade guard.
 		// The open is not cancellable: a shutdown signal must not abandon a
 		// migration half way through boot.
-		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsWithApprovals(stateMigrationsFor(keysCfg, consoleCfg, tokenCfg), consoleCfg.Approvals))
+		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsWithBroker(stateMigrationsWithApprovals(stateMigrationsFor(keysCfg, consoleCfg, tokenCfg), consoleCfg.Approvals), oauthBrokerWanted(consentCfg)))
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
@@ -492,6 +514,26 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if err != nil {
 		return fail(fmt.Errorf("control-plane: secret store: %w", err))
 	}
+	// The CP-only user credential store (consent.store). It is checked against
+	// the secretStore the CP distributes and is never mounted on a route.
+	var userStore secrets.SecretStore
+	if consentCfg != nil {
+		userStore, err = NewUserStore(consentCfg.Store, UserStoreOptions{
+			Distributed: pol.SecretStore, Keys: keysCfg, Dev: p.Dev,
+			AWSClient: p.UserStoreAWSClient, Logger: logger,
+		})
+		if err != nil {
+			return fail(err)
+		}
+		if err := checkUserStorePersistent(consentCfg, userStore); err != nil {
+			return fail(err)
+		}
+		// Providers without a persistent consent.store would sign users in and
+		// then never keep a token: refuse (W-P3-BRKR-03).
+		if err := checkOAuthBrokerStore(consentCfg, userStore); err != nil {
+			return fail(err)
+		}
+	}
 
 	// clk is the CP's resolved time port (nil = clock.Real(), the production
 	// default). Console sessions, pending logins and ID-token checks read it.
@@ -598,6 +640,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// resolveConsole already proved the variable is non-empty.
 		clientSecret = strings.TrimSpace(os.Getenv(consoleCfg.OIDC.ClientSecretEnv))
 	}
+	var consentSecret string
+	if consentCfg != nil {
+		// resolveConsent already proved the variable is non-empty.
+		consentSecret = strings.TrimSpace(os.Getenv(consentCfg.OIDC.ClientSecretEnv))
+	}
 
 	// Interfaces stay nil (not a typed nil) when the stores were not built.
 	var (
@@ -619,6 +666,28 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	if state != nil {
 		agents = agentregsqlite.New(state, agentregsqlite.WithClock(clk), agentregsqlite.WithLogger(logger))
 		agentStore = agents
+	}
+
+	// The OAuth broker (consent.providers): the provider registry reads every
+	// clientSecretEnv now, so a missing variable stops startup; the grant store
+	// sits on the state DB opened with the broker migrations above. Without a
+	// state dir the broker stays off (no cpstate to hold attempts), loudly.
+	var (
+		oauthRegistry *oauthbroker.Registry
+		grantStore    oauthbroker.GrantStore
+	)
+	if oauthBrokerWanted(consentCfg) {
+		if state == nil {
+			logger.Warn("control plane: consent.providers is set but --state-dir is not; the OAuth broker is off (no /connect routes)")
+		} else {
+			oauthRegistry, err = oauthbroker.NewRegistry(consentCfg.Providers, oauthbroker.Options{
+				LookupEnv: os.LookupEnv, Now: clk.Now, Logger: logger,
+			})
+			if err != nil {
+				return fail(fmt.Errorf("control-plane: oauth providers: %w", err))
+			}
+			grantStore = oauthbrokersqlite.New(state, oauthbrokersqlite.Options{Clock: clk})
+		}
 	}
 
 	srv := New(Config{
@@ -650,7 +719,12 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		AlertDBPath:         alertDBPath,
 		SecretStore:         secretStore,
 		Console:             consoleCfg,
+		Consent:             consentCfg,
+		OAuthRegistry:       oauthRegistry,
+		GrantStore:          grantStore,
+		UserStore:           userStore,
 		ClientSecret:        clientSecret,
+		ConsentClientSecret: consentSecret,
 		Now:                 clk.Now,
 
 		// The CP's own admin bearer. An explicit --admin-token-env never falls
@@ -780,6 +854,16 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 				_ = srv.integrationsStore.Close() // Start never ran, so nothing else closes it
 			}
 			return fail(errors.New("control-plane: --policy-store=versioned: the head policy failed to load (see the log above); refusing to start"))
+		}
+		// Workers get the head from policy_versions, which `warden policy import`
+		// can write while the CP is stopped: the issuer bindings checked against
+		// the served YAML at startup must hold for the head too.
+		wire, _, _, _ := srv.policy.snapshot()
+		if err := srv.checkIssuerBindings(wire.Settings); err != nil {
+			if srv.integrationsStore != nil {
+				_ = srv.integrationsStore.Close() // Start never ran, so nothing else closes it
+			}
+			return fail(fmt.Errorf("control-plane: --policy-store=versioned: the head policy breaks an identity.issuer binding: %w", err))
 		}
 		// First versioned start: the served YAML becomes version 1, with the
 		// served /policy bytes and ETag unchanged (W-P1-PVER-07). Not

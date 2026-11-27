@@ -1,4 +1,8 @@
-package tokensvc
+// Package ratelimit is the per-key token bucket the control plane shares: the
+// token endpoint (tokensvc) and the OAuth broker (oauthbroker) both throttle
+// with it. It is a leaf: no other Warden package is imported, so neither
+// consumer depends on the other.
+package ratelimit
 
 import (
 	"container/list"
@@ -57,7 +61,7 @@ func NewLimiter(limit int, window time.Duration) *Limiter {
 // NewLimiterSize is NewLimiter with an explicit key bound (at least 1).
 func NewLimiterSize(limit int, window time.Duration, maxKeys int) *Limiter {
 	if limit <= 0 || window <= 0 {
-		panic("tokensvc: Limiter needs a positive limit and window")
+		panic("ratelimit: Limiter needs a positive limit and window")
 	}
 	if maxKeys < 1 {
 		maxKeys = 1

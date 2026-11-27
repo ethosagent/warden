@@ -47,6 +47,56 @@ func (e *InvalidPolicyError) Error() string { return e.Err.Error() }
 
 func (e *InvalidPolicyError) Unwrap() error { return e.Err }
 
+// IssuerMismatchError is returned by a settings writer, a rollback or a draft
+// apply when the document would leave identity.issuer different from (or
+// absent next to) consent.oidc.issuer while consent is enabled. Every writer
+// and the rollback answer it with 400 {"error":"identity_issuer_mismatch",
+// "detail":...}, never the 422 invalid_policy of a document that fails the
+// loader. It unwraps to *InvalidPolicyError so a caller that only knows the
+// validation class (the approvals handlers) still treats it as one.
+type IssuerMismatchError struct{ Err error }
+
+func (e *IssuerMismatchError) Error() string { return e.Err.Error() }
+
+func (e *IssuerMismatchError) Unwrap() error { return &InvalidPolicyError{Err: e.Err} }
+
+// writeIssuerMismatch answers an *IssuerMismatchError and reports whether err was one.
+func writeIssuerMismatch(w http.ResponseWriter, err error) bool {
+	var im *IssuerMismatchError
+	if !errors.As(err, &im) {
+		return false
+	}
+	writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "identity_issuer_mismatch", "detail": im.Error()})
+	return true
+}
+
+// UserStoreOverlapError is returned by a settings writer, a rollback or a
+// draft apply when the document's distributed secretStore would share a
+// backend namespace with the CP-only consent.store (W-P3-CSIG-06): workers
+// hold the secretStore credential, so they could reach per-user credentials.
+// Every writer answers it with 400 {"error":"user_store_overlap",
+// "detail":...}. Like IssuerMismatchError it unwraps to *InvalidPolicyError.
+type UserStoreOverlapError struct{ Err error }
+
+func (e *UserStoreOverlapError) Error() string { return e.Err.Error() }
+
+func (e *UserStoreOverlapError) Unwrap() error { return &InvalidPolicyError{Err: e.Err} }
+
+// writeBindingError answers an *IssuerMismatchError or a
+// *UserStoreOverlapError (the CP-local bindings a write can break) and reports
+// whether err was one.
+func writeBindingError(w http.ResponseWriter, err error) bool {
+	if writeIssuerMismatch(w, err) {
+		return true
+	}
+	var uo *UserStoreOverlapError
+	if !errors.As(err, &uo) {
+		return false
+	}
+	writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "user_store_overlap", "detail": uo.Error()})
+	return true
+}
+
 // PolicyVersionMeta is one version's metadata, without its document.
 type PolicyVersionMeta struct {
 	Version     int64     `json:"version"`
@@ -246,6 +296,9 @@ func (s *Server) rollbackPolicyVersion(w http.ResponseWriter, r *http.Request, v
 // longer validates, 403/409 as writeWriterError, else 500 (the store's error
 // stays server-side; the control plane logs it).
 func writeHistoryError(w http.ResponseWriter, err error) {
+	if writeBindingError(w, err) {
+		return
+	}
 	var ie *InvalidPolicyError
 	var ce *ConflictError
 	var re *RoleRequiredError

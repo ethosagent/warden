@@ -652,10 +652,11 @@ func chainDeclaresKey(ctx context.Context, stateDir, keyID string) bool {
 // API keys --revoke-api-keys revoked.
 const RestoreDetailAPIKeysRevoked = "api_keys_revoked"
 
-// prepareRestoredState empties sessions, oidc_pending and connect_attempts in
-// the staged warden-cp.db (whichever exist), so cookies issued before the
-// backup stop working and no in-flight OAuth broker attempt (PKCE verifier and
-// browser binding) from the backup can be completed, and with revokeKeys revokes every API key through the key Store
+// prepareRestoredState empties sessions, portal_sessions, oidc_pending and
+// connect_attempts in the staged warden-cp.db (whichever exist), so cookies
+// issued before the backup stop working and no in-flight OAuth broker attempt
+// (PKCE verifier and browser binding) from the backup can be completed, and with
+// revokeKeys revokes every API key through the key Store
 // (returning how many it revoked). It opens the file with the full migration
 // list, which also brings an older set's schema up to date, then checkpoints
 // so the file is self-contained before it is renamed into place.
@@ -665,7 +666,7 @@ func prepareRestoredState(ctx context.Context, staged string, revokeKeys bool, c
 		return 0, fmt.Errorf("prepare restored warden-cp.db: %w", err)
 	}
 	defer func() { _ = db.Close() }()
-	for _, tbl := range []string{"sessions", "oidc_pending", "connect_attempts"} {
+	for _, tbl := range []string{"sessions", "portal_sessions", "oidc_pending", "connect_attempts"} {
 		if !tableExists(ctx, db.SQL(), tbl) {
 			continue
 		}

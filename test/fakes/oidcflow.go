@@ -40,6 +40,7 @@ type flowState struct {
 	tokenStatus int
 	requests    []AuthRequest
 	tokenCalls  int
+	refresh     string
 }
 
 // RegisterClient makes the token endpoint accept id with secret (client_secret
@@ -77,6 +78,15 @@ func (i *OIDCIssuer) SetTokenStatus(status int) {
 	i.flow.mu.Lock()
 	defer i.flow.mu.Unlock()
 	i.flow.tokenStatus = status
+}
+
+// SetRefreshToken makes every later successful code exchange also return
+// refresh_token=tok, as an IdP does when offline_access is granted. "" (the
+// default) omits the field.
+func (i *OIDCIssuer) SetRefreshToken(tok string) {
+	i.flow.mu.Lock()
+	defer i.flow.mu.Unlock()
+	i.flow.refresh = tok
 }
 
 // AuthRequests returns the authorization requests accepted so far.
@@ -168,6 +178,7 @@ func (i *OIDCIssuer) handleToken(w http.ResponseWriter, r *http.Request) {
 		delete(i.flow.codes, r.PostForm.Get("code")) // single use, win or lose
 	}
 	login := append([]MintOption(nil), i.flow.login...)
+	refresh := i.flow.refresh
 	i.flow.mu.Unlock()
 	sum := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
@@ -183,12 +194,16 @@ func (i *OIDCIssuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	if len(login) > 0 {
 		opts = append(opts, login...)
 	}
-	writeJSON(w, map[string]any{
+	resp := map[string]any{
 		"access_token": "fake-access-token",
 		"token_type":   "Bearer",
 		"expires_in":   int(OIDCTokenTTL.Seconds()),
 		"id_token":     i.Mint(opts...),
-	})
+	}
+	if refresh != "" {
+		resp["refresh_token"] = refresh
+	}
+	writeJSON(w, resp)
 }
 
 func randomToken() string {

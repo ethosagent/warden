@@ -183,6 +183,15 @@ type H struct {
 	// listen address (its https origin is the registered redirect URL).
 	wantConsole bool
 	consoleAddr string
+	// wantConsent (WithConsent) adds the CP-local consent block (the portal
+	// sign-in) on top of the console.
+	wantConsent bool
+	// wantBroker (WithOAuthBroker) adds consent.providers on top of the consent
+	// block: the OAuth broker's connect routes over the real GrantStore.
+	wantBroker bool
+	// userStoreAWS is the AWS account behind consent.store (WithConsent): the
+	// CP-only user credential store the IdP link writes to.
+	userStoreAWS *fakes.FakeAWSSecretsClient
 	// versionedPolicy (WithVersionedPolicyStore) boots the control plane with
 	// --policy-store=versioned and a state dir.
 	versionedPolicy bool
@@ -863,6 +872,7 @@ func (h *H) buildInprocessTarget() *inprocess {
 	h.applyCPAdmin(&ip.cp.params)
 	h.applyBackup(&ip.cp.params)
 	h.applyKeys(&ip.cp.params)
+	h.applyConsent(&ip.cp.params)
 	h.applyBundles(&ip.cp.params)
 	h.applyAPIKeys(&ip.cp.params)
 	h.applyStrict(&ip.cp.params)
@@ -885,6 +895,8 @@ func (h *H) writeCPConfig() string {
 	}
 	b.WriteString(h.identityYAML())
 	b.WriteString(h.consoleYAML())
+	b.WriteString(h.consentYAML())
+	b.WriteString(h.brokerYAML())
 	b.WriteString(h.keysYAML())
 	b.WriteString(h.tokenServiceYAML())
 	b.WriteString(h.workerCAYAML())

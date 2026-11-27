@@ -172,6 +172,12 @@ func (a policyApplier) publishDraft(ctx context.Context, d approvals.Draft, clr 
 				return err
 			}
 		}
+		// The same identity.issuer guards as a direct save: a draft held before
+		// consent was enabled, or one that drops the identity block, must not
+		// publish a head the CP would refuse to start on.
+		if err := a.s.checkIssuerBindings(doc.Settings); err != nil {
+			return err
+		}
 		w.Allowlist, w.Denylist, w.Settings = doc.Allowlist, doc.Denylist, doc.Settings
 		return nil
 	}

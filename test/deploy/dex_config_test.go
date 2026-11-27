@@ -151,7 +151,7 @@ func TestDexReferenceConfig(t *testing.T) {
 				}
 			}
 			sort.Strings(ids)
-			if want := []string{"agent-harness", "warden", "warden-cli", "warden-console"}; !reflect.DeepEqual(ids, want) {
+			if want := []string{"agent-harness", "warden", "warden-cli", "warden-console", "warden-portal"}; !reflect.DeepEqual(ids, want) {
 				t.Fatalf("%s: client ids = %v, want %v", f.name, ids, want)
 			}
 			if got := cs["warden-console"]["secretEnv"]; got != "WARDEN_CONSOLE_DEX_CLIENT_SECRET" {
@@ -159,6 +159,18 @@ func TestDexReferenceConfig(t *testing.T) {
 			}
 			if got := strs(cs["warden-console"]["redirectURIs"]); !reflect.DeepEqual(got, []string{"https://localhost:7070/auth/callback"}) {
 				t.Errorf("%s: warden-console redirectURIs = %v", f.name, got)
+			}
+			if got := cs["warden-portal"]["secretEnv"]; got != "WARDEN_PORTAL_DEX_CLIENT_SECRET" {
+				t.Errorf("%s: warden-portal secretEnv = %v", f.name, got)
+			}
+			if got := strs(cs["warden-portal"]["redirectURIs"]); !reflect.DeepEqual(got, []string{"https://localhost:7070/portal/callback"}) {
+				t.Errorf("%s: warden-portal redirectURIs = %v", f.name, got)
+			}
+			if _, ok := cs["warden-portal"]["secret"]; ok {
+				t.Errorf("%s: warden-portal has a secret literal", f.name)
+			}
+			if contains(strs(cs["warden"]["trustedPeers"]), "warden-portal") {
+				t.Errorf("%s: warden-portal must not be in warden's trustedPeers", f.name)
 			}
 			if got := cs["warden"]["secretEnv"]; got != "WARDEN_DEX_CLIENT_SECRET" {
 				t.Errorf("%s: warden secretEnv = %v", f.name, got)
@@ -537,7 +549,7 @@ func TestIdentityComposePinned(t *testing.T) {
 				}
 			}
 		}
-		secrets := []string{"WARDEN_CONSOLE_DEX_CLIENT_SECRET", "WARDEN_DEX_CLIENT_SECRET", "HARNESS_DEX_CLIENT_SECRET", "LDAP_BIND_PW", "LDAP_ADMIN_PASSWORD"}
+		secrets := []string{"WARDEN_CONSOLE_DEX_CLIENT_SECRET", "WARDEN_PORTAL_DEX_CLIENT_SECRET", "WARDEN_DEX_CLIENT_SECRET", "HARNESS_DEX_CLIENT_SECRET", "LDAP_BIND_PW", "LDAP_ADMIN_PASSWORD"}
 		seen := map[string]bool{}
 		for svc, kvs := range envs {
 			for _, kv := range kvs {
@@ -587,7 +599,7 @@ func TestIdentityComposePinned(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, k := range []string{
-			"WARDEN_CONSOLE_DEX_CLIENT_SECRET", "WARDEN_DEX_CLIENT_SECRET", "HARNESS_DEX_CLIENT_SECRET",
+			"WARDEN_CONSOLE_DEX_CLIENT_SECRET", "WARDEN_PORTAL_DEX_CLIENT_SECRET", "WARDEN_DEX_CLIENT_SECRET", "HARNESS_DEX_CLIENT_SECRET",
 			"LDAP_ADMIN_PASSWORD", "LDAP_BIND_PW", "DEX_TEST_PASSWORD",
 		} {
 			if !regexp.MustCompile(`(?m)^` + k + `=`).Match(raw) {

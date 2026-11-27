@@ -25,6 +25,7 @@ sqlite3 storage at `/var/dex/dex.db`, and `logger: {level: info, format: json}`
 | Client | Kind | Why it exists |
 |---|---|---|
 | `warden-console` | confidential (`secretEnv: WARDEN_CONSOLE_DEX_CLIENT_SECRET`), redirect `https://localhost:7070/auth/callback` | Admin SSO login to the control-plane console (browser code flow). |
+| `warden-portal` | confidential (`secretEnv: WARDEN_PORTAL_DEX_CLIENT_SECRET`), redirect `https://localhost:7070/portal/callback`, grants `authorization_code` and `refresh_token` | Employee sign-in to the consent portal (CP `consent.oidc.*`). The CP keeps the refresh token this client receives (when `consent.idpLink.enabled`), so it is deliberately not a trusted peer of `warden`. |
 | `warden` | confidential (`secretEnv: WARDEN_DEX_CLIENT_SECRET`), no redirect URIs, `trustedPeers: [agent-harness, warden-cli]` | The data-plane audience. It never logs anyone in. Tokens minted for the harness and the CLI carry `warden` in `aud` through cross-client scopes. |
 | `agent-harness` | confidential (`secretEnv: HARNESS_DEX_CLIENT_SECRET`) | Test and automation client that fetches ID tokens for seeded users. |
 | `warden-cli` | `public: true`, redirect includes `<issuer>/device/callback` | Human CLI login with the device-code grant. |
@@ -34,6 +35,13 @@ redirect and a secret held by the control plane; the data-plane client is only
 an audience that workers check on every proxied request. A leaked console
 secret must not let anyone mint tokens the data plane accepts, and the data
 plane must not have a redirect URI an attacker could steer a login to.
+
+**Why `warden-portal` is not a trusted peer.** Only clients listed in
+`warden`'s `trustedPeers` can mint ID tokens with `warden` in `aud`. The portal
+client is absent from that list on purpose: the control plane stores the
+user's refresh token for offboarding checks, and a token held there must never
+be usable to obtain a data-plane token. `consent.oidc.issuer` must equal the
+`identity.issuer` workers verify against, so a portal `sub` matches a data-plane `sub`.
 
 **trustedPeers direction.** `warden` lists `agent-harness` and `warden-cli` as
 trusted peers, which lets those two clients request the scope

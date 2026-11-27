@@ -43,6 +43,7 @@ import (
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/oauthbroker"
+	oauthbrokerhttp "github.com/ethosagent/warden/internal/oauthbroker/http"
 	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/internal/workerca"
 )
@@ -167,9 +168,24 @@ type Config struct {
 	// sessions, login and role enforcement on /dashboard/ and /central/secrets;
 	// the zero value (Auth "" == none) changes no behaviour.
 	Console config.ConsoleConfig
+	// Consent is the CP-local consent sign-in config, resolved from --config by
+	// resolveConsent. Nil (the default) means the portal is off and nothing is
+	// mounted; when set, the settings writers keep identity.issuer equal to
+	// Consent.OIDC.Issuer.
+	Consent *config.ConsentConfig
+	// UserStore is the CP-only user credential store built from consent.store
+	// (NewUserStore, W-P3-CSIG-06), or nil when the block is absent. It holds
+	// the per-user credentials under the reserved namespaces. It is NEVER the
+	// SecretStore above: no route (/central/secrets, the dashboard secret
+	// store) and no worker ever reads it.
+	UserStore secrets.SecretStore
 	// ClientSecret is the console OIDC client secret, read by Run from the
 	// environment variable console.oidc.clientSecretEnv names. It is never logged.
 	ClientSecret string
+	// ConsentClientSecret is the portal OIDC client secret, read by Run from
+	// the environment variable consent.oidc.clientSecretEnv names. It is never
+	// logged.
+	ConsentClientSecret string
 	// Now is the clock for sessions, pending logins and ID-token checks (nil =
 	// time.Now). The L1 harness injects its fake clock through Params.Clock.
 	Now func() time.Time
@@ -219,6 +235,11 @@ type Config struct {
 	// with the broker migrations enabled. Start runs its 1-minute sweeper. Nil
 	// means the broker is off: no sweeper, no tables.
 	GrantStore oauthbroker.GrantStore
+	// OAuthRegistry is the provider registry built from consent.providers
+	// (oauthbroker.NewRegistry) when the broker is enabled. With GrantStore,
+	// Consent and the portal it mounts /connect/start (W-P3-BRKR-03); nil keeps
+	// every /connect path 404.
+	OAuthRegistry *oauthbroker.Registry
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -357,6 +378,13 @@ type Server struct {
 	// auth is the console OIDC login (/auth/login, /auth/callback); set only when
 	// sessions are.
 	auth *authService
+	// portal is the consent portal's sign-in (/portal/login, /portal/callback,
+	// /portal); set only with Consent and State (W-P3-CSIG-02).
+	portal *portalService
+	// broker and brokerHTTP run POST /connect/start; set only with the
+	// OAuth broker's gate (initBroker), else /connect/* is 404.
+	broker     *oauthbroker.Broker
+	brokerHTTP *oauthbrokerhttp.Handler
 	// audit is the admin audit middleware's state; nil when cfg.AdminAudit is
 	// (admin audit disabled), in which case no route is wrapped.
 	audit *adminAuditor
@@ -477,6 +505,8 @@ func New(cfg Config) *Server {
 	s.policy.Refresh() // initial load so /policy and the dashboard have policy immediately
 	s.initSessions()
 	s.initAuth()
+	s.initPortal()
+	s.initBroker()
 	s.initAPIKeys()
 	s.initBreakGlass()
 	s.warnAdminToken()
@@ -553,6 +583,9 @@ func (s *Server) Start(ctx context.Context) {
 	if s.auth != nil {
 		go s.auth.discover(ctx)
 		go s.auth.sweep(ctx)
+	}
+	if s.portal != nil {
+		s.portal.start(ctx)
 	}
 	// Alert pipeline: start the embeddable assembly (manager start + the
 	// detection tick loop, both ctx-scoped). The pipeline captures ctx as its
@@ -897,6 +930,8 @@ func (s *Server) Handler() http.Handler {
 	// Write guard and mount (bearer in none mode; sessions and roles in oidc): routes.go.
 	s.mountDashboard(mux, dash)
 	s.registerAuthRoutes(mux)
+	s.registerPortalRoutes(mux)
+	s.registerConnectRoutes(mux)
 
 	return mux
 }
@@ -1212,11 +1247,23 @@ func validateDocAgainst(rootPath, tmpDir string, doc policyWire) error {
 // renames it into place. Callers refresh the watch afterward. The caller MUST
 // hold s.writeMu.
 func (s *Server) atomicWriteConfig(root map[string]yaml.Node) error {
-	tmpName, err := s.writeValidatedTemp(root)
+	return s.atomicWriteConfigChecked(root, nil)
+}
+
+// atomicWriteConfigChecked is atomicWriteConfig with an optional check on the
+// loaded candidate policy (the parsed, normalized document) that runs before
+// the rename; a check error leaves the served file unchanged.
+func (s *Server) atomicWriteConfigChecked(root map[string]yaml.Node, check func(config.Policy) error) error {
+	tmpName, pol, err := s.writeCheckedTemp(root)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(tmpName) }() // no-op once renamed
+	if check != nil {
+		if err := check(pol); err != nil {
+			return err
+		}
+	}
 	// The bytes just validated, hashed by persist as this CP's own write so the
 	// file-mode re-read does not audit it as an external edit (W-P1-AAUD-08).
 	data, err := os.ReadFile(tmpName)
@@ -1346,7 +1393,7 @@ func (s *Server) writeSettingsChecked(ctx context.Context, in config.SettingsWir
 	if s.versions != nil {
 		return s.publishSettings(ctx, in, meta, check)
 	}
-	if err := s.checkIssuerCollision(in.Identity); err != nil {
+	if err := s.checkIssuerBindings(&in); err != nil {
 		return err
 	}
 	s.writeMu.Lock()
@@ -1384,7 +1431,13 @@ func (s *Server) writeSettingsChecked(ctx context.Context, in config.SettingsWir
 		return err
 	}
 
-	if err := s.atomicWriteConfig(root); err != nil {
+	// The bindings are checked again on the document as workers will be served
+	// it (encoded, re-parsed and normalized), not only on the input wire: the
+	// encoders trim and default-fill values, so a raw-wire check alone could
+	// pass a value that normalizes into a refused one.
+	if err := s.atomicWriteConfigChecked(root, func(p config.Policy) error {
+		return s.checkIssuerBindings(config.SettingsWireFromPolicy(p))
+	}); err != nil {
 		return err
 	}
 	// Wake long-poll waiters with the new settings now, like writePolicy.

@@ -109,7 +109,7 @@ func (s *Server) handleBreakGlass(w http.ResponseWriter, r *http.Request) {
 		authError(w, http.StatusUnsupportedMediaType, "content_type")
 		return
 	}
-	if o := r.Header.Get("Origin"); o != "" && o != s.sessionCookie.origin {
+	if o := r.Header.Get("Origin"); o != "" && o != s.sessionCookie.Origin() {
 		authError(w, http.StatusForbidden, "origin")
 		return
 	}

@@ -44,6 +44,13 @@ staticClients:
     secretEnv: WARDEN_CONSOLE_DEX_CLIENT_SECRET
     redirectURIs:
       - https://localhost:7070/auth/callback
+  # Consent portal sign-in (P3). Kept OUT of warden's trustedPeers below, so a
+  # refresh token the CP holds for a user can never mint aud=warden data-plane tokens.
+  - id: warden-portal
+    name: Warden consent portal
+    secretEnv: WARDEN_PORTAL_DEX_CLIENT_SECRET
+    redirectURIs:
+      - https://localhost:7070/portal/callback
   - id: warden
     name: Warden data plane
     secretEnv: WARDEN_DEX_CLIENT_SECRET

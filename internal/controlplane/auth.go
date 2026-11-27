@@ -2,35 +2,30 @@ package controlplane
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strings"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/oauth2"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/config"
-	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/identity/adapters/oidc"
+	"github.com/ethosagent/warden/internal/webauth"
 )
 
 // Console login error codes. They are the whole vocabulary the browser ever
 // sees (?login_error=<code>); IdP error text is never echoed.
 const (
-	loginStateInvalid   = "state_invalid"
-	loginNonceMismatch  = "nonce_mismatch"
-	loginTokenInvalid   = "token_invalid"
-	loginExchangeFailed = "exchange_failed"
-	loginIDPError       = "idp_error"
+	loginStateInvalid   = webauth.CodeStateInvalid
+	loginNonceMismatch  = webauth.CodeNonceMismatch
+	loginTokenInvalid   = webauth.CodeTokenInvalid
+	loginExchangeFailed = webauth.CodeExchangeFailed
+	loginIDPError       = webauth.CodeIDPError
 	loginNoRole         = "no_role"
-	loginIDPUnavailable = "idp_unavailable"
+	loginIDPUnavailable = webauth.CodeIDPUnavailable
 	// loginBusy and loginInternal answer /auth/login itself (JSON, not a
 	// redirect): the pending table is full, or storing the attempt failed.
 	loginBusy     = "login_busy"
@@ -38,27 +33,24 @@ const (
 )
 
 const (
-	loginCookieSecure = "__Host-warden_login"
-	loginCookiePlain  = "warden_login"
+	// loginCookieBase is the console's login-binding cookie:
+	// __Host-warden_login on https, warden_login on a loopback http
+	// redirectURL.
+	loginCookieBase = "warden_login"
 	// dashboardHome is where a login lands without a usable next.
 	dashboardHome = "/dashboard/"
-	// maxNextBytes bounds the stored post-login path.
-	maxNextBytes = 512
-
-	discoveryBackoffMin = time.Second
-	discoveryBackoffMax = 30 * time.Second
-	discoveryTimeout    = 10 * time.Second
 )
 
 // authService is the console's OIDC login: /auth/login starts an
 // authorization-code flow with S256 PKCE, /auth/callback finishes it and turns
 // a verified ID token into a session. It stores no access, refresh or ID token.
+// The flow itself is webauth.Flow with purpose "console"; this type adds the
+// console's admission (block list, role) and its session.
 type authService struct {
 	cfg      config.ConsoleConfig
-	oauth    oauth2.Config
-	client   *http.Client
-	verifier identity.Verifier
-	pending  *pendingStore
+	provider *webauth.Provider
+	flow     *webauth.Flow
+	pending  *webauth.PendingStore
 	sessions *SessionStore
 	// blocks is the user block list; nil means none is kept.
 	blocks *BlockStore
@@ -66,13 +58,10 @@ type authService struct {
 	logger *slog.Logger
 
 	loginCookieName string
-	endpoints       atomic.Pointer[oidc.Endpoints]
 
 	// audit records a callback's outcome in the admin audit log
 	// (Server.recordLogin); nil when admin audit is disabled.
 	audit func(*http.Request, loginResult)
-
-	backoffMin, backoffMax time.Duration
 }
 
 // initAuth builds the login service when sessions are on. It does no network
@@ -102,86 +91,48 @@ func (s *Server) initAuth() {
 		unavailable(err)
 		return
 	}
-	name := loginCookiePlain
-	if s.sessionCookie.Secure {
-		name = loginCookieSecure
-	}
-	s.auth = &authService{
-		cfg: cc,
-		oauth: oauth2.Config{
+	provider := webauth.NewProvider(webauth.ProviderConfig{
+		Name: "console", Issuer: cc.OIDC.Issuer,
+		OAuth: oauth2.Config{
 			ClientID: cc.OIDC.ClientID, ClientSecret: s.cfg.ClientSecret,
 			RedirectURL: cc.OIDC.RedirectURL, Scopes: cc.OIDC.Scopes,
 		},
-		client:          client,
-		verifier:        verifier,
-		pending:         newPendingStore(s.cfg.State.SQL(), s.cfg.Now),
+		Discover: func(ctx context.Context) (webauth.Endpoints, error) {
+			ep, err := oidc.Discover(ctx, client, cc.OIDC.Issuer)
+			return webauth.Endpoints{AuthURL: ep.AuthURL, TokenURL: ep.TokenURL}, err
+		},
+		HTTPContext: func(ctx context.Context) context.Context { return oidc.WithHTTPClient(ctx, client) },
+		Logger:      s.cfg.Logger,
+	})
+	pending := webauth.NewPendingStore(s.cfg.State.SQL(), s.cfg.Now)
+	loginCookie := s.sessionCookie.Named(loginCookieBase)
+	s.auth = &authService{
+		cfg:      cc,
+		provider: provider,
+		flow: &webauth.Flow{
+			Name: "console", Provider: provider, Verifier: verifier, Pending: pending,
+			Purpose: webauth.PurposeConsole, LoginCookie: loginCookie,
+			AllowNext:   func(next string) bool { return webauth.SafeNext(next, dashboardHome) },
+			DefaultNext: dashboardHome, Logger: s.cfg.Logger,
+		},
+		pending:         pending,
 		sessions:        s.sessions,
 		blocks:          s.blocks,
 		cookie:          s.sessionCookie,
 		logger:          s.cfg.Logger,
-		loginCookieName: name,
-		backoffMin:      discoveryBackoffMin,
-		backoffMax:      discoveryBackoffMax,
+		loginCookieName: loginCookie.Name,
 	}
 }
 
 // discover fetches the provider's endpoints, retrying with backoff until it
 // succeeds or ctx is done. Until then both routes answer 503.
-func (a *authService) discover(ctx context.Context) {
-	if a.client == nil {
-		return
-	}
-	wait := a.backoffMin
-	for {
-		dctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
-		ep, err := oidc.Discover(dctx, a.client, a.cfg.OIDC.Issuer)
-		cancel()
-		if err == nil {
-			a.endpoints.Store(&ep)
-			a.logger.Info("control plane: console oidc discovery succeeded", "issuer", a.cfg.OIDC.Issuer)
-			return
-		}
-		a.logger.Warn("control plane: console oidc discovery failed; login stays unavailable and will be retried",
-			"issuer", a.cfg.OIDC.Issuer, "retry_in", wait.String(), "error", err)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(wait):
-		}
-		wait = min(wait*2, a.backoffMax)
-	}
-}
+func (a *authService) discover(ctx context.Context) { a.provider.Run(ctx) }
 
 // sweep deletes expired pending logins every minute until ctx is done.
-func (a *authService) sweep(ctx context.Context) {
-	if a.pending == nil {
-		return
-	}
-	t := time.NewTicker(pendingSweepInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		if _, err := a.pending.Sweep(ctx); err != nil {
-			a.logger.Warn("control plane: pending login sweep failed", "error", err)
-		}
-	}
-}
+func (a *authService) sweep(ctx context.Context) { a.pending.RunSweeper(ctx, a.logger) }
 
-// ready returns the oauth config with the discovered endpoints, or false while
-// discovery has not succeeded.
-func (a *authService) ready() (oauth2.Config, bool) {
-	ep := a.endpoints.Load()
-	if ep == nil {
-		return oauth2.Config{}, false
-	}
-	c := a.oauth
-	c.Endpoint = oauth2.Endpoint{AuthURL: ep.AuthURL, TokenURL: ep.TokenURL, AuthStyle: oauth2.AuthStyleInHeader}
-	return c, true
-}
+// ready reports whether discovery has succeeded.
+func (a *authService) ready() bool { return a.flow.Ready() }
 
 // handleLogin starts a login: it stores a pending row keyed by the state's
 // hash, binds it to this browser with a cookie and redirects to the IdP.
@@ -191,8 +142,7 @@ func (a *authService) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := time.Now()
-	oc, ok := a.ready()
-	if !ok {
+	if !a.ready() {
 		writeAuthError(w, http.StatusServiceUnavailable, loginIDPUnavailable)
 		return
 	}
@@ -200,27 +150,20 @@ func (a *authService) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, http.StatusServiceUnavailable, loginBlockUnavailable)
 		return
 	}
-	state, nonce, browser := randomToken(32), randomToken(32), randomToken(32)
-	verifier := oauth2.GenerateVerifier()
-	err := a.pending.Put(r.Context(), pendingLogin{
-		StateHash: sha256Hex(state), Nonce: nonce, Verifier: verifier,
-		Next: sanitizeNext(r.URL.Query().Get("next")), BrowserHash: sha256Hex(browser),
-	})
-	if err != nil {
-		code, status := loginInternal, http.StatusInternalServerError
-		if errors.Is(err, errPendingFull) {
-			code, status = loginBusy, http.StatusServiceUnavailable
-		}
-		a.logger.Warn("console_login", "result", "failed", "reason", code, "duration_ms", time.Since(start).Milliseconds())
-		writeAuthError(w, status, code)
+	err := a.flow.Begin(w, r, r.URL.Query().Get("next"))
+	switch {
+	case err == nil:
+		return
+	case errors.Is(err, webauth.ErrUnavailable):
+		writeAuthError(w, http.StatusServiceUnavailable, loginIDPUnavailable)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: a.loginCookieName, Value: browser, Path: "/", MaxAge: int(pendingTTL.Seconds()),
-		Secure: a.cookie.Secure, HttpOnly: true, SameSite: http.SameSiteLaxMode,
-	})
-	noStore(w)
-	http.Redirect(w, r, oc.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oauth2.SetAuthURLParam("nonce", nonce)), http.StatusFound)
+	code, status := loginInternal, http.StatusInternalServerError
+	if errors.Is(err, webauth.ErrPendingFull) {
+		code, status = loginBusy, http.StatusServiceUnavailable
+	}
+	a.logger.Warn("console_login", "result", "failed", "reason", code, "duration_ms", time.Since(start).Milliseconds())
+	writeAuthError(w, status, code)
 }
 
 // loginResult carries what the callback logs and records.
@@ -246,18 +189,16 @@ func (a *authService) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := time.Now()
-	oc, ok := a.ready()
-	if !ok {
+	if !a.ready() {
 		writeAuthError(w, http.StatusServiceUnavailable, loginIDPUnavailable)
 		return
 	}
-	noStore(w)
-	// The browser-binding cookie is single use whatever happens next.
-	http.SetCookie(w, &http.Cookie{
-		Name: a.loginCookieName, Value: "", Path: "/", MaxAge: -1,
-		Secure: a.cookie.Secure, HttpOnly: true, SameSite: http.SameSiteLaxMode,
-	})
-	next, res := a.finishLogin(w, r, oc)
+	login, err := a.flow.Complete(w, r)
+	if errors.Is(err, webauth.ErrUnavailable) {
+		writeAuthError(w, http.StatusServiceUnavailable, loginIDPUnavailable)
+		return
+	}
+	next, res := a.finishLogin(w, r, login, err)
 	a.logger.Info("console_login",
 		"result", map[bool]string{true: "ok", false: "failed"}[res.reason == ""],
 		"reason", res.reason, "sub", res.sub, "duration_ms", time.Since(start).Milliseconds())
@@ -279,51 +220,18 @@ func (a *authService) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, next, http.StatusFound)
 }
 
-func (a *authService) finishLogin(w http.ResponseWriter, r *http.Request, oc oauth2.Config) (string, loginResult) {
+// finishLogin turns the flow's outcome into the console's: a failed flow keeps
+// its code; a verified login is admitted (block list, role) and gets a session.
+func (a *authService) finishLogin(w http.ResponseWriter, r *http.Request, login webauth.Login, err error) (string, loginResult) {
+	if err != nil {
+		var fe *webauth.Error
+		if errors.As(err, &fe) {
+			return "", loginResult{reason: fe.Code, consumed: fe.Consumed, sub: fe.Sub}
+		}
+		return "", loginResult{reason: loginStateInvalid}
+	}
 	ctx := r.Context()
-	q := r.URL.Query()
-	state := q.Get("state")
-	if state == "" {
-		return "", loginResult{reason: loginStateInvalid}
-	}
-	p, found, err := a.pending.Take(ctx, sha256Hex(state))
-	if err != nil {
-		a.logger.Error("console login: pending lookup failed", "error", err)
-		return "", loginResult{reason: loginStateInvalid}
-	}
-	if !found {
-		return "", loginResult{reason: loginStateInvalid}
-	}
-	bc, err := r.Cookie(a.loginCookieName)
-	if err != nil || bc.Value == "" ||
-		subtle.ConstantTimeCompare([]byte(sha256Hex(bc.Value)), []byte(p.BrowserHash)) != 1 {
-		return "", loginResult{consumed: true, reason: loginStateInvalid}
-	}
-	if q.Get("error") != "" {
-		return "", loginResult{consumed: true, reason: loginIDPError}
-	}
-	code := q.Get("code")
-	if code == "" {
-		return "", loginResult{consumed: true, reason: loginExchangeFailed}
-	}
-	ectx := oidc.WithHTTPClient(ctx, a.client)
-	tok, err := oc.Exchange(ectx, code, oauth2.VerifierOption(p.Verifier))
-	if err != nil {
-		return "", loginResult{consumed: true, reason: loginExchangeFailed}
-	}
-	raw, _ := tok.Extra("id_token").(string)
-	if raw == "" {
-		return "", loginResult{consumed: true, reason: loginTokenInvalid}
-	}
-	claims, status, reason := a.verifier.Verify(ectx, raw, identity.WithNonce(p.Nonce))
-	switch {
-	case status == identity.StatusUnverified:
-		return "", loginResult{consumed: true, reason: loginIDPUnavailable}
-	case status != identity.StatusValid && reason == identity.ReasonWrongNonce:
-		return "", loginResult{consumed: true, reason: loginNonceMismatch, sub: claims.Sub}
-	case status != identity.StatusValid || claims.Sub == "":
-		return "", loginResult{consumed: true, reason: loginTokenInvalid, sub: claims.Sub}
-	}
+	claims := login.Claims
 	// From here the token is verified, so the attempt has a known actor.
 	actor := adminaudit.Actor{Sub: claims.Sub, Email: claims.Email}
 	// A blocked principal gets no session, whatever their role. Without a
@@ -355,45 +263,8 @@ func (a *authService) finishLogin(w http.ResponseWriter, r *http.Request, oc oau
 			a.logger.Warn("console login: old session delete failed", "error", err)
 		}
 	}
-	http.SetCookie(w, a.cookie.New(rawID, a.sessions.absolute))
-	return p.Next, loginResult{consumed: true, sub: claims.Sub, actor: actor, role: role.String(), sessionHash: hashID(rawID)}
-}
-
-// sanitizeNext keeps a post-login path only when it is a plain absolute path
-// under /dashboard/: no scheme or host, no "//", no backslash, no dot segment,
-// no control character. Anything else becomes /dashboard/.
-func sanitizeNext(raw string) string {
-	if raw == "" || len(raw) > maxNextBytes || !strings.HasPrefix(raw, dashboardHome) ||
-		strings.ContainsAny(raw, "\\\r\n\t") || strings.Contains(raw, "//") {
-		return dashboardHome
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || !strings.HasPrefix(u.Path, dashboardHome) {
-		return dashboardHome
-	}
-	// The decoded path must pass the same separator rules as the raw string.
-	if strings.Contains(u.Path, "//") || strings.ContainsAny(u.Path, "\\\r\n\t") {
-		return dashboardHome
-	}
-	for _, seg := range strings.Split(u.Path, "/") {
-		if seg == ".." || seg == "." {
-			return dashboardHome
-		}
-	}
-	return raw
-}
-
-func randomToken(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		panic("control plane: crypto/rand failed: " + err.Error())
-	}
-	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-func noStore(w http.ResponseWriter) {
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	http.SetCookie(w, a.cookie.New(rawID, a.sessions.Absolute()))
+	return login.Next, loginResult{consumed: true, sub: claims.Sub, actor: actor, role: role.String(), sessionHash: hashID(rawID)}
 }
 
 func writeAuthError(w http.ResponseWriter, status int, code string) {

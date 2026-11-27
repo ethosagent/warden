@@ -123,6 +123,10 @@ type Policy struct {
 	// client, role groups, session bounds). It is read by the control plane from
 	// --config only and never leaves it: json:"-" keeps it off the worker wire.
 	Console ConsoleConfig `json:"-"`
+	// Consent is the control-plane-local consent sign-in config (the warden-portal
+	// OIDC client, portal session bounds, IdP link). Read from --config only
+	// (LoadConsent) and json:"-" keeps it off the worker wire. Disabled by default.
+	Consent ConsentConfig `json:"-"`
 	// Keys is the control-plane-local signing-key subsystem (token and bundle
 	// signing keys, the worker CA key store). Like Console it is read from
 	// --config only (LoadKeys) and json:"-" keeps it off the worker wire.
@@ -396,6 +400,7 @@ type rawConfig struct {
 	Integrations  []rawIntegration  `yaml:"integrations"`
 	Detection     *rawDetection     `yaml:"detection"`
 	Console       *rawConsole       `yaml:"console"`
+	Consent       *rawConsent       `yaml:"consent"`
 	Keys          *rawKeys          `yaml:"keys"`
 	TokenService  *rawTokenService  `yaml:"tokenService"`
 	WorkerCA      *rawWorkerCA      `yaml:"workerCA"`
@@ -520,6 +525,11 @@ func parse(data []byte) (*LocalYAMLProvider, error) {
 		return nil, err
 	}
 	policy.Console = console
+	consent, err := parseConsent(raw.Consent)
+	if err != nil {
+		return nil, err
+	}
+	policy.Consent = consent
 	keysCfg, err := parseKeys(raw.Keys)
 	if err != nil {
 		return nil, err
@@ -715,11 +725,13 @@ func validate(p Policy) error {
 		if s.Placeholder == "" {
 			return fmt.Errorf("config: secrets[%d]: placeholder is required", i)
 		}
-		// cp/ is reserved for control-plane material (W-P2-WCA-07): a placeholder
-		// naming it would have a worker inject that value upstream. The message
-		// names the entry only; it does not echo the placeholder.
-		if IsReservedSecretKey(s.Placeholder) {
-			return fmt.Errorf("config: secrets[%d]: placeholder names the reserved %q secret namespace", i, ReservedSecretNamespace+"/")
+		// cp/ is reserved for control-plane material (W-P2-WCA-07) and users/,
+		// idp/, revoking/ and oauth-clients/ for per-user credentials
+		// (W-P3-CSIG-06): a placeholder naming one would have a worker inject
+		// that value upstream. The message names the entry and the namespace
+		// only; it does not echo the placeholder.
+		if ns, ok := ReservedSecretNamespaceOf(s.Placeholder); ok {
+			return fmt.Errorf("config: secrets[%d]: invalid_secret_key: reserved namespace %q (placeholder names a control-plane-only secret key)", i, ns+"/")
 		}
 		if envBackend && s.EnvVar == "" {
 			return fmt.Errorf("config: secrets[%d]: envVar is required for the env secret backend", i)
@@ -790,6 +802,9 @@ func validate(p Policy) error {
 		return err
 	}
 	if err := validateConsole(p.Console); err != nil {
+		return err
+	}
+	if err := validateConsent(p.Consent, p.Console.OIDC.RedirectURL); err != nil {
 		return err
 	}
 	if err := validateDetection(p.Detection); err != nil {

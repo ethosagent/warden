@@ -20,6 +20,7 @@ import (
 	"github.com/ethosagent/warden/internal/agentreg"
 	"github.com/ethosagent/warden/internal/identity"
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/ratelimit"
 )
 
 // Limits and defaults of the exchange.
@@ -90,7 +91,7 @@ type Config struct {
 	// subject), checked right after the subject token verifies. nil allows
 	// everything. A refusal is a 429 rate_limited and is recorded like any
 	// other outcome after the assertion verified.
-	AgentLimiter, UserLimiter RateLimiter
+	AgentLimiter, UserLimiter ratelimit.RateLimiter
 	// Recorder stores one Event per issued token and per denial after the
 	// assertion verified, before Exchange returns. When it fails the exchange
 	// answers event_store_unavailable and no token is released. nil records
@@ -340,7 +341,7 @@ func (s *Service) record(ctx context.Context, st *exchangeState, ev Event) error
 }
 
 // allow applies an optional limiter and returns the 429 error when it refuses.
-func (s *Service) allow(l RateLimiter, key, agent string) *Error {
+func (s *Service) allow(l ratelimit.RateLimiter, key, agent string) *Error {
 	if l == nil {
 		return nil
 	}

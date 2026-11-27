@@ -187,7 +187,8 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "secret store error", http.StatusInternalServerError)
 		return
 	}
-	// The cp/ namespace is control-plane only: it is never listed.
+	// The reserved namespaces (cp/ and the per-user idp/, users/, revoking/,
+	// oauth-clients/) are control-plane only: they are never listed.
 	visible := make([]secrets.SecretMeta, 0, len(metas))
 	for _, m := range metas {
 		if !secrets.IsReservedKey(m.Key) {
@@ -201,8 +202,9 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// refuseReservedKey answers 403 reserved_key for a key in the control-plane
-// only cp/ namespace and reports whether it did. It runs before the audit
+// refuseReservedKey answers 403 reserved_key for a key in a reserved
+// namespace (cp/ or a per-user one, secrets.IsReservedKey) and reports whether
+// it did. It runs before the audit
 // annotation and before the store is touched; the refusal is logged by route and
 // key prefix only, at most once a minute per route.
 func (s *Server) refuseReservedKey(w http.ResponseWriter, r *http.Request, key string) bool {

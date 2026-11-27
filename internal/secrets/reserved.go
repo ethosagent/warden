@@ -21,10 +21,15 @@ const ReservedKeyNamespace = config.ReservedSecretNamespace
 // the request keeps the default-deny outcome.
 var ErrReservedKey = errors.New("secrets: reserved key")
 
-// IsReservedKey reports whether key is the reserved namespace itself ("cp") or
-// lies under it ("cp/..."). It applies the normalization every entry point
-// applies to a key (surrounding whitespace is trimmed), so a padded key cannot
-// slip past a guard the store would then accept.
+// IsReservedKey reports whether key is in a reserved namespace: the
+// control-plane namespace cp/ (W-P2-WCA-01), or one of the per-user credential
+// namespaces users/, idp/, revoking/ and oauth-clients/ that only the CP-only
+// consent.store holds (W-P3-CSIG-06; see userkey.go). It applies the
+// normalization every entry point applies to a key (surrounding whitespace is
+// trimmed, leading slashes dropped), so a padded key cannot slip past a guard
+// the store would then accept. storeFetcher.Fetch, the worker Cache,
+// /central/secrets and the dashboard secret store all refuse such keys, and
+// config validation rejects a placeholder under one.
 func IsReservedKey(key string) bool {
 	return config.IsReservedSecretKey(key)
 }
@@ -85,5 +90,9 @@ func (l *ReservedKeyLog) Refused(source, key string) {
 	}
 	l.last[source] = t
 	l.mu.Unlock()
-	l.logger.Warn("reserved secret key refused", "source", source, "keyPrefix", ReservedKeyNamespace+"/")
+	ns, ok := config.ReservedSecretNamespaceOf(key)
+	if !ok {
+		ns = ReservedKeyNamespace
+	}
+	l.logger.Warn("reserved secret key refused", "source", source, "keyPrefix", ns+"/")
 }

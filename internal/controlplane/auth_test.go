@@ -14,7 +14,8 @@ import (
 
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
-	"github.com/ethosagent/warden/internal/identity/adapters/oidc"
+	"github.com/ethosagent/warden/internal/webauth"
+	"github.com/ethosagent/warden/internal/webauth/webauthtest"
 	"github.com/ethosagent/warden/test/fakes"
 )
 
@@ -28,7 +29,7 @@ const (
 // IdP over HTTP, and relays the cookies and redirects by hand.
 type rig struct {
 	t     *testing.T
-	idp   *fakes.OIDCIssuer
+	idp   *webauthtest.FakeOIDC
 	srv   *Server
 	h     http.Handler
 	clk   *fakeClock
@@ -50,16 +51,10 @@ type rigOpts struct {
 func newRig(t *testing.T, o rigOpts) *rig {
 	t.Helper()
 	clk := newFakeClock()
-	var iopts []fakes.IssuerOption
-	iopts = append(iopts, fakes.WithIssuerClock(clk.Now))
-	if o.publicIssuer != "" {
-		iopts = append(iopts, fakes.WithPublicIssuer(o.publicIssuer))
-	}
-	idp := fakes.NewOIDCIssuer(t, iopts...)
-	idp.RegisterClient(rigClientID, rigClientSecret)
-	if o.idpDown {
-		idp.Stop()
-	}
+	idp := webauthtest.NewFakeOIDC(t, webauthtest.Options{
+		ClientID: rigClientID, ClientSecret: rigClientSecret, Now: clk.Now,
+		PublicIssuer: o.publicIssuer, Down: o.idpDown,
+	})
 	if o.redirect == "" {
 		o.redirect = "http://127.0.0.1:7070/auth/callback"
 	}
@@ -91,7 +86,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 	if srv.auth == nil {
 		t.Fatal("auth service not built")
 	}
-	srv.auth.backoffMin, srv.auth.backoffMax = 10*time.Millisecond, 20*time.Millisecond
+	srv.auth.provider.SetBackoff(10*time.Millisecond, 20*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	if !o.noStart {
@@ -105,7 +100,7 @@ func (r *rig) ready() {
 	r.t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := r.srv.auth.ready(); ok {
+		if r.srv.auth.ready() {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -153,36 +148,8 @@ func (r *rig) start(next string) flow {
 	if rec.Code != http.StatusFound {
 		r.t.Fatalf("/auth/login = %d, want 302: %s", rec.Code, rec.Body)
 	}
-	loc, err := url.Parse(rec.Header().Get("Location"))
-	if err != nil {
-		r.t.Fatal(err)
-	}
-	// The browser could reach the public issuer; the test cannot, so it goes
-	// straight to the fake's listener.
-	if loc.Host != r.idp.Addr() {
-		loc.Scheme, loc.Host = "http", r.idp.Addr()
-	}
-	loc.Path = strings.TrimPrefix(loc.Path, pathOf(r.idp.Issuer()))
-	hc := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, loc.String(), nil)
-	resp, err := hc.Do(req)
-	if err != nil {
-		r.t.Fatalf("idp authorize: %v", err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusFound {
-		r.t.Fatalf("idp authorize = %d, want 302", resp.StatusCode)
-	}
-	cb, err := url.Parse(resp.Header.Get("Location"))
-	if err != nil {
-		r.t.Fatal(err)
-	}
-	return flow{loginRec: rec, loginCookie: cookieNamed(rec, r.srv.auth.loginCookieName), callback: cb.RequestURI()}
-}
-
-func pathOf(raw string) string {
-	u, _ := url.Parse(raw)
-	return u.Path
+	callback := r.idp.Authorize(r.t, rec.Header().Get("Location"))
+	return flow{loginRec: rec, loginCookie: cookieNamed(rec, r.srv.auth.loginCookieName), callback: callback}
 }
 
 // finish sends the callback with the login cookie plus extras.
@@ -223,7 +190,7 @@ func wantRedirect(t *testing.T, rec *httptest.ResponseRecorder, want string) {
 	}
 }
 
-func adminLogin(idp *fakes.OIDCIssuer) {
+func adminLogin(idp *webauthtest.FakeOIDC) {
 	idp.SetLogin(fakes.Valid("alice", "alice@example.com", "admins"))
 }
 
@@ -605,10 +572,10 @@ func TestOIDCRoutesRejectOtherMethods(t *testing.T) {
 
 func TestOIDCPendingCapAndSweep(t *testing.T) {
 	r := newRig(t, rigOpts{noStart: true})
-	r.srv.auth.endpoints.Store(&oidc.Endpoints{AuthURL: "http://idp.example/auth", TokenURL: "http://idp.example/token"})
+	r.srv.auth.provider.SetEndpoints(webauth.Endpoints{AuthURL: "http://idp.example/auth", TokenURL: "http://idp.example/token"})
 	// Fill to the cap in one statement, then one more login must be refused.
 	if _, err := r.db.SQL().Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?)
-		INSERT INTO oidc_pending SELECT 'h' || i, 'n', 'v', '/dashboard/', 'b', ? FROM n`,
+		INSERT INTO oidc_pending (state_hash, nonce, verifier, next, browser_hash, expires_at) SELECT 'h' || i, 'n', 'v', '/dashboard/', 'b', ? FROM n`,
 		pendingCap, r.clk.Now().Add(time.Hour).Unix()); err != nil {
 		t.Fatal(err)
 	}
@@ -630,13 +597,13 @@ func TestOIDCPendingTakeIsSingleUse(t *testing.T) {
 	r := newRig(t, rigOpts{noStart: true})
 	ps := r.srv.auth.pending
 	ctx := context.Background()
-	if err := ps.Put(ctx, pendingLogin{StateHash: "s1", Nonce: "n", Verifier: "v", Next: "/dashboard/", BrowserHash: "b"}); err != nil {
+	if err := ps.Put(ctx, pendingLogin{StateHash: "s1", Purpose: webauth.PurposeConsole, Nonce: "n", Verifier: "v", Next: "/dashboard/", BrowserHash: "b"}); err != nil {
 		t.Fatal(err)
 	}
-	if p, ok, err := ps.Take(ctx, "s1"); err != nil || !ok || p.Nonce != "n" || p.Verifier != "v" {
+	if p, ok, err := ps.Take(ctx, "s1", webauth.PurposeConsole); err != nil || !ok || p.Nonce != "n" || p.Verifier != "v" {
 		t.Fatalf("first take = %+v %v %v", p, ok, err)
 	}
-	if _, ok, _ := ps.Take(ctx, "s1"); ok {
+	if _, ok, _ := ps.Take(ctx, "s1", webauth.PurposeConsole); ok {
 		t.Fatal("a state was taken twice")
 	}
 }

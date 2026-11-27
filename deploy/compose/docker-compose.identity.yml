@@ -21,6 +21,7 @@ services:
     networks: [cp-net, idp-net]
     environment:
       - WARDEN_CONSOLE_DEX_CLIENT_SECRET=${WARDEN_CONSOLE_DEX_CLIENT_SECRET:?set it (see dex/.env.example)}
+      - WARDEN_PORTAL_DEX_CLIENT_SECRET=${WARDEN_PORTAL_DEX_CLIENT_SECRET:?set it (see dex/.env.example)}
       - WARDEN_DEX_CLIENT_SECRET=${WARDEN_DEX_CLIENT_SECRET:?set it (see dex/.env.example)}
       - HARNESS_DEX_CLIENT_SECRET=${HARNESS_DEX_CLIENT_SECRET:?set it (see dex/.env.example)}
       - LDAP_BIND_PW=${LDAP_BIND_PW:?set it (see dex/.env.example)}

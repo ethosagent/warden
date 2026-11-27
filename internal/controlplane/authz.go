@@ -306,6 +306,22 @@ func cpRouteTable() map[routeKey]authzRow {
 		{get, "/auth/callback", handler("auth.callback")},
 		{post, "/auth/logout", handler("auth.logout")},
 		{post, "/auth/breakglass", handler("auth.breakglass")},
+		// The consent portal (W-P3-CSIG-02): a portal session is not a console
+		// Principal, so these never reach the console authz middleware.
+		// Mounted only with consent.enabled and a state dir.
+		{get, portalLoginPath, handler("portal.login")},
+		{get, portalCallbackPath, handler("portal.callback")},
+		{get, portalHomePath, handler("portal.home")},
+		// Behind the portal session middleware (W-P3-CSIG-04): the portal
+		// cookie only, CSRF on writes. The subtree answers 404 to a signed-in
+		// request and sends a signed-out browser to /portal/login.
+		{get, portalMePath, handler("portal.me")},
+		{post, portalLogoutPath, handler("portal.logout")},
+		{get, portalSubtree, handler("portal.subtree")},
+		// The OAuth broker (W-P3-BRKR-03): the portal session middleware and
+		// CSRF, mounted only when consent.providers is set. GET only redirects.
+		{get, connectStartPath, handler("connect.start")},
+		{post, connectStartPath, handler("connect.start")},
 	}
 	t := make(map[routeKey]authzRow, len(rows))
 	for _, r := range rows {
