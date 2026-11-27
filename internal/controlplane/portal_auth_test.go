@@ -727,8 +727,8 @@ func TestPortalLinkErrorNotLogged(t *testing.T) {
 	if strings.Contains(logs, portalRefreshToken) {
 		t.Fatal("the logs hold the refresh token from the link error")
 	}
-	if !strings.Contains(logs, `"reason":"idp_link_store_failed"`) || !strings.Contains(logs, "tokenEchoErr") {
-		t.Fatalf("link failure not logged by reason and type:\n%s", logs)
+	if !strings.Contains(logs, `"reason":"idp_link_row_failed"`) {
+		t.Fatalf("link failure not logged by its classified reason:\n%s", logs)
 	}
 }
 

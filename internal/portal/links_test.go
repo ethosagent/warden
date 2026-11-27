@@ -150,8 +150,8 @@ func TestIdPLinkStored(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("row = %+v\nwant  %+v", got, want)
 	}
-	if tok, err := r.store.Token(context.Background(), linkIss, linkSub); err != nil || tok != linkToken {
-		t.Fatalf("Token = %q, %v", tok, err)
+	if tok, row, err := r.store.TokenAt(context.Background(), linkIss, linkSub); err != nil || tok != linkToken || row != want {
+		t.Fatalf("TokenAt = %q, %+v, %v", tok, row, err)
 	}
 	logs := r.logs.String()
 	if !strings.Contains(logs, `"msg":"idp_link_stored"`) || !strings.Contains(logs, want.RefreshRef) || !strings.Contains(logs, `"generation":1`) {
@@ -461,4 +461,116 @@ func TestIdPLinkRotateCASSerialized(t *testing.T) {
 	if v, _ := mem.Value("idp/" + userKey(t)); v != "rt-relogin-token-0002" {
 		t.Fatalf("stored = %q", v)
 	}
+}
+
+// failingUpsert is a LinkRepo whose Upsert fails while fail is set.
+type failingUpsert struct {
+	portal.LinkRepo
+	fail bool
+}
+
+func (f *failingUpsert) Upsert(ctx context.Context, l portal.IdPLink) (portal.IdPLink, error) {
+	if f.fail {
+		return portal.IdPLink{}, errors.New("database is locked")
+	}
+	return f.LinkRepo.Upsert(ctx, l)
+}
+
+func newStoreOver(t *testing.T, r *linkRig, repo portal.LinkRepo, st portal.LinkSecrets) *portal.LinkStore {
+	t.Helper()
+	ls, err := portal.NewLinkStore(portal.LinkStoreConfig{
+		Repo: repo, Secrets: st,
+		Keys:            portal.LinkKeys{UserKey: secrets.UserKey, SecretKey: secrets.IdPLinkKey, Ref: func(tok string) string { return secrets.Ref(tok).String() }},
+		RefreshLifetime: linkLifetime, Now: r.clock,
+		Logger:          slog.New(slog.NewJSONHandler(r.logs, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ls
+}
+
+// TestIdPLinkFailClosedUpsert: a failed row write after the Put returns
+// ErrLinkRow with no token in it. For a brand-new link the just-written key
+// is deleted; for an existing link the row is unchanged, TokenAt reports the
+// split as ErrLinkInconsistent, and the next StoreLink converges.
+func TestIdPLinkFailClosedUpsert(t *testing.T) {
+	ctx := context.Background()
+	st := fakes.NewMemorySecretStore()
+	r := newLinkRig(t, st)
+	repo := &failingUpsert{LinkRepo: r.repo, fail: true}
+	ls := newStoreOver(t, r, repo, st)
+	key := "idp/" + userKey(t)
+
+	// New link: no row, and the orphaned key is removed.
+	err := ls.StoreLink(ctx, link(linkToken))
+	if !errors.Is(err, portal.ErrLinkRow) || strings.Contains(err.Error(), linkToken[4:]) {
+		t.Fatalf("StoreLink = %v, want ErrLinkRow without the token", err)
+	}
+	if _, ok := st.Value(key); ok || r.count(t) != 0 {
+		t.Fatal("a failed new-link row write left the key or a row")
+	}
+
+	// Existing link: the row stays as it was.
+	repo.fail = false
+	if err := ls.StoreLink(ctx, link(linkToken)); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := ls.Get(ctx, linkIss, linkSub)
+	repo.fail = true
+	if err := ls.StoreLink(ctx, link("rt-split-write-0002")); !errors.Is(err, portal.ErrLinkRow) || strings.Contains(err.Error(), "rt-split") {
+		t.Fatalf("second StoreLink = %v", err)
+	}
+	if after, _ := ls.Get(ctx, linkIss, linkSub); after != before {
+		t.Fatalf("row changed: %+v -> %+v", before, after)
+	}
+	if tok, _, err := ls.TokenAt(ctx, linkIss, linkSub); !errors.Is(err, portal.ErrLinkInconsistent) || tok != "" {
+		t.Fatalf("TokenAt after a split write = %q, %v; want ErrLinkInconsistent and no token", tok, err)
+	}
+	// The next login converges.
+	repo.fail = false
+	if err := ls.StoreLink(ctx, link("rt-converged-0003")); err != nil {
+		t.Fatal(err)
+	}
+	tok, row, err := ls.TokenAt(ctx, linkIss, linkSub)
+	if err != nil || tok != "rt-converged-0003" || row.Generation != 2 {
+		t.Fatalf("after convergence: %q, %+v, %v", tok, row, err)
+	}
+	r.noTokenInLogs(t, linkToken, "rt-split-write-0002", "rt-converged-0003")
+}
+
+// TestIdPLinkCancelDoesNotSplit: once a write holds the lock, the caller's
+// cancellation does not split the Put from the row write.
+func TestIdPLinkCancelDoesNotSplit(t *testing.T) {
+	mem := fakes.NewMemorySecretStore()
+	r := newLinkRig(t, mem)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ls := newStoreOver(t, r, r.repo, cancelOnPut{MemorySecretStore: mem, cancel: cancel})
+	if err := ls.StoreLink(ctx, link(linkToken)); err != nil {
+		t.Fatalf("StoreLink with a cancel during Put = %v", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the test did not cancel")
+	}
+	if r.count(t) != 1 {
+		t.Fatal("the row was not written after the cancel")
+	}
+}
+
+// cancelOnPut cancels the caller's context during Put and fails if the
+// write context it was given is cancelled too.
+type cancelOnPut struct {
+	*fakes.MemorySecretStore
+	cancel context.CancelFunc
+}
+
+func (c cancelOnPut) Put(ctx context.Context, key, value string) error {
+	if c.cancel != nil {
+		c.cancel()
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return c.MemorySecretStore.Put(ctx, key, value)
 }

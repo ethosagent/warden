@@ -128,8 +128,8 @@ func TestIdPLinkFailClosed(t *testing.T) {
 		if all, _ := st.List(t.Context()); len(all) != 0 {
 			t.Fatalf("store changed: %+v", all)
 		}
-		if strings.Contains(r.logs.String(), portalRefreshToken) {
-			t.Fatal("the logs hold the refresh token")
+		if strings.Contains(r.logs.String(), portalRefreshToken) || !strings.Contains(r.logs.String(), `"reason":"idp_link_secret_put_failed"`) {
+			t.Fatalf("logs: want the classified reason and never the token:\n%s", r.logs.String())
 		}
 		// The store recovers: the next login links and signs in.
 		st.SetErrors(nil, nil, nil, nil)

@@ -1020,6 +1020,8 @@ creates the session, so offboarding can later refresh it to detect disabled user
   `offline_access_not_granted`. The control plane refuses to start with the IdP
   link enabled and no `consent.store`, or a non-persistent one (`echo`).
 - Logout and session expiry leave the link and the stored token in place.
+- `warden-cp restore` keeps `idp_links`: the tokens live in `consent.store`,
+  outside the backup, so the rows still describe them.
 - Each stored link logs `idp_link_stored` with `user_key`, `ref` and
   `generation`; with admin audit on it records `user.idp_linked` (target
   `idp_link`, `target_ref` the user key). The token is never logged or recorded.

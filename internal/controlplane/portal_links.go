@@ -120,3 +120,12 @@ func (s *Server) recordIdPLinked(r *http.Request, iss, sub, email string) {
 		ClientIP: clientIP(r, s.audit.trusted), RequestID: RequestIDFrom(r.Context()),
 	})
 }
+
+// idpLinkFailureReason classifies a LinkWriter error for the log line without
+// its text: the secret write, or anything after it (the idp_links row).
+func idpLinkFailureReason(err error) string {
+	if errors.Is(err, portal.ErrLinkSecretStore) {
+		return "idp_link_secret_put_failed"
+	}
+	return "idp_link_row_failed"
+}

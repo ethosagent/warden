@@ -68,7 +68,18 @@ var (
 	// wrapping error names only the cause's type, never its text, which could
 	// echo the value it was asked to write.
 	ErrLinkSecretStore = errors.New("portal: idp link secret store write failed")
+	// ErrLinkRow: the idp_links write failed after the secret write.
+	ErrLinkRow = errors.New("portal: idp link row write failed")
+	// ErrLinkInconsistent: the stored token is not the one the row's
+	// Reference names (a write was split, or the store was changed behind
+	// the control plane). TokenAt returns no token with it.
+	ErrLinkInconsistent = errors.New("portal: stored idp link token does not match its row")
 )
+
+// writeTimeout bounds the locked secret-then-row section of a write. It runs
+// detached from the caller's cancellation, so a closed browser tab cannot
+// split the Put from the row write.
+const writeTimeout = 10 * time.Second
 
 // LinkRepo is the idp_links table (internal/portal/adapters/sqlite). It never
 // sees a token, only its Reference.
@@ -92,6 +103,7 @@ type LinkRepo interface {
 type LinkSecrets interface {
 	Get(ctx context.Context, key string) (string, error)
 	Put(ctx context.Context, key, value string) error
+	Delete(ctx context.Context, key string) error
 }
 
 // LinkKeys are the per-user key helpers, injected from internal/secrets
@@ -194,17 +206,33 @@ func (s *LinkStore) Link(ctx context.Context, l Link) (IdPLink, error) {
 		return IdPLink{}, err
 	}
 	defer unlock()
-	if err := s.put(ctx, sk, l.RefreshToken); err != nil {
+	// From here the write runs to completion (bounded) whatever the caller's
+	// context does, so the Put and the row are never split by a cancel.
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
+	defer cancel()
+	_, gerr := s.repo.Get(wctx, l.Iss, l.Sub)
+	isNew := errors.Is(gerr, ErrLinkNotFound)
+	if gerr != nil && !isNew {
+		return IdPLink{}, fmt.Errorf("%w: %w", ErrLinkRow, gerr)
+	}
+	if err := s.put(wctx, sk, l.RefreshToken); err != nil {
 		return IdPLink{}, err
 	}
 	now := s.now().UTC()
-	row, err := s.repo.Upsert(ctx, IdPLink{
+	row, err := s.repo.Upsert(wctx, IdPLink{
 		Iss: l.Iss, Sub: l.Sub, UserKey: uk, Email: l.Email, SecretKey: sk,
 		RefreshRef: s.keys.Ref(l.RefreshToken),
 		LinkedAt:   now, RefreshIssuedAt: now, RelinkDueAt: now.Add(s.lifetime),
 	})
 	if err != nil {
-		return IdPLink{}, fmt.Errorf("portal: idp link row: %w", err)
+		if isNew {
+			// No row names this token: drop it (best effort) so the store
+			// holds no unreferenced credential.
+			if derr := s.secrets.Delete(wctx, sk); derr != nil {
+				s.logger.Warn("idp_link_orphan_delete_failed", "user_key", uk, "error_type", fmt.Sprintf("%T", derr))
+			}
+		}
+		return IdPLink{}, fmt.Errorf("%w: %w", ErrLinkRow, err)
 	}
 	s.logger.Info("idp_link_stored", "user_key", uk, "ref", row.RefreshRef, "generation", row.Generation)
 	return row, nil
@@ -220,14 +248,34 @@ func (s *LinkStore) List(ctx context.Context) ([]IdPLink, error) {
 	return s.repo.List(ctx)
 }
 
-// Token reads the stored refresh token of (iss, sub) from consent.store (for
-// W-P3-OFFB-02's refresh call). The caller must never log it.
-func (s *LinkStore) Token(ctx context.Context, iss, sub string) (string, error) {
-	_, sk, err := s.keysOf(iss, sub)
+// TokenAt reads the link of (iss, sub) and its stored refresh token together,
+// under the user's mutex, so the token is the one the row (and its
+// generation) describes: W-P3-OFFB-02 refreshes with it and then calls Rotate
+// with row.Generation. When the token's Reference differs from
+// row.RefreshRef it returns ErrLinkInconsistent and no token. The caller must
+// never log the token.
+func (s *LinkStore) TokenAt(ctx context.Context, iss, sub string) (string, IdPLink, error) {
+	uk, sk, err := s.keysOf(iss, sub)
 	if err != nil {
-		return "", fmt.Errorf("portal: idp link key: %w", err)
+		return "", IdPLink{}, fmt.Errorf("portal: idp link key: %w", err)
 	}
-	return s.secrets.Get(ctx, sk)
+	unlock, err := s.locks.lock(ctx, uk)
+	if err != nil {
+		return "", IdPLink{}, err
+	}
+	defer unlock()
+	row, err := s.repo.Get(ctx, iss, sub)
+	if err != nil {
+		return "", IdPLink{}, err
+	}
+	tok, err := s.secrets.Get(ctx, sk)
+	if err != nil {
+		return "", row, fmt.Errorf("portal: idp link token read failed (%T)", err)
+	}
+	if s.keys.Ref(tok) != row.RefreshRef {
+		return "", row, ErrLinkInconsistent
+	}
+	return tok, row, nil
 }
 
 // Rotate writes a refreshed token for (iss, sub) if the stored generation is
@@ -257,12 +305,15 @@ func (s *LinkStore) Rotate(ctx context.Context, iss, sub string, expectedGenerat
 	if row.Generation != expectedGeneration {
 		return IdPLink{}, ErrStaleGeneration
 	}
-	if err := s.put(ctx, sk, token); err != nil {
+	// As in Link: the Put and the row update are not split by a cancel.
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
+	defer cancel()
+	if err := s.put(wctx, sk, token); err != nil {
 		return IdPLink{}, err
 	}
 	ref := s.keys.Ref(token)
 	now := s.now().UTC()
-	if err := s.repo.Rotate(ctx, iss, sub, expectedGeneration, ref, now, RefreshStatusRotated); err != nil {
+	if err := s.repo.Rotate(wctx, iss, sub, expectedGeneration, ref, now, RefreshStatusRotated); err != nil {
 		return IdPLink{}, err
 	}
 	row.RefreshRef, row.Generation = ref, expectedGeneration+1

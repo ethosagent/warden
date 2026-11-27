@@ -657,7 +657,9 @@ const RestoreDetailAPIKeysRevoked = "api_keys_revoked"
 // backup stop working, and with revokeKeys revokes every API key through the key Store
 // (returning how many it revoked). It opens the file with the full migration
 // list, which also brings an older set's schema up to date, then checkpoints
-// so the file is self-contained before it is renamed into place.
+// so the file is self-contained before it is renamed into place. idp_links is
+// kept: its tokens live in consent.store, outside the backup, so clearing the
+// rows would orphan stored refresh tokens rather than revoke anything.
 func prepareRestoredState(ctx context.Context, staged string, revokeKeys bool, clk clock.Clock) (int, error) {
 	db, err := cpstate.Open(ctx, staged, StateMigrations())
 	if err != nil {

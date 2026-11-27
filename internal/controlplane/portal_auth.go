@@ -3,7 +3,6 @@ package controlplane
 import (
 	"context"
 	"errors"
-	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -276,9 +275,9 @@ func (p *portalService) finishLogin(w http.ResponseWriter, r *http.Request, logi
 	}
 	if p.links != nil && p.cfg.IdPLink.Enabled {
 		if err := p.links.StoreLink(ctx, portal.Link{Iss: claims.Issuer, Sub: claims.Sub, Email: claims.Email, RefreshToken: login.RefreshToken}); err != nil {
-			// Only the error's type is logged: a store error could echo what
-			// it was asked to write.
-			p.logger.Error("portal login: idp link store failed", "sub", claims.Sub, "reason", "idp_link_store_failed", "error_type", fmt.Sprintf("%T", err))
+			// Only a classified reason is logged, never the error text: a
+			// store error could echo what it was asked to write.
+			p.logger.Error("portal login: idp link store failed", "sub", claims.Sub, "reason", idpLinkFailureReason(err))
 			res.reason, res.status = portalSecretStoreUnavailable, http.StatusServiceUnavailable
 			return "", res
 		}
