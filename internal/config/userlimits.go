@@ -118,9 +118,9 @@ var allowUnenforcedUserLimits atomic.Bool
 // LiftUserLimitsGuardForTesting lifts the not-yet-enforced guard until t's
 // cleanup runs. It is for tests in other packages (the control plane's cost
 // block and capability gate tests, W-P3-PUL-08) that must hold a dailyCostUSD
-// rule before the enforcing tickets remove the guard; production code never
-// calls it. Tests that use it must not run in parallel with tests expecting
-// the guard.
+// rule before the enforcing tickets remove the guard. PUL-04 deletes this
+// with the guard; never call outside tests. Tests that use it must not run in
+// parallel with tests expecting the guard.
 func LiftUserLimitsGuardForTesting(t interface{ Cleanup(func()) }) {
 	allowUnenforcedUserLimits.Store(true)
 	t.Cleanup(func() { allowUnenforcedUserLimits.Store(false) })

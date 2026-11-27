@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/ethosagent/warden/internal/adminaudit"
 	"github.com/ethosagent/warden/internal/approvals"
 	"github.com/ethosagent/warden/internal/config"
+	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/dashboard"
 )
 
@@ -177,4 +180,79 @@ func TestCostCapCapabilityGate(t *testing.T) {
 			t.Fatalf("forced save did not reach the file:\n%s", readFile(t, path))
 		}
 	})
+}
+
+// writeImportFile writes a config YAML with the base allow/deny lists plus
+// userLimits (raw YAML list items, indented under policy).
+func writeImportFile(t *testing.T, limits string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "import.yaml")
+	body := "policy:\n  allowlist:\n    - domain: api.openai.com\n  denylist:\n    - domain: evil.example.com\n"
+	if limits != "" {
+		body += "  userLimits:\n" + limits
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestCostCapCapabilityGate_OfflineImport: `warden policy import` cannot see
+// the connected workers, so a file that adds a dailyCostUSD cap against the
+// head is refused unless --force (ForceCostCaps) is set; a forced import's
+// policy.import audit row records force and the capability. A rateLimit-only
+// rule, and a file that keeps an existing cap, import without it.
+func TestCostCapCapabilityGate_OfflineImport(t *testing.T) {
+	config.LiftUserLimitsGuardForTesting(t)
+	stateDir := t.TempDir()
+	db, err := cpstate.Open(context.Background(), filepath.Join(stateDir, adminaudit.StateDBFileName), StateMigrations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := New(Config{PolicyPath: writePolicyFile(t, "api.openai.com"), State: db, PolicyStore: PolicyStoreVersioned, Logger: testJSONLogger(nil)})
+	if err := s.importInitialVersion(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st, err := OpenPolicyStore(context.Background(), stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	imp := func(limits string) (PolicyImportResult, *fakeRecorder, error) {
+		t.Helper()
+		doc, err := ValidatePolicyDocFile(writeImportFile(t, limits))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := &fakeRecorder{}
+		res, err := st.Import(context.Background(), doc, "", -1, rec)
+		return res, rec, err
+	}
+	const rateOnly = "    - name: eng-llm\n      match: {groups: [eng]}\n      rateLimit: 60/minute\n"
+	const withCap = "    - name: eng-llm\n      match: {groups: [eng]}\n      rateLimit: 60/minute\n      dailyCostUSD: 5\n"
+
+	if res, _, err := imp(rateOnly); err != nil || !res.Changed {
+		t.Fatalf("rateLimit-only import = %+v, %v; want a new version", res, err)
+	}
+	if _, rec, err := imp(withCap); !errors.Is(err, ErrCostCapNeedsForce) || len(rec.rows) != 0 {
+		t.Fatalf("unforced cap import = %v (%d audit rows), want ErrCostCapNeedsForce and no row", err, len(rec.rows))
+	}
+	if head := mustHead(t, s.versions); head != 2 {
+		t.Fatalf("head = %d after the refused import, want 2", head)
+	}
+	st.ForceCostCaps = true
+	res, rec, err := imp(withCap)
+	if err != nil || !res.Changed {
+		t.Fatalf("forced cap import = %+v, %v", res, err)
+	}
+	if len(rec.rows) != 1 || rec.rows[0].Details[adminaudit.DetailForce] != "true" || rec.rows[0].Details[adminaudit.DetailCapability] != config.CapUserCostV1 {
+		t.Fatalf("forced import audit rows = %+v, want one with force and capability", rec.rows)
+	}
+	// The cap is in the head now: re-importing it (or changing other fields)
+	// adds no cap and needs no force.
+	st.ForceCostCaps = false
+	if _, rec, err := imp(withCap + "    - name: other\n      match: {groups: [ops]}\n      rateLimit: 1/second\n"); err != nil || len(rec.rows) != 1 || rec.rows[0].Details[adminaudit.DetailForce] != "" {
+		t.Fatalf("import keeping the existing cap = %v, rows %+v; want success without force", err, rec.rows)
+	}
 }

@@ -3640,6 +3640,14 @@ bundle).
 - **Failures.** A rollup query error keeps the previous list and ETag, logs
   `user_cost_recompute_failed` at ERROR and counts the error; the list is never
   emptied because of a failure. Logs carry counts only, never a sub or email.
+- **Restart.** The control plane rebuilds the list before its first policy load
+  (a few quick retries). While a `dailyCostUSD` rule is served and no rebuild has
+  succeeded since start, the policy is held: no new `/policy` is served (a
+  versioned control plane refuses to start, a file-mode one answers 500 until the
+  rebuild succeeds; it retries every 5 s), so workers keep their cached list
+  rather than receiving a policy that unblocks everyone.
+- **Truncation.** Over-cap users left out by the 5000 cap or the size cut are
+  counted in an in-memory gauge and logged once per list.
 - **Off by default.** With no `dailyCostUSD` rule nothing is queried and
   `/policy` and its ETag are byte-identical to a build without this feature.
 
@@ -3654,7 +3662,9 @@ covers the dashboard policy write, a rollback, and an approvals draft when it is
 applied. An admin can retry with `?force=true`; the admin audit row records
 `force`, `capability` and the worker ids (`workersLacking`). A rateLimit-only rule
 and a changed cap value need no check. `warden policy import` runs offline and
-cannot see connected workers, so it is not checked.
+cannot see connected workers: it refuses a file that adds a cap against the
+head unless `--force` is passed, and the `policy.import` audit row then records
+`force` and `capability`.
 
 ## What's deliberately not here (yet)
 
