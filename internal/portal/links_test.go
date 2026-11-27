@@ -617,3 +617,40 @@ func TestIdPLinkSetState(t *testing.T) {
 		t.Fatal("Ref differs from secrets.Ref")
 	}
 }
+
+// TestIdPLinkAdopt: Adopt takes over a stored token only when it is the
+// pending rotation the row names; a consistent row is returned unchanged and
+// any other stored value is ErrLinkInconsistent.
+func TestIdPLinkAdopt(t *testing.T) {
+	ctx := context.Background()
+	mem := fakes.NewMemorySecretStore()
+	r := newLinkRig(t, mem)
+	row, err := r.store.Link(ctx, link(linkToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.store.Adopt(ctx, linkIss, linkSub); err != nil || got != row {
+		t.Fatalf("Adopt of a consistent row = %+v, %v", got, err)
+	}
+	const rotated = "rt-rotated-token-value-0010"
+	sk := "idp/" + userKey(t)
+	if err := mem.Put(ctx, sk, rotated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.store.Adopt(ctx, linkIss, linkSub); !errors.Is(err, portal.ErrLinkInconsistent) {
+		t.Fatalf("Adopt without a pending marker = %v, want ErrLinkInconsistent", err)
+	}
+	st := row.RefreshState()
+	st.RotationPendingRef = secrets.Ref(rotated).String()
+	if err := r.store.SetState(ctx, linkIss, linkSub, row.Generation, st); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.store.Adopt(ctx, linkIss, linkSub)
+	if err != nil || got.Generation != row.Generation+1 || got.RefreshRef != secrets.Ref(rotated).String() || got.RotationPendingRef != "" {
+		t.Fatalf("Adopt = %+v, %v", got, err)
+	}
+	if tok, stored, err := r.store.TokenAt(ctx, linkIss, linkSub); err != nil || tok != rotated || stored.Generation != got.Generation {
+		t.Fatalf("TokenAt after Adopt = %v, %+v", err, stored)
+	}
+	r.noTokenInLogs(t, rotated)
+}

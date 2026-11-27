@@ -124,3 +124,37 @@ func TestRepoSetState(t *testing.T) {
 		t.Fatalf("re-login Upsert = %+v, want the record reset and last_ok_at kept", got)
 	}
 }
+
+// TestRepoAdopt: Adopt is a compare-and-swap on both the generation and the
+// pending marker.
+func TestRepoAdopt(t *testing.T) {
+	ctx := context.Background()
+	r, _ := openRepo(t)
+	t0 := time.UnixMilli(1_800_000_000_000).UTC()
+	in := portal.IdPLink{Iss: "https://i", Sub: "s", UserKey: "0123456789abcdef0123456789abcdef", Email: "e@x",
+		SecretKey: "idp/0123456789abcdef0123456789abcdef", RefreshRef: "ref1",
+		LinkedAt: t0, RefreshIssuedAt: t0, RelinkDueAt: t0.Add(time.Hour)}
+	row, err := r.Upsert(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Adopt(ctx, "https://i", "s", row.Generation, "ref2", t0); !errors.Is(err, portal.ErrStaleGeneration) {
+		t.Fatalf("Adopt without the marker = %v", err)
+	}
+	st := row.RefreshState()
+	st.RotationPendingRef = "ref2"
+	if err := r.SetState(ctx, "https://i", "s", row.Generation, st); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Adopt(ctx, "https://i", "s", row.Generation+1, "ref2", t0); !errors.Is(err, portal.ErrStaleGeneration) {
+		t.Fatalf("Adopt at the wrong generation = %v", err)
+	}
+	if err := r.Adopt(ctx, "https://i", "s", row.Generation, "ref2", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	g, err := r.Get(ctx, "https://i", "s")
+	if err != nil || g.RefreshRef != "ref2" || g.Generation != row.Generation+1 || g.RotationPendingRef != "" ||
+		g.LastRefreshStatus != portal.RefreshStatusRotated || !g.LastRefreshAt.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("after Adopt = %+v, %v", g, err)
+	}
+}

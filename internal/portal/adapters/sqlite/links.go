@@ -223,3 +223,24 @@ WHERE iss = ? AND sub = ? AND generation = ?`,
 	}
 	return nil
 }
+
+// Adopt completes a split rotation WHERE generation = expectedGeneration AND
+// rotation_pending_ref = ref; portal.ErrStaleGeneration when no row matched.
+func (r *Repo) Adopt(ctx context.Context, iss, sub string, expectedGeneration int64, ref string, at time.Time) error {
+	res, err := r.db.ExecContext(ctx, `
+UPDATE idp_links SET refresh_ref = ?, generation = generation + 1, rotation_pending_ref = '',
+    last_refresh_at = ?, last_refresh_status = ?
+WHERE iss = ? AND sub = ? AND generation = ? AND rotation_pending_ref = ?`,
+		ref, at.UnixMilli(), portal.RefreshStatusRotated, iss, sub, expectedGeneration, ref)
+	if err != nil {
+		return fmt.Errorf("idp_links: adopt: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("idp_links: adopt: %w", err)
+	}
+	if n == 0 {
+		return portal.ErrStaleGeneration
+	}
+	return nil
+}

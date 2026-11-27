@@ -169,6 +169,12 @@ type LinkRepo interface {
 	// expectedGeneration, leaving the generation as it is, and returns
 	// ErrStaleGeneration when no row matched.
 	SetState(ctx context.Context, iss, sub string, expectedGeneration int64, st RefreshState) error
+	// Adopt finishes a rotation whose secret write landed but whose row
+	// update did not: it sets refresh_ref = ref, increments generation,
+	// clears rotation_pending_ref and records the rotation, only WHERE
+	// generation = expectedGeneration AND rotation_pending_ref = ref;
+	// ErrStaleGeneration when no row matched.
+	Adopt(ctx context.Context, iss, sub string, expectedGeneration int64, ref string, at time.Time) error
 }
 
 // LinkSecrets is the part of consent.store a LinkStore uses.
@@ -411,6 +417,50 @@ func (s *LinkStore) SetState(ctx context.Context, iss, sub string, expectedGener
 	}
 	defer unlock()
 	return s.repo.SetState(ctx, iss, sub, expectedGeneration, st)
+}
+
+// Adopt repairs a link whose stored token is not the one its row names
+// (TokenAt's ErrLinkInconsistent), under the user's mutex. When the stored
+// token is the rotation the refresh job recorded in rotation_pending_ref
+// before its Rotate (the Put landed, the row update did not), the row adopts
+// it: refresh_ref becomes its Reference, the generation is incremented and the
+// pending marker is cleared. A row that already names the stored token is
+// returned unchanged. Anything else is ErrLinkInconsistent: the store was
+// written outside a rotation (a split login write, or a change behind the
+// control plane), and only a login repairs it.
+func (s *LinkStore) Adopt(ctx context.Context, iss, sub string) (IdPLink, error) {
+	uk, sk, err := s.keysOf(iss, sub)
+	if err != nil {
+		return IdPLink{}, fmt.Errorf("portal: idp link key: %w", err)
+	}
+	unlock, err := s.locks.lock(ctx, uk)
+	if err != nil {
+		return IdPLink{}, err
+	}
+	defer unlock()
+	row, err := s.repo.Get(ctx, iss, sub)
+	if err != nil {
+		return IdPLink{}, err
+	}
+	tok, err := s.secrets.Get(ctx, sk)
+	if err != nil {
+		return IdPLink{}, fmt.Errorf("portal: idp link token read failed (%T)", err)
+	}
+	ref := s.keys.Ref(tok)
+	switch {
+	case ref == row.RefreshRef:
+		return row, nil
+	case row.RotationPendingRef == "" || ref != row.RotationPendingRef:
+		return IdPLink{}, ErrLinkInconsistent
+	}
+	now := s.now().UTC()
+	if err := s.repo.Adopt(ctx, iss, sub, row.Generation, ref, now); err != nil {
+		return IdPLink{}, err
+	}
+	row.RefreshRef, row.Generation, row.RotationPendingRef = ref, row.Generation+1, ""
+	row.LastRefreshAt, row.LastRefreshStatus = now, RefreshStatusRotated
+	s.logger.Info("idp_link_rotation_adopted", "user_key", uk, "generation", row.Generation)
+	return row, nil
 }
 
 // Ref returns token's log-safe Reference, as idp_links stores it.
