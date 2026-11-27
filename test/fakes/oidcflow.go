@@ -50,6 +50,8 @@ type flowState struct {
 	onRefresh    func(sub string)
 	refreshCalls int
 	lastIssued   string
+	omitIDToken  map[string]bool
+	jwksStatus   int
 }
 
 // RegisterClient makes the token endpoint accept id with secret (client_secret

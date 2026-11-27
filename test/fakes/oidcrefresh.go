@@ -94,6 +94,32 @@ func (i *OIDCIssuer) SetRefreshMint(sub string, opts ...MintOption) {
 	i.flow.refreshMint[sub] = opts
 }
 
+// SetRefreshOmitIDToken makes every later refresh of sub return a rotated
+// refresh token but no id_token (omit false restores it).
+func (i *OIDCIssuer) SetRefreshOmitIDToken(sub string, omit bool) {
+	i.flow.mu.Lock()
+	defer i.flow.mu.Unlock()
+	if i.flow.omitIDToken == nil {
+		i.flow.omitIDToken = map[string]bool{}
+	}
+	i.flow.omitIDToken[sub] = omit
+}
+
+// SetJWKSStatus makes the JWKS endpoint answer status with no keys (0
+// restores it): the signing keys become unreachable while the token
+// endpoint keeps working.
+func (i *OIDCIssuer) SetJWKSStatus(status int) {
+	i.flow.mu.Lock()
+	defer i.flow.mu.Unlock()
+	i.flow.jwksStatus = status
+}
+
+func (i *OIDCIssuer) jwksDown() int {
+	i.flow.mu.Lock()
+	defer i.flow.mu.Unlock()
+	return i.flow.jwksStatus
+}
+
 // SetRefreshRotation chooses whether a refresh returns a new refresh token
 // (true, the default, as Dex does) or none (an IdP that keeps the token).
 func (i *OIDCIssuer) SetRefreshRotation(rotate bool) {
@@ -194,6 +220,7 @@ func (i *OIDCIssuer) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	extra := append([]MintOption(nil), i.flow.refreshMint[c.sub]...)
+	omit := i.flow.omitIDToken[c.sub]
 	resp := map[string]any{"access_token": "fake-access-token", "token_type": "Bearer", "expires_in": int(OIDCTokenTTL.Seconds())}
 	if !i.flow.noRotate {
 		delete(i.flow.chains, presented)
@@ -203,8 +230,10 @@ func (i *OIDCIssuer) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		resp["refresh_token"] = next
 	}
 	i.flow.mu.Unlock()
-	opts := append([]MintOption{Valid(c.sub, c.email), WithAud(c.client), WithAZP(c.client)}, extra...)
-	resp["id_token"] = i.Mint(opts...)
+	if !omit {
+		opts := append([]MintOption{Valid(c.sub, c.email), WithAud(c.client), WithAZP(c.client)}, extra...)
+		resp["id_token"] = i.Mint(opts...)
+	}
 	writeJSON(w, resp)
 }
 

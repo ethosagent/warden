@@ -30,6 +30,10 @@ type LinkStore interface {
 	Rotate(ctx context.Context, iss, sub string, expectedGeneration int64, token string) (portal.IdPLink, error)
 	// SetState writes the refresh columns under the same compare-and-swap.
 	SetState(ctx context.Context, iss, sub string, expectedGeneration int64, st portal.RefreshState) error
+	// Adopt finishes a rotation whose secret write landed but whose row
+	// update did not (stored token == rotation_pending_ref);
+	// portal.ErrLinkInconsistent when the stored token is anything else.
+	Adopt(ctx context.Context, iss, sub string) (portal.IdPLink, error)
 	// Ref is a token's Reference, as idp_links stores it.
 	Ref(token string) string
 }
@@ -39,6 +43,7 @@ var _ LinkStore = (*portal.LinkStore)(nil)
 // TokenClient is the IdP's token endpoint, called as the warden-portal
 // client with grant_type=refresh_token. An error means no answer (transport
 // failure, timeout, discovery not done yet); every HTTP answer is a Result.
+// An error wrapping ErrNotSent means no request left (the token is unspent).
 // The error never carries the token.
 type TokenClient interface {
 	Refresh(ctx context.Context, refreshToken string) (Result, error)
@@ -51,8 +56,10 @@ const (
 	// rotateAttempts bounds the Rotate retries while the rotated token is
 	// held only in memory.
 	rotateAttempts = 3
-	// tokenReadAttempts bounds the re-reads of an inconsistent snapshot.
-	tokenReadAttempts = 3
+	// DefaultKeyRetryWait is how long the job waits before verifying an
+	// unverifiable ID token a second time: past the verifier's 30s JWKS
+	// refetch floor, so the second try fetches the keys again.
+	DefaultKeyRetryWait = 31 * time.Second
 	// rotateTimeout bounds the rotation phase, which runs detached from the
 	// run deadline: the IdP has already consumed the old token.
 	rotateTimeout = 30 * time.Second
@@ -80,6 +87,15 @@ const (
 	// OutcomeSkipped: offboarded, gone, or in a state only a login revives.
 	OutcomeSkipped = "skipped"
 )
+
+// DefaultRotateBackoffs are the waits before the second and third Rotate
+// attempt; together well inside rotateTimeout.
+var DefaultRotateBackoffs = []time.Duration{time.Second, 3 * time.Second}
+
+// ErrNotSent marks a TokenClient error after which no request reached the
+// IdP (no endpoint yet, a request that could not be built): the refresh token
+// is unspent, so the call is not retried.
+var ErrNotSent = errors.New("offboard: refresh request not sent")
 
 // ErrPaused is RunOnce's answer while the job is paused by a config error.
 var ErrPaused = errors.New("offboard: refresh job paused after offboarding_config_error")
@@ -111,8 +127,15 @@ type JobConfig struct {
 	ReauthWarning  time.Duration
 	// FirstRunDelay defaults to DefaultFirstRunDelay.
 	FirstRunDelay time.Duration
-	// RotateBackoff is the wait between Rotate attempts (0: none).
-	RotateBackoff time.Duration
+	// RotateBackoffs are the waits before Rotate attempts 2 and 3 (nil:
+	// DefaultRotateBackoffs).
+	RotateBackoffs []time.Duration
+	// KeyProbe, when set, is called once per run before any refresh: an
+	// error means the issuer's signing keys cannot be fetched, and the run
+	// spends no refresh token.
+	KeyProbe func(ctx context.Context) error
+	// KeyRetryWait defaults to DefaultKeyRetryWait.
+	KeyRetryWait time.Duration
 }
 
 // Job is the IdP refresh job. It has no Offboarder: in this ticket nothing
@@ -141,6 +164,12 @@ func NewJob(cfg JobConfig) (*Job, error) {
 	if cfg.FirstRunDelay <= 0 {
 		cfg.FirstRunDelay = DefaultFirstRunDelay
 	}
+	if cfg.RotateBackoffs == nil {
+		cfg.RotateBackoffs = DefaultRotateBackoffs
+	}
+	if cfg.KeyRetryWait <= 0 {
+		cfg.KeyRetryWait = DefaultKeyRetryWait
+	}
 	j := &Job{cfg: cfg, leader: cfg.Leader, logger: cfg.Logger}
 	if j.leader == nil {
 		j.leader = AlwaysLeader{}
@@ -154,7 +183,9 @@ func NewJob(cfg JobConfig) (*Job, error) {
 // Paused reports whether a 401 invalid_client paused the job.
 func (j *Job) Paused() bool { return j.paused.Load() }
 
-// Resume clears a config-error pause (a config reload that fixed the client).
+// Resume clears a config-error pause. Nothing calls it today: the consent
+// block is not reloaded, so only a control-plane restart resumes the job. It
+// is the hook a future consent reload calls once the client is fixed.
 func (j *Job) Resume() { j.paused.Store(false) }
 
 // Start runs the job in a goroutine until ctx is done: the first run begins
@@ -210,6 +241,40 @@ func (j *Job) RunOnce(ctx context.Context) (RunStats, error) {
 	return j.run(ctx, false)
 }
 
+// runState is what one run shares between its refreshes.
+type runState struct {
+	// halted stops further refreshes in the run: the issuer's keys or
+	// consent.store failed in a way that would cost every later user their
+	// chain.
+	halted   atomic.Bool
+	haltOnce sync.Once
+}
+
+// halt stops the run's remaining refreshes and publishes one issuer-level
+// idp_refresh_unavailable Finding naming the reason.
+func (j *Job) halt(rs *runState, iss, reason string) {
+	rs.halted.Store(true)
+	rs.haltOnce.Do(func() {
+		j.logger.Warn("offboarding_run_halted", "reason", reason)
+		j.publish(Finding{
+			RuleID: RuleRefreshUnavailable, Severity: SeverityMedium,
+			Summary:  "The offboarding refresh run stopped early so no further refresh tokens are spent; the remaining links were left unchanged",
+			Evidence: "reason=" + reason,
+			DedupKey: RuleRefreshUnavailable + ":" + SubHash(iss), Ts: j.cfg.Now(),
+		})
+	})
+}
+
+// heldBack is the outcome of a link a halted run did not refresh: transient,
+// no state written.
+func heldBack(l portal.IdPLink) outcome {
+	o := outcome{iss: l.Iss, sub: l.Sub, name: OutcomeSkipped}
+	if l.OffboardedAt.IsZero() && !terminal(l.State) {
+		o.name, o.class = string(ClassTransient), ClassTransient
+	}
+	return o
+}
+
 // outcome is one link's result in a run.
 type outcome struct {
 	iss, sub string
@@ -240,17 +305,42 @@ func (j *Job) run(ctx context.Context, spread bool) (RunStats, error) {
 		mu   sync.Mutex
 		outs []outcome
 		wg   sync.WaitGroup
+		rs   runState
 	)
+	add := func(o outcome) {
+		j.cfg.Metrics.incRefresh(o.name)
+		mu.Lock()
+		outs = append(outs, o)
+		mu.Unlock()
+	}
+	// No refresh token is spent while the issuer's keys are unreachable:
+	// every refreshed ID token would be unverifiable and its chain lost.
+	if len(links) > 0 && j.cfg.KeyProbe != nil {
+		if err := j.cfg.KeyProbe(rctx); err != nil {
+			j.halt(&rs, links[0].Iss, "keys_unreachable")
+		}
+	}
 	sem := make(chan struct{}, j.cfg.Concurrency)
+	// The run's first IdP call goes alone, so an outage it reveals (keys,
+	// consent.store) halts the run before any other chain is spent.
+	canary := true
+	next := 0
 dispatch:
-	for _, l := range links {
+	for ; next < len(links); next++ {
+		l := links[next]
+		if rs.halted.Load() || j.paused.Load() {
+			break
+		}
 		if spread {
 			if !j.waitUntil(rctx, start.Add(offset(l, window))) {
 				break dispatch
 			}
 		}
-		if j.paused.Load() {
-			break
+		if canary {
+			o := j.refreshOne(rctx, &rs, l)
+			canary = !o.called
+			add(o)
+			continue
 		}
 		select {
 		case sem <- struct{}{}:
@@ -261,14 +351,19 @@ dispatch:
 		go func(l portal.IdPLink) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			o := j.refreshOne(rctx, l)
-			j.cfg.Metrics.incRefresh(o.name)
-			mu.Lock()
-			outs = append(outs, o)
-			mu.Unlock()
+			if rs.halted.Load() {
+				add(heldBack(l))
+				return
+			}
+			add(j.refreshOne(rctx, &rs, l))
 		}(l)
 	}
 	wg.Wait()
+	if rs.halted.Load() {
+		for _, l := range links[next:] {
+			add(heldBack(l))
+		}
+	}
 	stats := j.finish(outs)
 	end := j.cfg.Now()
 	j.cfg.Metrics.setLastRun(end)
@@ -407,7 +502,7 @@ func (j *Job) lifetimeState(l portal.IdPLink, now time.Time) string {
 }
 
 // refreshOne refreshes one link and records its state.
-func (j *Job) refreshOne(ctx context.Context, listed portal.IdPLink) outcome {
+func (j *Job) refreshOne(ctx context.Context, rs *runState, listed portal.IdPLink) outcome {
 	o := outcome{iss: listed.Iss, sub: listed.Sub, name: OutcomeSkipped}
 	if !listed.OffboardedAt.IsZero() || terminal(listed.State) {
 		return o
@@ -428,27 +523,25 @@ func (j *Job) refreshOne(ctx context.Context, listed portal.IdPLink) outcome {
 	if !now.Before(row.RelinkDueAt) {
 		return j.markDue(ctx, row, now)
 	}
-	cctx, cancel := context.WithTimeout(ctx, j.cfg.RequestTimeout)
-	res, err := j.cfg.Client.Refresh(cctx, tok)
-	cancel()
+	res, err := j.call(ctx, tok)
 	o.called = true
 	class, code := classifyResponse(res, err)
 	var claims identity.Claims
 	if class == ClassOK {
-		claims, class, code = j.verify(ctx, row, res)
+		claims, class, code = j.verify(ctx, rs, row, res)
 	}
 	o.class = class
 	now = j.cfg.Now()
 	st := row.RefreshState()
 	switch class {
 	case ClassOK:
-		return j.rotate(ctx, o, row, tok, res.RefreshToken, claims, now)
+		return j.rotate(ctx, rs, o, row, tok, res.RefreshToken, claims, code, now)
 	case ClassConfigError:
 		if j.paused.CompareAndSwap(false, true) {
 			j.logger.Error("offboarding_config_error", "class", string(class))
 			j.publish(Finding{
 				RuleID: RuleConfigError, Severity: SeverityCritical,
-				Summary:  "The IdP rejected the warden-portal client (invalid_client); the offboarding refresh job is paused until restart",
+				Summary:  "The IdP rejected the warden-portal client (invalid_client); the offboarding refresh job is paused until the control plane restarts",
 				Evidence: "status=401 error=invalid_client",
 				DedupKey: RuleConfigError + ":" + SubHash(row.Iss), Ts: now,
 			})
@@ -475,26 +568,65 @@ func (j *Job) refreshOne(ctx context.Context, listed portal.IdPLink) outcome {
 	return o
 }
 
-// readToken takes the token + row snapshot, re-reading an inconsistent one
-// (a split login write is never classified). A non-empty name is the outcome
-// when no token is usable.
+// readToken takes the token + row snapshot. A mismatch under the lock is a
+// persisted split: when the stored token is the job's own pending rotation
+// (its Put landed, its row update did not) the row adopts it; otherwise the
+// link moves to token_lost (store_mismatch) with a Finding, since only a
+// login repairs it. A non-empty name is the outcome when no token is usable.
 func (j *Job) readToken(ctx context.Context, l portal.IdPLink) (string, portal.IdPLink, string) {
-	for range tokenReadAttempts {
-		tok, row, err := j.cfg.Links.TokenAt(ctx, l.Iss, l.Sub)
+	tok, row, err := j.cfg.Links.TokenAt(ctx, l.Iss, l.Sub)
+	if errors.Is(err, portal.ErrLinkInconsistent) {
+		split := row
+		_, aerr := j.cfg.Links.Adopt(ctx, l.Iss, l.Sub)
 		switch {
-		case err == nil:
-			return tok, row, ""
-		case errors.Is(err, portal.ErrLinkInconsistent):
-			continue
-		case errors.Is(err, portal.ErrLinkNotFound):
-			return "", portal.IdPLink{}, OutcomeSkipped
+		case aerr == nil:
+			tok, row, err = j.cfg.Links.TokenAt(ctx, l.Iss, l.Sub)
+		case errors.Is(aerr, portal.ErrLinkInconsistent):
+			j.logger.Warn("offboarding_token_inconsistent", "sub_hash", SubHash(l.Sub))
+			st := split.RefreshState()
+			st.State, st.LastErrorCode = portal.LinkTokenLost, "store_mismatch"
+			if name := j.record(ctx, split, st, OutcomeInconsistent); name == OutcomeStale {
+				return "", portal.IdPLink{}, OutcomeStale
+			}
+			return "", portal.IdPLink{}, OutcomeInconsistent
+		case errors.Is(aerr, portal.ErrStaleGeneration):
+			return "", portal.IdPLink{}, OutcomeStale
 		default:
-			j.logger.Warn("offboarding_token_read_failed", "sub_hash", SubHash(l.Sub), "error_type", fmt.Sprintf("%T", err))
-			return "", portal.IdPLink{}, OutcomeStoreError
+			err = aerr
 		}
 	}
-	j.logger.Warn("offboarding_token_inconsistent", "sub_hash", SubHash(l.Sub))
-	return "", portal.IdPLink{}, OutcomeInconsistent
+	switch {
+	case err == nil:
+		return tok, row, ""
+	case errors.Is(err, portal.ErrLinkNotFound):
+		return "", portal.IdPLink{}, OutcomeSkipped
+	case errors.Is(err, portal.ErrLinkInconsistent):
+		j.logger.Warn("offboarding_token_inconsistent", "sub_hash", SubHash(l.Sub))
+		return "", portal.IdPLink{}, OutcomeInconsistent
+	}
+	j.logger.Warn("offboarding_token_read_failed", "sub_hash", SubHash(l.Sub), "error_type", fmt.Sprintf("%T", err))
+	return "", portal.IdPLink{}, OutcomeStoreError
+}
+
+// call posts the refresh, detached from the run deadline (bounded by
+// RequestTimeout) so a run ending mid-call never strands a consumed token.
+// A request that got no answer is sent once more at once with the same token
+// (the IdP accepts a reuse within its short reuse interval); one that was
+// never sent (ErrNotSent) is not.
+func (j *Job) call(ctx context.Context, tok string) (Result, error) {
+	var (
+		res Result
+		err error
+	)
+	for range 2 {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), j.cfg.RequestTimeout)
+		res, err = j.cfg.Client.Refresh(cctx, tok)
+		cancel()
+		if err == nil || errors.Is(err, ErrNotSent) {
+			break
+		}
+	}
+	return res, err
 }
 
 // markDue marks a link whose relink_due_at has passed reauth_required,
@@ -509,36 +641,73 @@ func (j *Job) markDue(ctx context.Context, l portal.IdPLink, now time.Time) outc
 
 // verify checks the refreshed ID token: valid for the portal client (the
 // Verifier pins iss and aud; no nonce on a refresh) and naming this row's
-// issuer and subject.
-func (j *Job) verify(ctx context.Context, row portal.IdPLink, res Result) (identity.Claims, Class, string) {
+// issuer and subject. The IdP has already consumed the presented token, so
+// anything but ClassOK loses the chain:
+//   - no ID token beside a new refresh token: token_lost;
+//   - keys unreachable or an unknown kid (key rotation): verified once more
+//     after the JWKS refetch floor, then token_lost, and the run halts so no
+//     other chain is spent;
+//   - expired only (clock skew): every other check passed, so it is accepted
+//     with the code id_token_clock_skew;
+//   - a bad signature, wrong issuer, audience or azp, or another subject:
+//     suspect (a sub mismatch also publishes idp_refresh_suspect);
+//   - any other rejection (malformed, TTL, algorithm): token_lost.
+func (j *Job) verify(ctx context.Context, rs *runState, row portal.IdPLink, res Result) (identity.Claims, Class, string) {
 	if res.IDToken == "" {
-		return identity.Claims{}, ClassSuspect, "id_token_missing"
+		return identity.Claims{}, ClassTokenLost, "id_token_missing"
 	}
-	claims, status, _ := j.cfg.Verifier.Verify(ctx, res.IDToken)
+	claims, status, reason := j.cfg.Verifier.Verify(ctx, res.IDToken)
+	keysMissing := func() bool {
+		return status == identity.StatusUnverified || (status == identity.StatusInvalid && reason == identity.ReasonUnknownKID)
+	}
+	if keysMissing() {
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), j.cfg.KeyRetryWait+rotateTimeout)
+		if j.waitUntil(wctx, j.cfg.Now().Add(j.cfg.KeyRetryWait)) {
+			claims, status, reason = j.cfg.Verifier.Verify(wctx, res.IDToken)
+		}
+		cancel()
+		if keysMissing() {
+			j.halt(rs, row.Iss, "keys_unreachable")
+			return identity.Claims{}, ClassTokenLost, "id_token_unverified"
+		}
+	}
+	code := ""
 	switch status {
 	case identity.StatusValid:
-	case identity.StatusUnverified:
-		// The keys could not be fetched. The IdP has already rotated the
-		// token, but an unverified one is never written: the chain is lost.
-		return identity.Claims{}, ClassTokenLost, "id_token_unverified"
+	case identity.StatusExpired:
+		code = "id_token_clock_skew"
+		j.logger.Warn("offboarding_id_token_expired", "sub_hash", SubHash(row.Sub))
 	default:
-		return identity.Claims{}, ClassSuspect, "id_token_invalid"
+		switch reason {
+		case identity.ReasonBadSignature, identity.ReasonWrongIss, identity.ReasonWrongAud, identity.ReasonWrongAZP:
+			return identity.Claims{}, ClassSuspect, "id_token_invalid"
+		}
+		return identity.Claims{}, ClassTokenLost, "id_token_rejected"
 	}
 	if claims.Issuer != row.Iss || claims.Sub != row.Sub {
+		j.publish(Finding{
+			RuleID: RuleRefreshSuspect, Severity: SeverityHigh, Sub: row.Sub,
+			Summary:  "An IdP refresh returned an ID token for a different subject; the token was not stored and the link is marked suspect",
+			Evidence: "code=sub_mismatch",
+			DedupKey: RuleRefreshSuspect + ":" + SubHash(row.Sub), Ts: j.cfg.Now(),
+		})
 		return identity.Claims{}, ClassSuspect, "sub_mismatch"
 	}
-	return claims, ClassOK, ""
+	return claims, ClassOK, code
 }
 
 // rotate writes a verified refresh back. Without a new refresh token (an IdP
 // that does not rotate) only the state is written. Otherwise
 // rotation_pending_ref is set first, then Rotate is tried up to three times
-// while the token is held only in memory; a newer login (ErrStaleGeneration)
-// drops it, and a final failure marks the link token_lost.
-func (j *Job) rotate(ctx context.Context, o outcome, row portal.IdPLink, old, fresh string, claims identity.Claims, now time.Time) outcome {
+// (with RotateBackoffs between) while the token is held only in memory; a
+// newer login (ErrStaleGeneration) drops it. A final failure halts the run.
+// If the Put itself failed the token is gone and the link is token_lost; if
+// the Put may have landed (the row update failed) the pending marker stays
+// and the next run adopts the stored token.
+func (j *Job) rotate(ctx context.Context, rs *runState, o outcome, row portal.IdPLink, old, fresh string, claims identity.Claims, code string, now time.Time) outcome {
 	ok := func(st portal.RefreshState) portal.RefreshState {
 		st.State = j.lifetimeState(row, now)
-		st.LastOKAt, st.ConsecutiveFailures, st.LastErrorCode, st.RotationPendingRef = now, 0, "", ""
+		st.LastOKAt, st.ConsecutiveFailures, st.LastErrorCode, st.RotationPendingRef = now, 0, code, ""
 		if claims.Email != "" {
 			st.Email = claims.Email
 		}
@@ -566,7 +735,8 @@ func (j *Job) rotate(ctx context.Context, o outcome, row portal.IdPLink, old, fr
 		err     error
 	)
 	for attempt := range rotateAttempts {
-		if attempt > 0 && j.cfg.RotateBackoff > 0 && !j.waitUntil(wctx, j.cfg.Now().Add(j.cfg.RotateBackoff)) {
+		if attempt > 0 && attempt-1 < len(j.cfg.RotateBackoffs) && j.cfg.RotateBackoffs[attempt-1] > 0 &&
+			!j.waitUntil(wctx, j.cfg.Now().Add(j.cfg.RotateBackoffs[attempt-1])) {
 			break
 		}
 		rotated, err = j.cfg.Links.Rotate(wctx, row.Iss, row.Sub, row.Generation, fresh)
@@ -583,6 +753,14 @@ func (j *Job) rotate(ctx context.Context, o outcome, row portal.IdPLink, old, fr
 		return o
 	case errors.Is(err, portal.ErrLinkNotFound):
 		o.name = OutcomeSkipped
+		return o
+	}
+	j.halt(rs, row.Iss, "store_write_failed")
+	if !errors.Is(err, portal.ErrLinkSecretStore) {
+		// The Put may have landed: keep rotation_pending_ref so the next run
+		// adopts the stored token instead of losing the chain.
+		j.logger.Warn("offboarding_rotate_failed", "sub_hash", SubHash(row.Sub), "class", OutcomeStoreError, "error_type", fmt.Sprintf("%T", err))
+		o.name = OutcomeStoreError
 		return o
 	}
 	j.logger.Warn("offboarding_rotate_failed", "sub_hash", SubHash(row.Sub), "class", string(ClassTokenLost), "error_type", fmt.Sprintf("%T", err))

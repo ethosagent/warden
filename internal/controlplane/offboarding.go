@@ -1,6 +1,8 @@
 package controlplane
 
 import (
+	"context"
+
 	"github.com/ethosagent/warden/internal/identity/adapters/oidc"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/offboard"
@@ -40,7 +42,7 @@ func (s *Server) initOffboarding() {
 	httpc.Timeout = oc.RequestTimeout
 	provider := p.provider
 	client, err := oidcrefresh.New(oidcrefresh.Config{
-		HTTP: &httpc, ClientID: p.cfg.OIDC.ClientID, ClientSecret: s.cfg.ConsentClientSecret,
+		HTTP: &httpc, ClientID: p.cfg.OIDC.ClientID, ClientSecret: s.cfg.ConsentClientSecret, Issuer: p.cfg.OIDC.Issuer,
 		TokenURL: func() (string, bool) {
 			c, ok := provider.Config()
 			return c.Endpoint.TokenURL, ok && c.Endpoint.TokenURL != ""
@@ -58,6 +60,12 @@ func (s *Server) initOffboarding() {
 		Logger: s.cfg.Logger, Mode: oc.Mode,
 		Interval: oc.Interval, Concurrency: oc.Concurrency, RequestTimeout: oc.RequestTimeout,
 		MaxFailures: oc.MaxFailures, ReauthWarning: oc.ReauthWarning,
+		// Before a run spends any refresh token: are the signing keys there?
+		KeyProbe: func(ctx context.Context) error {
+			pctx, cancel := context.WithTimeout(ctx, oc.RequestTimeout)
+			defer cancel()
+			return client.ProbeKeys(pctx)
+		},
 	})
 	if err != nil {
 		s.cfg.Logger.Error("control plane: offboarding refresh job unavailable", "error", err)

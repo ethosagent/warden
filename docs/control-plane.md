@@ -1066,12 +1066,32 @@ control plane). Each run logs one INFO `offboarding_job_run` line with `checked`
 `warden_cp_offboarding_refresh_total{outcome}` and
 `warden_cp_offboarding_last_run_timestamp_seconds` carry no user label.
 
+**Protecting the chains.** The IdP consumes the presented refresh token on
+every refresh, so a refresh whose answer cannot be verified or stored loses that
+user's chain. Before it spends any token, each run checks that the issuer's
+signing keys can be fetched (discovery `jwks_uri`); if not, the run refreshes
+nobody, leaves every link unchanged and publishes one `idp_refresh_unavailable`
+Finding (`reason=keys_unreachable`). The run's first refresh goes alone. When a
+refreshed ID token stays unverifiable after a second try past the verifier's
+30s key refetch floor, or a rotated token cannot be written to `consent.store`
+after three attempts (1s and 3s apart), the run stops: the remaining links are
+counted transient and left unchanged, and one `idp_refresh_unavailable` Finding
+names the reason (`keys_unreachable` or `store_write_failed`). At most the
+in-flight refreshes lose their chain, not the whole fleet.
+
 **One refresh.** A link whose `relink_due_at` has passed is marked
 `reauth_required` with no IdP call. Otherwise the job reads the row and its
-stored token as one locked snapshot (a token whose Reference does not match the
-row is re-read, never classified), posts `grant_type=refresh_token`, and
-verifies the returned ID token: issuer, audience `warden-portal`, signature,
-expiry (no nonce on a refresh), and `iss`/`sub` equal to the row. It then
+stored token as one locked snapshot. A stored token that is not the one the row
+names is a persisted split: when it is the job's own pending rotation (the
+`consent.store` write landed, the row update did not) the row adopts it
+(`idp_link_rotation_adopted`) and the refresh goes on; anything else moves the
+link to `token_lost` with `last_error_code: store_mismatch` and a Finding. The
+job then posts `grant_type=refresh_token` (detached from the run deadline,
+bounded by `requestTimeout`; a request that got no answer is sent once more at
+once with the same token) and verifies the returned ID token: issuer, audience
+`warden-portal`, signature, expiry (no nonce on a refresh), and `iss`/`sub`
+equal to the row. An ID token that is only expired (clock skew) is accepted
+with `last_error_code: id_token_clock_skew`, since every other check passed. It then
 records the rotation's Reference in `rotation_pending_ref`, writes the rotated
 token with a generation compare-and-swap under the same per-user lock the portal
 callback uses (a login that won in the meantime keeps its token and nothing is
@@ -1090,8 +1110,8 @@ adds `last_ok_at`, `consecutive_failures`, `last_error_code`,
 | `active` | the last refresh worked and the chain is not near its lifetime | none |
 | `expiring` | within `reauthWarning` of `relink_due_at` | one `offboarding_reauth_required` Finding; the user should sign in again |
 | `reauth_required` | `relink_due_at` passed, or the IdP answered `400 invalid_request "Refresh token expired."` | sign in again |
-| `token_lost` | the IdP answered `400` "invalid or has already been claimed" or `invalid_grant` (storage loss, a lost rotation), the rotated token could not be written, or the returned ID token could not be verified because the IdP's keys were unreachable | sign in again; never an offboarding signal |
-| `suspect` | the returned ID token was missing, invalid, or named another subject | investigate; nothing acts on it |
+| `token_lost` | the IdP answered `400` "invalid or has already been claimed" or `invalid_grant` (storage loss, a lost rotation); the rotated token's `consent.store` write failed; a new refresh token came with no ID token (`id_token_missing`), or with one that stayed unverifiable (`id_token_unverified`, keys unreachable or an unknown key id) or was otherwise rejected (`id_token_rejected`); or the stored token matches neither the row nor a pending rotation (`store_mismatch`) | sign in again; never an offboarding signal |
+| `suspect` | the returned ID token had a bad signature or the wrong issuer, audience or `azp` (`id_token_invalid`), or named another subject (`sub_mismatch`, which also publishes a high `idp_refresh_suspect` Finding) | investigate; nothing acts on it |
 | `offboarded` | set by offboarding | none |
 
 `reauth_required`, `token_lost` and `suspect` links are not refreshed again
@@ -1099,8 +1119,9 @@ until a portal login, which resets the link to `active`. Moving into
 `expiring`, `reauth_required` or `token_lost` publishes one medium
 `offboarding_reauth_required` Finding for that user and chain.
 
-**Failures.** No answer, a timeout, `429` and `5xx` (and any answer the table
-does not know) are transient: they increment `consecutive_failures`. When one
+**Failures.** No answer, a timeout, `429`, `5xx`, a `200` that is not a token
+response (`bad_response`) and any answer the table does not know are
+transient: they increment `consecutive_failures`. When one
 user reaches `maxFailures` while the issuer answered other refreshes in the same
 run, a medium `idp_refresh_failing` Finding names that user; when more than half
 of a run's calls to one issuer are transient, one `idp_refresh_unavailable`
@@ -1109,7 +1130,8 @@ connector refusal (`500 invalid_request` with no description) is recorded as
 `last_error_code: upstream_refused` and alerted on nothing yet; it is the only
 answer offboarding enforcement will ever act on, after confirmation. `401
 invalid_client` publishes a critical `offboarding_config_error` Finding and
-pauses the job until the control plane restarts. Findings carry the user's
+pauses the job. Only a control-plane restart resumes it: the `consent:` block
+is not reloaded at runtime, so fix the client secret and restart. Findings carry the user's
 `sub` as their subject, a `sha256(sub)` prefix in the dedup key, and never an
 email, token or IdP error text; log lines carry only the `sha256(sub)` prefix
 and a class.

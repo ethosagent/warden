@@ -17,8 +17,10 @@ const (
 	// RuleRefreshUnavailable: more than half of a run's refreshes against one
 	// issuer were transient failures.
 	RuleRefreshUnavailable = "idp_refresh_unavailable"
+	// RuleRefreshSuspect: a refresh returned an ID token for another subject.
+	RuleRefreshSuspect = "idp_refresh_suspect"
 	// RuleConfigError: the IdP rejected the warden-portal client (401
-	// invalid_client); the job pauses until restart.
+	// invalid_client); the job pauses until the control plane restarts.
 	RuleConfigError = "offboarding_config_error"
 )
 

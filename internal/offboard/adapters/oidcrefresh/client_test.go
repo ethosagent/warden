@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethosagent/warden/internal/offboard"
 	"github.com/ethosagent/warden/internal/offboard/adapters/oidcrefresh"
 )
 
@@ -109,5 +110,52 @@ func TestClientNoAnswer(t *testing.T) {
 		if _, err := oidcrefresh.New(cfg); err == nil {
 			t.Errorf("New(%+v) accepted an incomplete config", cfg)
 		}
+	}
+}
+
+func TestClientProbeKeys(t *testing.T) {
+	var jwksStatus int
+	var keys string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"jwks_uri":"` + srv.URL + `/jwks"}`))
+	})
+	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		if jwksStatus != 0 {
+			w.WriteHeader(jwksStatus)
+			return
+		}
+		_, _ = w.Write([]byte(keys))
+	})
+	c, err := oidcrefresh.New(oidcrefresh.Config{
+		HTTP: srv.Client(), ClientID: "c", Issuer: srv.URL,
+		TokenURL: func() (string, bool) { return srv.URL + "/token", true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys = `{"keys":[{"kty":"RSA"}]}`
+	if err := c.ProbeKeys(context.Background()); err != nil {
+		t.Fatalf("probe with keys = %v", err)
+	}
+	keys = `{"keys":[]}`
+	if err := c.ProbeKeys(context.Background()); err == nil {
+		t.Fatal("an empty key set passed the probe")
+	}
+	jwksStatus = http.StatusServiceUnavailable
+	if err := c.ProbeKeys(context.Background()); err == nil {
+		t.Fatal("an unreachable key set passed the probe")
+	}
+	noIss, err := oidcrefresh.New(oidcrefresh.Config{HTTP: srv.Client(), ClientID: "c", TokenURL: func() (string, bool) { return "", false }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := noIss.ProbeKeys(context.Background()); err == nil {
+		t.Fatal("a probe without an issuer passed")
+	}
+	if _, err := noIss.Refresh(context.Background(), secretToken); !errors.Is(err, offboard.ErrNotSent) {
+		t.Fatalf("not ready = %v, want ErrNotSent", err)
 	}
 }

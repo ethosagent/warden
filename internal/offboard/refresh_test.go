@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"reflect"
@@ -150,6 +151,11 @@ type rigOpts struct {
 	maxFailures int
 	leader      offboard.Leader
 	interval    time.Duration
+	// noProbe leaves JobConfig.KeyProbe unset.
+	noProbe bool
+	// repo wraps the idp_links repo; client wraps the token client.
+	repo   func(portal.LinkRepo) portal.LinkRepo
+	client func(offboard.TokenClient) offboard.TokenClient
 }
 
 func newRig(t *testing.T, o rigOpts) *rig {
@@ -165,8 +171,12 @@ func newRig(t *testing.T, o rigOpts) *rig {
 	logs := &syncBuf{}
 	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	mem := &countingSecrets{MemorySecretStore: fakes.NewMemorySecretStore()}
+	var repo portal.LinkRepo = idplinksqlite.New(db)
+	if o.repo != nil {
+		repo = o.repo(repo)
+	}
 	links, err := portal.NewLinkStore(portal.LinkStoreConfig{
-		Repo: idplinksqlite.New(db), Secrets: mem,
+		Repo: repo, Secrets: mem,
 		Keys: portal.LinkKeys{
 			UserKey: secrets.UserKey, SecretKey: secrets.IdPLinkKey,
 			Ref: func(tok string) string { return secrets.Ref(tok).String() },
@@ -181,7 +191,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 		t.Fatal(err)
 	}
 	client, err := oidcrefresh.New(oidcrefresh.Config{
-		HTTP: httpc, ClientID: clientID, ClientSecret: clientSecret,
+		HTTP: httpc, ClientID: clientID, ClientSecret: clientSecret, Issuer: idp.Issuer(),
 		TokenURL: func() (string, bool) { return idp.Issuer() + "/token", true },
 	})
 	if err != nil {
@@ -198,10 +208,18 @@ func newRig(t *testing.T, o rigOpts) *rig {
 		o.interval = time.Hour
 	}
 	spy := &spyLinks{LinkStore: links}
+	var tc offboard.TokenClient = client
+	if o.client != nil {
+		tc = o.client(client)
+	}
+	var probe func(context.Context) error
+	if !o.noProbe {
+		probe = client.ProbeKeys
+	}
 	pub := &findings{}
 	m := offboard.NewMetrics()
 	job, err := offboard.NewJob(offboard.JobConfig{
-		Links: spy, Client: client, Verifier: verifier, Now: clk.Now, After: clk.After, Leader: o.leader,
+		Links: spy, Client: tc, KeyProbe: probe, Verifier: verifier, Now: clk.Now, After: clk.After, Leader: o.leader,
 		Findings: pub, Metrics: m, Logger: logger, Mode: "observe",
 		Interval: o.interval, Concurrency: 4, RequestTimeout: 5 * time.Second,
 		MaxFailures: o.maxFailures, ReauthWarning: 72 * time.Hour,
@@ -242,13 +260,43 @@ func (r *rig) stored(sub string) string {
 	return v
 }
 
+// runOnce runs RunOnce, advancing the fake clock only while the run waits on
+// it (the Rotate backoffs, the JWKS retry wait).
 func (r *rig) runOnce() offboard.RunStats {
 	r.t.Helper()
-	st, err := r.job.RunOnce(context.Background())
+	st, err := r.runOnceErr()
 	if err != nil {
 		r.t.Fatalf("RunOnce: %v", err)
 	}
 	return st
+}
+
+func (r *rig) runOnceErr() (offboard.RunStats, error) {
+	r.t.Helper()
+	type result struct {
+		st  offboard.RunStats
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		st, err := r.job.RunOnce(context.Background())
+		done <- result{st, err}
+	}()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		select {
+		case res := <-done:
+			return res.st, res.err
+		default:
+		}
+		if time.Now().After(deadline) {
+			r.t.Fatal("RunOnce did not finish")
+		}
+		if r.clk.PendingTimers() > 0 {
+			r.clk.Advance(time.Second)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func (r *rig) noSecretInLogs(values ...string) {
@@ -574,6 +622,9 @@ func TestRefreshJob_Classification(t *testing.T) {
 		{"500 server_error", fakes.RefreshFailure{Status: 500, Error: "server_error"}, nil, portal.LinkActive, "http_500", "transient"},
 		{"unknown 400", fakes.RefreshFailure{Status: 400, Error: "invalid_scope"}, nil, portal.LinkActive, "http_400", "transient"},
 		{"sub mismatch", fakes.RefreshFailure{}, []fakes.MintOption{fakes.WithSub("mallory")}, portal.LinkSuspect, "sub_mismatch", "suspect"},
+		{"200 without tokens", fakes.RefreshFailure{Status: 200}, nil, portal.LinkActive, "bad_response", "transient"},
+		{"expired id token (clock skew)", fakes.RefreshFailure{}, []fakes.MintOption{fakes.Expired()}, portal.LinkActive, "id_token_clock_skew", "ok"},
+		{"unknown kid", fakes.RefreshFailure{}, []fakes.MintOption{fakes.WithUnpublishedKey()}, portal.LinkTokenLost, "id_token_unverified", "token_lost"},
 		{"wrong audience", fakes.RefreshFailure{}, []fakes.MintOption{fakes.WithAud("warden-console"), fakes.WithAZP("warden-console")}, portal.LinkSuspect, "id_token_invalid", "suspect"},
 	}
 	for _, tc := range cases {
@@ -590,8 +641,14 @@ func TestRefreshJob_Classification(t *testing.T) {
 			if l.State != tc.wantState || l.LastErrorCode != tc.wantCode || r.metrics.Refresh(tc.wantName) != 1 {
 				t.Fatalf("state %q code %q outcomes %v; want %q %q %s", l.State, l.LastErrorCode, r.metrics.Outcomes(), tc.wantState, tc.wantCode, tc.wantName)
 			}
-			if tc.wantState == portal.LinkSuspect && r.stored("dana") != tok {
-				t.Fatal("a suspect refresh wrote its token")
+			if tc.wantName != "ok" && r.stored("dana") != tok {
+				t.Fatal("a refresh that did not verify wrote its token")
+			}
+			if tc.wantName == "ok" && r.stored("dana") == tok {
+				t.Fatal("an accepted refresh did not write its token")
+			}
+			if n := len(r.pub.rule(offboard.RuleRefreshSuspect)); (tc.wantCode == "sub_mismatch") != (n == 1) {
+				t.Fatalf("idp_refresh_suspect findings = %d", n)
 			}
 			r.noSecretInLogs(tok)
 		})
@@ -644,8 +701,218 @@ func TestRefreshJob_InconsistentSnapshot(t *testing.T) {
 	if st.Inconsistent != 1 || r.idp.RefreshRequests() != 0 {
 		t.Fatalf("stats = %+v, refresh calls %d", st, r.idp.RefreshRequests())
 	}
-	if after := r.row("dana"); !reflect.DeepEqual(after, before) {
-		t.Fatalf("row changed: %+v", after)
+	// Not the job's own pending rotation, so not adoptable: the link is made
+	// visible (token_lost, store_mismatch, a Finding), never silently kept.
+	after := r.row("dana")
+	if after.State != portal.LinkTokenLost || after.LastErrorCode != "store_mismatch" ||
+		after.Generation != before.Generation || after.RefreshRef != before.RefreshRef {
+		t.Fatalf("row = %+v", after)
+	}
+	if fs := r.pub.rule(offboard.RuleReauthRequired); len(fs) != 1 || fs[0].Evidence != "link_state=token_lost" {
+		t.Fatalf("findings = %+v", fs)
+	}
+	r.noSecretInLogs("rt-someone-else-000051")
+}
+
+// failingRotateRepo fails the idp_links row update of a rotation (after the
+// secret Put landed) while fail is set.
+type failingRotateRepo struct {
+	portal.LinkRepo
+	fail atomic.Bool
+}
+
+func (f *failingRotateRepo) Rotate(ctx context.Context, iss, sub string, gen int64, ref string, at time.Time, status string) error {
+	if f.fail.Load() {
+		return errors.New("database is locked")
+	}
+	return f.LinkRepo.Rotate(ctx, iss, sub, gen, ref, at, status)
+}
+
+// TestRefreshJob_AdoptsSplitRotation: the rotated token's Put landed but the
+// row update failed every attempt. The link is not token_lost; the pending
+// marker stays, the run halts, and the next run adopts the stored token and
+// refreshes with it.
+func TestRefreshJob_AdoptsSplitRotation(t *testing.T) {
+	repo := &failingRotateRepo{}
+	r := newRig(t, rigOpts{repo: func(base portal.LinkRepo) portal.LinkRepo { repo.LinkRepo = base; return repo }})
+	r.login("dana", "rt-dana-login-token-000080")
+	before := r.row("dana")
+	repo.fail.Store(true)
+	st := r.runOnce()
+	if st.StoreError != 1 || st.TokenLost != 0 {
+		t.Fatalf("stats = %+v, want store_error and no token_lost", st)
+	}
+	rotated := r.idp.LastIssuedRefreshToken()
+	split := r.row("dana")
+	if r.stored("dana") != rotated || split.State != portal.LinkActive || split.Generation != before.Generation ||
+		split.RotationPendingRef != secrets.Ref(rotated).String() || split.RefreshRef != before.RefreshRef {
+		t.Fatalf("after the split: stored-is-rotated=%v row=%+v", r.stored("dana") == rotated, split)
+	}
+	if fs := r.pub.rule(offboard.RuleRefreshUnavailable); len(fs) != 1 || fs[0].Evidence != "reason=store_write_failed" {
+		t.Fatalf("findings = %+v", fs)
+	}
+	repo.fail.Store(false)
+	if st := r.runOnce(); st.OK != 1 {
+		t.Fatalf("next run = %+v, want ok after adopting", st)
+	}
+	l := r.row("dana")
+	if l.State != portal.LinkActive || l.RotationPendingRef != "" || l.Generation != before.Generation+2 ||
+		r.stored("dana") == rotated || !r.idp.LiveRefreshToken(r.stored("dana")) || l.RefreshRef != secrets.Ref(r.stored("dana")).String() {
+		t.Fatalf("after adopting = %+v", l)
+	}
+	if !strings.Contains(r.logs.String(), `"msg":"idp_link_rotation_adopted"`) {
+		t.Fatal("no idp_link_rotation_adopted line")
+	}
+}
+
+// TestRefreshJob_StoreOutageHalts: consent.store denies every Put. The run's
+// first refresh goes alone, loses its chain and halts the run: no other user
+// is refreshed or changed, and one issuer-level Finding names the reason.
+func TestRefreshJob_StoreOutageHalts(t *testing.T) {
+	r := newRig(t, rigOpts{})
+	subs := []string{"ana", "ben", "cy", "dee", "eve"}
+	for _, s := range subs {
+		r.login(s, "rt-"+s+"-login-token-000090")
+	}
+	r.mem.failPut.Store(true)
+	st := r.runOnce()
+	if st.TokenLost != 1 || st.Transient != len(subs)-1 || r.idp.RefreshRequests() != 1 {
+		t.Fatalf("stats = %+v, refresh calls %d; want one chain spent", st, r.idp.RefreshRequests())
+	}
+	lost := 0
+	for _, s := range subs {
+		l := r.row(s)
+		switch l.State {
+		case portal.LinkTokenLost:
+			lost++
+		case portal.LinkActive:
+			if l.LastErrorCode != "" || l.ConsecutiveFailures != 0 || r.stored(s) != "rt-"+s+"-login-token-000090" {
+				t.Fatalf("%s was touched: %+v", s, l)
+			}
+		default:
+			t.Fatalf("%s state %q", s, l.State)
+		}
+	}
+	if lost != 1 {
+		t.Fatalf("token_lost users = %d, want 1", lost)
+	}
+	if fs := r.pub.rule(offboard.RuleRefreshUnavailable); len(fs) != 1 || fs[0].Evidence != "reason=store_write_failed" || fs[0].Sub != "" {
+		t.Fatalf("issuer findings = %+v", fs)
+	}
+}
+
+// TestRefreshJob_KeysUnreachable: with the signing keys unreachable for the
+// whole run no refresh token is spent (the probe stops the run); without the
+// probe, the first refresh is the only chain spent and nobody else is
+// touched.
+func TestRefreshJob_KeysUnreachable(t *testing.T) {
+	subs := []string{"ana", "ben", "cy", "dee"}
+	t.Run("probe", func(t *testing.T) {
+		r := newRig(t, rigOpts{})
+		for _, s := range subs {
+			r.login(s, "rt-"+s+"-login-token-000100")
+		}
+		r.idp.SetJWKSStatus(503)
+		st := r.runOnce()
+		if r.idp.RefreshRequests() != 0 || st.Transient != len(subs) || st.TokenLost != 0 {
+			t.Fatalf("stats = %+v, refresh calls %d; want none", st, r.idp.RefreshRequests())
+		}
+		for _, s := range subs {
+			if l := r.row(s); l.State != portal.LinkActive || l.ConsecutiveFailures != 0 || l.LastErrorCode != "" {
+				t.Fatalf("%s changed: %+v", s, l)
+			}
+		}
+		if fs := r.pub.rule(offboard.RuleRefreshUnavailable); len(fs) != 1 || fs[0].Evidence != "reason=keys_unreachable" {
+			t.Fatalf("findings = %+v", fs)
+		}
+	})
+	t.Run("id_token_unverified", func(t *testing.T) {
+		r := newRig(t, rigOpts{noProbe: true})
+		for _, s := range subs {
+			r.login(s, "rt-"+s+"-login-token-000101")
+		}
+		r.idp.SetJWKSStatus(503)
+		st := r.runOnce()
+		if r.idp.RefreshRequests() != 1 || st.TokenLost != 1 || st.Transient != len(subs)-1 {
+			t.Fatalf("stats = %+v, refresh calls %d; want one chain spent", st, r.idp.RefreshRequests())
+		}
+		rotated := r.idp.LastIssuedRefreshToken()
+		for _, s := range subs {
+			l := r.row(s)
+			if r.stored(s) == rotated {
+				t.Fatalf("%s: the unverified rotated token was written", s)
+			}
+			if l.State == portal.LinkTokenLost && l.LastErrorCode != "id_token_unverified" {
+				t.Fatalf("%s: %+v", s, l)
+			}
+		}
+		if fs := r.pub.rule(offboard.RuleRefreshUnavailable); len(fs) != 1 || fs[0].Evidence != "reason=keys_unreachable" {
+			t.Fatalf("findings = %+v", fs)
+		}
+		r.noSecretInLogs(rotated)
+	})
+}
+
+// TestRefreshJob_IDTokenMissing: a new refresh token with no ID token is not
+// written (it cannot be checked) and the chain is reported lost.
+func TestRefreshJob_IDTokenMissing(t *testing.T) {
+	r := newRig(t, rigOpts{})
+	const tok = "rt-dana-login-token-000110"
+	r.login("dana", tok)
+	r.idp.SetRefreshOmitIDToken("dana", true)
+	if st := r.runOnce(); st.TokenLost != 1 {
+		t.Fatalf("stats = %+v", st)
+	}
+	l := r.row("dana")
+	if l.State != portal.LinkTokenLost || l.LastErrorCode != "id_token_missing" || r.stored("dana") != tok || l.RotationPendingRef != "" {
+		t.Fatalf("row = %+v", l)
+	}
+	r.noSecretInLogs(tok, r.idp.LastIssuedRefreshToken())
+}
+
+// flakyClient drops the first call's answer (as a reset connection would).
+type flakyClient struct {
+	offboard.TokenClient
+	mu     sync.Mutex
+	tokens []string
+	errs   []error
+}
+
+func (f *flakyClient) Refresh(ctx context.Context, tok string) (offboard.Result, error) {
+	f.mu.Lock()
+	f.tokens = append(f.tokens, tok)
+	var e error
+	if len(f.errs) > 0 {
+		e, f.errs = f.errs[0], f.errs[1:]
+	}
+	f.mu.Unlock()
+	if e != nil {
+		return offboard.Result{}, e
+	}
+	return f.TokenClient.Refresh(ctx, tok)
+}
+
+// TestRefreshJob_NoAnswerRetry: a request with no answer is sent once more
+// with the same token; one that was never sent is not.
+func TestRefreshJob_NoAnswerRetry(t *testing.T) {
+	fc := &flakyClient{errs: []error{errors.New("connection reset by peer")}}
+	r := newRig(t, rigOpts{client: func(c offboard.TokenClient) offboard.TokenClient { fc.TokenClient = c; return fc }})
+	r.login("dana", "rt-dana-login-token-000120")
+	if st := r.runOnce(); st.OK != 1 {
+		t.Fatalf("stats = %+v", st)
+	}
+	if len(fc.tokens) != 2 || fc.tokens[0] != fc.tokens[1] {
+		t.Fatalf("calls = %d (same token: %v), want 2 with the same token", len(fc.tokens), len(fc.tokens) == 2 && fc.tokens[0] == fc.tokens[1])
+	}
+	fc.mu.Lock()
+	fc.tokens, fc.errs = nil, []error{fmt.Errorf("no endpoint yet: %w", offboard.ErrNotSent)}
+	fc.mu.Unlock()
+	r.clk.Advance(time.Hour)
+	if st := r.runOnce(); st.Transient != 1 || len(fc.tokens) != 1 {
+		t.Fatalf("not sent: stats = %+v, calls %d; want one call, transient", st, len(fc.tokens))
+	}
+	if l := r.row("dana"); l.LastErrorCode != "not_sent" {
+		t.Fatalf("row = %+v", l)
 	}
 }
 
@@ -731,21 +998,42 @@ func pollAdvance(t *testing.T, clk *clocktest.Fake, cond func() bool) {
 }
 
 // TestRefreshJob_NoOffboarderSeam: observe mode cannot offboard because the
-// job has no seam that could: no field or method of the job or its config
-// names offboarding.
+// job has no seam that could. JobConfig's fields are pinned to an explicit
+// allowlist (a new seam is a reviewed change to this list), and no field or
+// method of the job names offboarding.
 func TestRefreshJob_NoOffboarderSeam(t *testing.T) {
-	for _, typ := range []reflect.Type{reflect.TypeOf(offboard.JobConfig{}), reflect.TypeOf(&offboard.Job{})} {
-		if typ.Kind() == reflect.Struct {
-			for i := range typ.NumField() {
-				if strings.Contains(strings.ToLower(typ.Field(i).Name), "offboard") {
-					t.Errorf("%s has field %s", typ, typ.Field(i).Name)
-				}
-			}
+	allowed := map[string]string{
+		"Links": "offboard.LinkStore", "Client": "offboard.TokenClient", "Verifier": "identity.Verifier",
+		"Now": "func() time.Time", "After": "func(time.Duration) <-chan time.Time",
+		"Leader": "offboard.Leader", "Findings": "offboard.FindingPublisher", "Metrics": "*offboard.Metrics",
+		"Logger": "*slog.Logger", "Mode": "string", "Interval": "time.Duration", "Concurrency": "int",
+		"RequestTimeout": "time.Duration", "MaxFailures": "int", "ReauthWarning": "time.Duration",
+		"FirstRunDelay": "time.Duration", "RotateBackoffs": "[]time.Duration",
+		"KeyProbe": "func(context.Context) error", "KeyRetryWait": "time.Duration",
+	}
+	cfg := reflect.TypeOf(offboard.JobConfig{})
+	seen := map[string]bool{}
+	for i := range cfg.NumField() {
+		f := cfg.Field(i)
+		seen[f.Name] = true
+		if want, ok := allowed[f.Name]; !ok || f.Type.String() != want {
+			t.Errorf("JobConfig.%s %s is not on the allowlist (want %q): a new seam needs review", f.Name, f.Type, want)
 		}
-		for i := range typ.NumMethod() {
-			if strings.Contains(strings.ToLower(typ.Method(i).Name), "offboard") {
-				t.Errorf("%s has method %s", typ, typ.Method(i).Name)
-			}
+	}
+	for name := range allowed {
+		if !seen[name] {
+			t.Errorf("allowlisted JobConfig.%s no longer exists; drop it", name)
+		}
+	}
+	job := reflect.TypeOf(&offboard.Job{})
+	for i := range job.NumMethod() {
+		if strings.Contains(strings.ToLower(job.Method(i).Name), "offboard") {
+			t.Errorf("Job has method %s", job.Method(i).Name)
+		}
+	}
+	for i := range job.Elem().NumField() {
+		if strings.Contains(strings.ToLower(job.Elem().Field(i).Name), "offboard") {
+			t.Errorf("Job has field %s", job.Elem().Field(i).Name)
 		}
 	}
 }

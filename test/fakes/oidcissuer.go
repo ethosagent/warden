@@ -242,6 +242,10 @@ func (i *OIDCIssuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 
 func (i *OIDCIssuer) handleJWKS(w http.ResponseWriter, _ *http.Request) {
 	i.jwksReqs.Add(1)
+	if st := i.jwksDown(); st != 0 {
+		http.Error(w, "fake jwks failure", st)
+		return
+	}
 	i.mu.Lock()
 	keys := make([]map[string]string, 0, len(i.keys))
 	for _, k := range i.keys {

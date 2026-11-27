@@ -85,12 +85,19 @@ func (r Result) GoString() string { return r.String() }
 // fixed word, never IdP text.
 func classifyResponse(r Result, err error) (Class, string) {
 	if err != nil {
+		if errors.Is(err, ErrNotSent) {
+			return ClassTransient, "not_sent"
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			return ClassTransient, "timeout"
 		}
 		return ClassTransient, "unreachable"
 	}
 	switch {
+	case r.Status == statusOK && r.RefreshToken == "" && r.IDToken == "":
+		// Not a token response (an error page, a proxy): nothing was
+		// issued, so nothing is lost.
+		return ClassTransient, "bad_response"
 	case r.Status == statusOK:
 		return ClassOK, ""
 	case r.Status == statusUnauthorized && r.ErrorCode == "invalid_client":
