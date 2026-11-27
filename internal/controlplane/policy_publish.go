@@ -162,11 +162,17 @@ func (s *Server) publish(ctx context.Context, clr approvals.Clearance, author Po
 		return 0, false, fmt.Errorf("controlplane: read policy head: %w", err)
 	}
 	headKey := credentialOf(doc)
+	headCaps := wireCostCaps(doc)
 	if err := mutate(&doc); err != nil {
 		return 0, false, err
 	}
 	if err := s.validateDoc(doc); err != nil {
 		return 0, false, &dashboard.InvalidPolicyError{Err: err}
+	}
+	// Workers may have changed since a draft was held: the cost-cap rollout
+	// guard runs again on the doc being published.
+	if err := s.costCapGuard(ctx, headCaps, wireCostCaps(doc)); err != nil {
+		return 0, false, err
 	}
 	return s.publishLocked(ctx, clr, author, head, headKey, doc, meta, source)
 }
@@ -250,6 +256,7 @@ func (s *Server) writeVersioned(ctx context.Context, w versionedWrite) (int64, b
 	headKey := credentialOf(doc)
 	baseDoc := draftDoc(RedactCredentials(doc))
 	headSettings := doc.Settings.DeepCopy()
+	headCaps := wireCostCaps(doc)
 	if err := w.mutate(&doc); err != nil {
 		return 0, false, err
 	}
@@ -263,6 +270,11 @@ func (s *Server) writeVersioned(ctx context.Context, w versionedWrite) (int64, b
 		newSettings = *doc.Settings
 	}
 	if err := s.requireGuard(ctx, headSettings, newSettings); err != nil {
+		return 0, false, err
+	}
+	// The cost-cap rollout guard: a new dailyCostUSD needs usercost/v1 on
+	// every connected worker.
+	if err := s.costCapGuard(ctx, headCaps, wireCostCaps(doc)); err != nil {
 		return 0, false, err
 	}
 	if doc.Settings != nil {

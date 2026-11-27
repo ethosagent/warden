@@ -245,7 +245,7 @@ func writeWriterError(w http.ResponseWriter, err error) {
 	}
 	var wl *WorkersLackCapabilityError
 	if errors.As(err, &wl) {
-		writeJSONStatus(w, http.StatusConflict, workersLackResponse{Error: "workers_lack_capability", Workers: append([]string{}, wl.Workers...)})
+		writeJSONStatus(w, http.StatusConflict, workersLackResponse{Error: "workers_lack_capability", Capability: wl.Capability, Workers: append([]string{}, wl.Workers...)})
 		return
 	}
 	var ce *ConflictError
