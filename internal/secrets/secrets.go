@@ -57,7 +57,7 @@ func (f *EnvFetcher) Fetch(placeholder string) (string, error) {
 	}
 	val, ok := os.LookupEnv(envVar)
 	if !ok {
-		return "", fmt.Errorf("secrets: env var %q not set for placeholder %q", envVar, placeholder)
+		return "", fmt.Errorf("secrets: env var %q not set for placeholder %q: %w", envVar, placeholder, ErrNotFound)
 	}
 	return val, nil
 }
