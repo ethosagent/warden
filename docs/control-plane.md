@@ -1027,6 +1027,102 @@ creates the session, so offboarding can later refresh it to detect disabled user
   `idp_link`, `target_ref` the user key). The token is never logged or recorded.
   `GET /portal` shows the link status, generation and when to sign in again.
 
+### Offboarding refresh job (`consent.offboarding`)
+
+With `consent.offboarding.mode: observe` (or `enforce`), the consent block,
+`--state-dir` and the IdP link on, the control plane runs a job that refreshes
+each portal user's stored IdP refresh token with the standard OIDC
+`refresh_token` grant against the IdP's token endpoint, as the `warden-portal`
+client (`consent.oidc`: the portal's lazily discovered token endpoint, the shared
+OIDC HTTP client and its `clientSecretEnv`). Dex is never called through its own
+APIs. The job only observes in this release: it records each link's state and
+publishes Findings, and it has no way to offboard anyone. `enforce` is accepted
+and behaves as `observe` until enforcement ships. With `mode: off` (the default)
+nothing is built, no goroutine starts and `/policy` is byte-identical.
+
+```yaml
+consent:
+  # ... oidc, idpLink, store as above
+  offboarding:
+    mode: off              # off | observe | enforce (enforce = observe for now)
+    interval: 1h           # 5m-24h; keep it well below the IdP's idle refresh
+                           # lifetime (Dex expiry.refreshTokens.validIfNotUsedFor, 168h)
+    concurrency: 4         # 1-32 refreshes in flight
+    requestTimeout: 10s    # one token-endpoint call; 1s-2m and below interval/2
+    maxFailures: 3         # consecutive transient failures before idp_refresh_failing
+    reauthWarning: 72h     # move a link to expiring this long before relink_due_at
+```
+
+The block is CP-local like the rest of `consent:` and never reaches workers.
+
+**Schedule.** The first run starts one minute after the control plane starts,
+then one run per `interval`. Inside a run each link is refreshed at its own
+`sha256(iss, sub)` offset within the first 2/5 of the interval, with at most
+`concurrency` calls in flight and a run deadline of `interval/2`. The job asks a
+leader check at the start of every run (always true for the single SQLite
+control plane). Each run logs one INFO `offboarding_job_run` line with `checked`,
+`ok`, `transient`, `expired`, `token_lost`, `suspect`, `upstream_refused`,
+`stale`, `store_error`, `skipped` and `duration_ms`. In-memory counters
+`warden_cp_offboarding_refresh_total{outcome}` and
+`warden_cp_offboarding_last_run_timestamp_seconds` carry no user label.
+
+**One refresh.** A link whose `relink_due_at` has passed is marked
+`reauth_required` with no IdP call. Otherwise the job reads the row and its
+stored token as one locked snapshot (a token whose Reference does not match the
+row is re-read, never classified), posts `grant_type=refresh_token`, and
+verifies the returned ID token: issuer, audience `warden-portal`, signature,
+expiry (no nonce on a refresh), and `iss`/`sub` equal to the row. It then
+records the rotation's Reference in `rotation_pending_ref`, writes the rotated
+token with a generation compare-and-swap under the same per-user lock the portal
+callback uses (a login that won in the meantime keeps its token and nothing is
+written), retries a failed store write up to three times while the new token is
+held only in memory, and clears `rotation_pending_ref`. Email and
+`email_verified` come from the verified ID token. Every state write is the same
+generation compare-and-swap, so a verdict about an older token never lands on a
+row a newer login wrote.
+
+**Link states** (`idp_links.link_state`, migration `idp_links/0002`, which also
+adds `last_ok_at`, `consecutive_failures`, `last_error_code`,
+`rotation_pending_ref` and `email_verified`; none holds a token):
+
+| State | Meaning | Next step |
+|---|---|---|
+| `active` | the last refresh worked and the chain is not near its lifetime | none |
+| `expiring` | within `reauthWarning` of `relink_due_at` | one `offboarding_reauth_required` Finding; the user should sign in again |
+| `reauth_required` | `relink_due_at` passed, or the IdP answered `400 invalid_request "Refresh token expired."` | sign in again |
+| `token_lost` | the IdP answered `400` "invalid or has already been claimed" or `invalid_grant` (storage loss, a lost rotation), the rotated token could not be written, or the returned ID token could not be verified because the IdP's keys were unreachable | sign in again; never an offboarding signal |
+| `suspect` | the returned ID token was missing, invalid, or named another subject | investigate; nothing acts on it |
+| `offboarded` | set by offboarding | none |
+
+`reauth_required`, `token_lost` and `suspect` links are not refreshed again
+until a portal login, which resets the link to `active`. Moving into
+`expiring`, `reauth_required` or `token_lost` publishes one medium
+`offboarding_reauth_required` Finding for that user and chain.
+
+**Failures.** No answer, a timeout, `429` and `5xx` (and any answer the table
+does not know) are transient: they increment `consecutive_failures`. When one
+user reaches `maxFailures` while the issuer answered other refreshes in the same
+run, a medium `idp_refresh_failing` Finding names that user; when more than half
+of a run's calls to one issuer are transient, one `idp_refresh_unavailable`
+Finding names the issuer instead and no per-user Finding is published. Dex's
+connector refusal (`500 invalid_request` with no description) is recorded as
+`last_error_code: upstream_refused` and alerted on nothing yet; it is the only
+answer offboarding enforcement will ever act on, after confirmation. `401
+invalid_client` publishes a critical `offboarding_config_error` Finding and
+pauses the job until the control plane restarts. Findings carry the user's
+`sub` as their subject, a `sha256(sub)` prefix in the dedup key, and never an
+email, token or IdP error text; log lines carry only the `sha256(sub)` prefix
+and a class.
+
+**Detection depends on the IdP.** A refresh fails for a disabled user only if the
+upstream connector re-checks the user on refresh. Dex's LDAP connector fails a
+refresh only when `userSearch` no longer finds the user, so its
+`userSearch.filter` must exclude disabled accounts, for example
+`(!(userAccountControl:1.2.840.113556.1.4.803:=2))` on Active Directory or
+`(!(nsAccountLock=TRUE))` on 389 DS and FreeIPA (see the commented example in
+`deploy/compose/dex/config.yaml`). SAML and some upstream OIDC setups never
+report a disabled user on refresh.
+
 ## API keys (`console.apiKeys`)
 
 Scripts and CI can call the admin API with a scoped, expiring `wak_` key instead of

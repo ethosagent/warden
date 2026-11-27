@@ -86,6 +86,13 @@ connectors:
       bindPW: $LDAP_BIND_PW
       userSearch:
         baseDN: ou=people,dc=example,dc=org
+        # Warden's offboarding refresh job (consent.offboarding) detects a
+        # disabled user only when Dex's refresh no longer finds them here, so
+        # in production this filter must exclude disabled accounts, e.g.:
+        #   Active Directory (userAccountControl bit 2, ACCOUNTDISABLE):
+        #     filter: "(&(objectClass=person)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
+        #   389 DS / FreeIPA (nsAccountLock):
+        #     filter: "(&(objectClass=inetOrgPerson)(!(nsAccountLock=TRUE)))"
         filter: "(objectClass=inetOrgPerson)"
         username: uid
         idAttr: uid

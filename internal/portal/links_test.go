@@ -576,3 +576,44 @@ func (c cancelOnPut) Put(ctx context.Context, key, value string) error {
 	}
 	return c.MemorySecretStore.Put(ctx, key, value)
 }
+
+// TestIdPLinkSetState: SetState is a generation compare-and-swap, so a
+// verdict computed for an older token is dropped once a login moved the
+// generation; a login stores email_verified and resets the refresh record.
+func TestIdPLinkSetState(t *testing.T) {
+	ctx := context.Background()
+	r := newLinkRig(t, fakes.NewMemorySecretStore())
+	l := link(linkToken)
+	l.EmailVerified = true
+	row, err := r.store.Link(ctx, l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !row.EmailVerified || row.State != portal.LinkActive {
+		t.Fatalf("stored row = %+v", row)
+	}
+	st := row.RefreshState()
+	st.State, st.LastErrorCode, st.ConsecutiveFailures = portal.LinkTokenLost, "refresh_invalid", 1
+	if err := r.store.SetState(ctx, linkIss, linkSub, row.Generation, st); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := r.store.Get(ctx, linkIss, linkSub); got.State != portal.LinkTokenLost || got.Generation != row.Generation {
+		t.Fatalf("after SetState = %+v", got)
+	}
+	relogin, err := r.store.Link(ctx, link("rt-relogin-token-0009"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relogin.State != portal.LinkActive || relogin.LastErrorCode != "" || relogin.ConsecutiveFailures != 0 || relogin.EmailVerified {
+		t.Fatalf("re-login row = %+v", relogin)
+	}
+	if err := r.store.SetState(ctx, linkIss, linkSub, row.Generation, st); !errors.Is(err, portal.ErrStaleGeneration) {
+		t.Fatalf("stale SetState = %v", err)
+	}
+	if got, _ := r.store.Get(ctx, linkIss, linkSub); got.State != portal.LinkActive {
+		t.Fatalf("a stale verdict landed: %+v", got)
+	}
+	if r.store.Ref(linkToken) != secrets.Ref(linkToken).String() {
+		t.Fatal("Ref differs from secrets.Ref")
+	}
+}
