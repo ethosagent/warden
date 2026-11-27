@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -394,6 +394,6 @@ func refreshURLAllowed(raw string) bool {
 	if strings.EqualFold(h, "localhost") {
 		return true
 	}
-	ip := net.ParseIP(h)
-	return ip != nil && ip.IsLoopback()
+	ip, err := netip.ParseAddr(h)
+	return err == nil && ip.IsLoopback()
 }
