@@ -90,6 +90,11 @@ var All = slices.Concat(
 		// fake creates a portal_sessions row behind __Host-warden_portal (no
 		// console session), and one without a refresh token creates nothing.
 		{Name: "portal_login", Opts: portalOpts(), Run: portalLogin},
+		// Portal session (W-P3-CSIG-04): /portal/api/me and its CSRF token, no
+		// console route for a portal cookie and no portal route for a console
+		// session, CSRF/Origin-checked logout, admin list and revoke, and a
+		// block that ends the portal session at once.
+		{Name: "portal_session", Opts: portalOpts(), Run: portalSession},
 
 		// Break-glass login (W-P1-OPS1-08): a real argon2id login opens a Secure
 		// admin session with a signed row, an ERROR line and a Finding per
