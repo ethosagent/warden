@@ -83,7 +83,7 @@ Add a Vault backend that implements SecretStore over the KV v2 HTTP API, plus tw
 
 - New internal/secrets/vault_store.go: `NewVaultSecretStore(cfg VaultStoreConfig, client *http.Client) (SecretStore, error)` with VaultStoreConfig{Addr, Mount (default "secret"), NamePrefix, Token, Namespace}. Get reads GET /v1/<mount>/data/<prefix><key> (.data.data.value); Put writes POST /v1/<mount>/data/<prefix><key> {data:{value}}; Delete is DELETE /v1/<mount>/metadata/<prefix><key> (all versions, 404 is success); List walks LIST /v1/<mount>/metadata/<prefix> recursively with a 10,000-key cap and never calls a data/ path.
 - Put on a new key also sets metadata max_versions=1, so a rotated refresh token is not recoverable from an older version.
-- New `secrets.ErrNotFound`. awsSecretStore.Get (wrapping ErrSecretNotFound), EchoStore and the env fetcher path wrap it, and the Vault store maps 404 to it. ErrSecretNotFound stays for the AWS client so existing callers keep working.
+- New `secrets.ErrNotFound`. awsSecretStore.Get (wrapping ErrSecretNotFound) and the env fetcher path wrap it, and the Vault store maps 404 to it. EchoStore never returns it: its Get resolves every non-empty key to the key itself, so no key is ever missing. ErrSecretNotFound stays for the AWS client so existing callers keep working.
 - New optional interface `secrets.VersionedStore { GetVersion(ctx, key) (value string, version int64, err error); PutIfVersion(ctx, key, value string, version int64) error }` with `secrets.ErrVersionConflict`. The Vault store implements it with KV v2 `options.cas` (version 0 means create-only); AWS does not implement it.
 - Key path segments are escaped with url.PathEscape; keys containing '..', a leading '/' or an empty segment are rejected. Response bodies are capped at 1 MiB with io.LimitReader and the client has a 5s timeout.
 - Errors and logs carry only the key, mount, version and HTTP status; never the token, a value or a response body. VaultFetcher in internal/secrets/vault.go is left unchanged.
@@ -91,10 +91,10 @@ Add a Vault backend that implements SecretStore over the KV v2 HTTP API, plus tw
 **Implementation plan**
 
 1. internal/secrets/store.go: add ErrNotFound, VersionedStore and ErrVersionConflict next to the SecretStore interface.
-2. internal/secrets/aws_store.go and internal/secrets/echo.go: wrap ErrNotFound on a missing key (keep errors.Is(err, ErrSecretNotFound) true for AWS).
+2. internal/secrets/aws_store.go: wrap ErrNotFound on a missing key (keep errors.Is(err, ErrSecretNotFound) true for AWS); internal/secrets/echo.go: document that echo never misses a key.
 3. New internal/secrets/vault_store.go: vaultSecretStore with Get, Put, Delete, List, GetVersion and PutIfVersion over net/http, X-Vault-Token and optional X-Vault-Namespace headers.
 4. New internal/secrets/vault_store_test.go against an httptest KV v2 fake that records paths and supports cas, metadata and LIST.
-5. New internal/secrets/conformance_test.go: one table-driven suite (Put/Get round trip, Delete idempotent, missing key wraps ErrNotFound) run against echo, the fake-client AWS store and the Vault store.
+5. New internal/secrets/conformance_test.go: one table-driven suite (Put/Get round trip, Delete idempotent, missing key wraps ErrNotFound, or for echo resolves to the key itself) run against echo, the fake-client AWS store and the Vault store.
 
 **Acceptance criteria**
 
