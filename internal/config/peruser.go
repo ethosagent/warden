@@ -109,6 +109,12 @@ func parsePerUserSecrets(r *rawPerUserSecrets) (PerUserSecretsConfig, error) {
 			In:          trimPerUser(m.In, true),
 			Agents:      trimPerUser(m.Agents, false),
 		}
+		// Match policy.NormalizeHost: a non-regex domain drops trailing dots.
+		for i, d := range pm.Domains {
+			if !strings.HasPrefix(d, "~") {
+				pm.Domains[i] = strings.TrimRight(d, ".")
+			}
+		}
 		if len(pm.In) == 0 {
 			pm.In = []string{PerUserInHeader}
 		}

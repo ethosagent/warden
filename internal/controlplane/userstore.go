@@ -166,7 +166,7 @@ func checkUserStorePersistent(consent *config.ConsentConfig, st secrets.SecretSt
 	if consent.Store != nil {
 		backend = consent.Store.Backend
 	}
-	return fmt.Errorf("control-plane: consent.idpLink.enabled needs a persistent consent.store, but consent.store.backend is %s; configure consent.store with backend aws, or set consent.idpLink.enabled: false", backend)
+	return fmt.Errorf("control-plane: consent.idpLink.enabled needs a persistent consent.store, but consent.store.backend is %s; configure consent.store with backend aws or vault, or set consent.idpLink.enabled: false", backend)
 }
 
 // storeNamespace is one backend namespace: the backend, the identity of the

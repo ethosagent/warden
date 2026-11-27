@@ -84,9 +84,12 @@ perUserSecrets:
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ = getPolicyOnce(t, withBlock)
+	body, etag = getPolicyOnce(t, withBlock)
 	if !bytes.Equal(body, wantBody) {
 		t.Errorf("/policy body with the block present differs from golden\n got: %s\nwant: %s", body, wantBody)
+	}
+	if want := strings.TrimSpace(string(wantETag)); etag != want {
+		t.Errorf("/policy ETag with the block present = %s, want golden %s", etag, want)
 	}
 	for _, banned := range []string{"perUserSecrets", "PUSGOLDEN_USER", "pusprovider", "pus.scope", "pus-golden", "workerCacheTTL"} {
 		if bytes.Contains(body, []byte(banned)) {

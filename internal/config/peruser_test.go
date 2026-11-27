@@ -68,6 +68,22 @@ func TestPerUserSecretsDefaults(t *testing.T) {
 	}
 }
 
+// TestPerUserSecretsDomainTrailingDot: a non-regex domain drops trailing dots
+// like policy.NormalizeHost; a "~regex" domain is left as written.
+func TestPerUserSecretsDomainTrailingDot(t *testing.T) {
+	got, err := loadPerUser(t, perUserYAML(`    - placeholder: GOOGLE_USER
+      provider: google
+      domains: ["gmail.googleapis.com."]
+      agents: [support-bot]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := got.Mappings[0].Domains; !reflect.DeepEqual(d, []string{"gmail.googleapis.com"}) {
+		t.Fatalf("domains = %v, want [gmail.googleapis.com]", d)
+	}
+}
+
 // TestPerUserSecretsValid: a full mapping parses as written.
 func TestPerUserSecretsValid(t *testing.T) {
 	got, err := loadPerUser(t, baseAllow+`perUserSecrets:
