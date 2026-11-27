@@ -105,6 +105,9 @@ type Provider struct {
 	failAt  time.Time
 	failTTL time.Duration
 	now     func() time.Time
+	// clock is now with a time.Now default; the failure cache keys off now
+	// being nil, id_token expiry never may.
+	clock func() time.Time
 
 	httpc          FormPoster
 	logger         *slog.Logger
@@ -276,6 +279,7 @@ func buildProvider(c config.OAuthProviderConfig, opts Options, logger *slog.Logg
 		resolver:              opts.Resolver,
 		failTTL:               secretFailCache,
 		now:                   opts.Now,
+		clock:                 nowOrDefault(opts.Now),
 		httpc:                 opts.HTTPClient,
 		logger:                logger,
 		counters:              counters,
@@ -352,3 +356,11 @@ func (r *Registry) Providers() []*Provider {
 
 // Len returns the number of providers.
 func (r *Registry) Len() int { return len(r.ids) }
+
+// nowOrDefault keeps a nil clock from disabling time checks (id_token exp).
+func nowOrDefault(f func() time.Time) func() time.Time {
+	if f == nil {
+		return time.Now
+	}
+	return f
+}

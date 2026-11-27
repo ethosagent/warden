@@ -40,6 +40,8 @@ func TestConsentProvidersValidate(t *testing.T) {
 		{"githubApp ok", prov("      type: githubApp\n"), ""},
 		{"no providers", "", ""},
 		{"generic without tokenURL", prov("      type: generic\n      authURL: https://a.example.com/auth\n"), "consent.providers[0].tokenURL"},
+		{"generic account rule without userinfoURL", prov("      type: generic\n      authURL: https://a.example.com/auth\n      tokenURL: https://a.example.com/token\n      requireEmailMatch: true\n"), "consent.providers[0].userinfoURL"},
+		{"generic account rule with userinfoURL ok", prov("      type: generic\n      authURL: https://a.example.com/auth\n      tokenURL: https://a.example.com/token\n      userinfoURL: https://a.example.com/userinfo\n      allowedAccountDomains: [example.com]\n"), ""},
 		{"generic without authURL", prov("      type: generic\n      tokenURL: https://a.example.com/token\n"), "consent.providers[0].authURL"},
 		{"duplicate id", prov("      type: github\n") + "    - id: p1\n      type: github\n      clientID: c\n      clientSecretEnv: X\n", "consent.providers[1].id"},
 		{"id starts with underscore", strings.Replace(prov("      type: github\n"), "id: p1", "id: _p1", 1), "consent.providers[0].id"},

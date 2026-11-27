@@ -6,10 +6,9 @@
 // credentials are never forwarded), is bound by the caller's context plus a
 // hard 10s cap, and caps response bodies at MaxBodyBytes+1.
 //
-// It is not a general provider client: the authorization-code exchange through
-// golang.org/x/oauth2 needs an *http.Client (that ticket builds its own over
-// the same SafeDialer policy), while GitHub's revoke, a DELETE with a JSON
-// body, goes through Do on this transport.
+// It serves every provider call of the broker: the authorization-code exchange
+// (adapters/exchange builds on it), the refresh_token grant, GitHub's revoke (a
+// DELETE with a JSON body, through Do) and the account userinfo GET.
 package httpclient
 
 import (

@@ -272,7 +272,7 @@ func TestAccountIdentifyGoogleToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	good := map[string]any{"iss": "accounts.google.com", "aud": []string{"other", fakes.OAuthDefaultClientID}, "sub": "s1", "email": "a@b.test", "email_verified": "true", "hd": "b.test"}
+	good := map[string]any{"exp": 9_000_000_000, "iss": "accounts.google.com", "aud": []string{"other", fakes.OAuthDefaultClientID}, "sub": "s1", "email": "a@b.test", "email_verified": "true", "hd": "b.test"}
 	id, err := p.Identify(context.Background(), oauthbroker.TokenResponse{IDToken: idToken(good)})
 	if err != nil || id.ID != "s1" || !id.EmailVerified || id.HostedDomain != "b.test" {
 		t.Fatalf("Identify = %+v, %v", id, err)
@@ -281,6 +281,8 @@ func TestAccountIdentifyGoogleToken(t *testing.T) {
 		"wrong audience": func(m map[string]any) { m["aud"] = "someone-else" },
 		"wrong issuer":   func(m map[string]any) { m["iss"] = "https://evil.test" },
 		"no sub":         func(m map[string]any) { delete(m, "sub") },
+		"expired":        func(m map[string]any) { m["exp"] = 1_000 },
+		"no exp":         func(m map[string]any) { delete(m, "exp") },
 	} {
 		c := map[string]any{}
 		for k, v := range good {
@@ -295,5 +297,46 @@ func TestAccountIdentifyGoogleToken(t *testing.T) {
 		if _, err := p.Identify(context.Background(), oauthbroker.TokenResponse{IDToken: bad}); !errors.Is(err, oauthbroker.ErrIdentity) {
 			t.Errorf("%q: err = %v, want ErrIdentity", bad, err)
 		}
+	}
+}
+
+// TestAccountRulesEmailForms: an address must be local@domain in ASCII; Unicode
+// look-alikes and malformed values never satisfy a rule.
+func TestAccountRulesEmailForms(t *testing.T) {
+	ctx := context.Background()
+	kelvin := "\u212A" // folds to "k" under Unicode case folding
+	cases := map[string]struct {
+		acct         fakes.OAuthAccount
+		session      string
+		domains      []string
+		emailMatch   bool
+		github, want bool
+	}{
+		"no at sign is not the domain":   {fakes.OAuthAccount{Sub: "1", Login: "x", Email: "example.com"}, "", []string{"example.com"}, false, true, false},
+		"empty local part":               {fakes.OAuthAccount{Sub: "1", Login: "x", Email: "@example.com"}, "", []string{"example.com"}, false, true, false},
+		"two at signs":                   {fakes.OAuthAccount{Sub: "1", Login: "x", Email: "a@b@example.com"}, "", []string{"example.com"}, false, true, false},
+		"kelvin domain":                  {fakes.OAuthAccount{Sub: "1", Login: "x", Email: "a@" + kelvin + ".example"}, "", []string{"k.example"}, false, true, false},
+		"kelvin email match":             {googleAccount("1", "al"+kelvin+"@example.com", "example.com"), "alk@example.com", nil, true, false, false},
+		"ascii case folding still works": {googleAccount("1", "Alk@Example.com", "example.com"), "alk@example.COM", nil, true, false, true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newCBEnvWith(t, withRules(c.domains, c.emailMatch))
+			prov := "google"
+			if c.github {
+				prov = "github"
+				e.prov.SetStyle(fakes.OAuthGitHub)
+			}
+			e.prov.SetAccount(c.acct)
+			f := e.connect(t, cbSub, prov, true)
+			f.req.Email, f.req.EmailVerified = c.session, true
+			res, err := e.b.Callback(ctx, f.req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := res.Result == oauthbroker.ResultGranted; got != c.want {
+				t.Fatalf("granted = %v (%+v), want %v", got, res, c.want)
+			}
+		})
 	}
 }

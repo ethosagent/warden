@@ -285,6 +285,9 @@ func validateOAuthProvider(i int, p OAuthProviderConfig) error {
 			return fmt.Errorf("config: %s.%s is set by the broker and may not be overridden", f("extraAuthParams"), k)
 		}
 	}
+	if p.Type == OAuthProviderGeneric && p.UserinfoURL == "" && (len(p.AllowedAccountDomains) > 0 || p.RequireEmailMatch) {
+		return fmt.Errorf("config: %s is required when allowedAccountDomains or requireEmailMatch is set on a generic provider (the account cannot be identified without it)", f("userinfoURL"))
+	}
 	for j, d := range p.AllowedAccountDomains {
 		if !domainRE.MatchString(d) {
 			return fmt.Errorf("config: %s[%d] %q must be a bare domain such as example.com", f("allowedAccountDomains"), j, d)

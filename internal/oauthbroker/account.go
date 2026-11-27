@@ -99,10 +99,8 @@ func (p *Provider) identifyGoogle(idToken string) (Identity, error) {
 	if json.Unmarshal(raw, &c) != nil || !googleIssuers[c.Iss] || c.Sub == "" || !audienceIs(c.Aud, p.ClientID) {
 		return Identity{}, ErrIdentity
 	}
-	if p.now != nil {
-		if exp, err := c.Exp.Int64(); err != nil || exp <= p.now().Unix() {
-			return Identity{}, ErrIdentity
-		}
+	if exp, err := c.Exp.Int64(); err != nil || exp <= p.clock().Unix() {
+		return Identity{}, ErrIdentity
 	}
 	return Identity{
 		ID: c.Sub, Login: c.Email, Email: c.Email,
@@ -211,12 +209,15 @@ func (p *Provider) AccountRules(id Identity, sessionEmail string, sessionVerifie
 		if p.Type != config.OAuthProviderGoogle {
 			domain = ""
 			if id.EmailVerified {
-				domain = id.Email[strings.LastIndex(id.Email, "@")+1:]
+				if _, d, ok := splitEmail(id.Email); ok {
+					domain = d
+				}
 			}
 		}
+		domain = asciiLower(domain)
 		ok := false
 		for _, d := range p.AllowedAccountDomains {
-			if domain != "" && strings.EqualFold(domain, d) {
+			if domain != "" && domain == asciiLower(d) {
 				ok = true
 			}
 		}
@@ -225,7 +226,10 @@ func (p *Provider) AccountRules(id Identity, sessionEmail string, sessionVerifie
 		}
 	}
 	if p.RequireEmailMatch {
-		if !sessionVerified || sessionEmail == "" || !id.EmailVerified || !strings.EqualFold(id.Email, sessionEmail) {
+		_, _, okA := splitEmail(id.Email)
+		_, _, okB := splitEmail(sessionEmail)
+		ea, eb := asciiLower(id.Email), asciiLower(sessionEmail)
+		if !sessionVerified || !id.EmailVerified || !okA || !okB || ea == "" || ea != eb {
 			return false
 		}
 	}
@@ -238,3 +242,32 @@ func (p *Provider) HasAccountRules() bool {
 }
 
 func (i Identity) String() string { return fmt.Sprintf("Identity{id=%s}", i.ID) }
+
+// splitEmail splits local@domain: exactly one "@", both parts non-empty and the
+// whole address ASCII. Anything else is not an email for account rules.
+func splitEmail(e string) (local, domain string, ok bool) {
+	if !isASCII(e) || strings.Count(e, "@") != 1 {
+		return "", "", false
+	}
+	local, domain, _ = strings.Cut(e, "@")
+	return local, domain, local != "" && domain != ""
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiLower lower-cases ASCII only and returns "" for a non-ASCII string, so a
+// look-alike (U+212A KELVIN SIGN folds to "k" under Unicode case folding) never
+// matches.
+func asciiLower(s string) string {
+	if !isASCII(s) {
+		return ""
+	}
+	return strings.ToLower(s)
+}

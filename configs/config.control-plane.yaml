@@ -162,7 +162,9 @@ logging:
 #      allowedScopes: [openid, email, https://www.googleapis.com/auth/drive.readonly]
 #      defaultScopes: [openid, email]
 #      allowedAccountDomains: [example.com]
-#      requireEmailMatch: true
+#      requireEmailMatch: true  # needs a verified email on both sides (IdP email_verified; provider id_token/userinfo)
+#      # GitHub: the public /user email is treated as verified (true on github.com;
+#      # on GitHub Enterprise Server it depends on the instance verifying emails).
 #  connect:
 #    redirectURL: https://localhost:7070/connect/callback  # same origin as oidc.redirectURL; default derived
 #    pendingTTL: 15m                        # 1m-1h
