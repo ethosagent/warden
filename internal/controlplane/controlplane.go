@@ -43,6 +43,7 @@ import (
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys"
 	"github.com/ethosagent/warden/internal/oauthbroker"
+	oauthbrokerhttp "github.com/ethosagent/warden/internal/oauthbroker/http"
 	"github.com/ethosagent/warden/internal/secrets"
 	"github.com/ethosagent/warden/internal/workerca"
 )
@@ -234,6 +235,11 @@ type Config struct {
 	// with the broker migrations enabled. Start runs its 1-minute sweeper. Nil
 	// means the broker is off: no sweeper, no tables.
 	GrantStore oauthbroker.GrantStore
+	// OAuthRegistry is the provider registry built from consent.providers
+	// (oauthbroker.NewRegistry) when the broker is enabled. With GrantStore,
+	// Consent and the portal it mounts /connect/start (W-P3-BRKR-03); nil keeps
+	// every /connect path 404.
+	OAuthRegistry *oauthbroker.Registry
 }
 
 // policyWire is the shape sent to workers: allow/deny policy plus the optional
@@ -375,6 +381,10 @@ type Server struct {
 	// portal is the consent portal's sign-in (/portal/login, /portal/callback,
 	// /portal); set only with Consent and State (W-P3-CSIG-02).
 	portal *portalService
+	// broker and brokerHTTP run POST /connect/start; set only with the
+	// OAuth broker's gate (initBroker), else /connect/* is 404.
+	broker     *oauthbroker.Broker
+	brokerHTTP *oauthbrokerhttp.Handler
 	// audit is the admin audit middleware's state; nil when cfg.AdminAudit is
 	// (admin audit disabled), in which case no route is wrapped.
 	audit *adminAuditor
@@ -496,6 +506,7 @@ func New(cfg Config) *Server {
 	s.initSessions()
 	s.initAuth()
 	s.initPortal()
+	s.initBroker()
 	s.initAPIKeys()
 	s.initBreakGlass()
 	s.warnAdminToken()
@@ -920,6 +931,7 @@ func (s *Server) Handler() http.Handler {
 	s.mountDashboard(mux, dash)
 	s.registerAuthRoutes(mux)
 	s.registerPortalRoutes(mux)
+	s.registerConnectRoutes(mux)
 
 	return mux
 }

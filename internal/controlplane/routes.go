@@ -137,6 +137,26 @@ func (s *Server) registerPortalRoutes(mux *http.ServeMux) {
 	mux.Handle(portalSubtree, s.portalWrap(http.NotFoundHandler()))
 }
 
+// registerConnectRoutes mounts the OAuth broker's connect routes (W-P3-BRKR-03)
+// only when the broker is enabled (initBroker); otherwise /connect/* is 404.
+//
+//	GET  /connect/start  portal session; changes nothing, 303 to the landing page
+//	POST /connect/start  portal session + CSRF/Origin; starts a PKCE flow, 303
+//
+// Both go through connectWrap: no portal session is 303 to /portal/login, and
+// no console credential (cookie, bearer, worker token, wak_ key) reaches it.
+func (s *Server) registerConnectRoutes(mux *http.ServeMux) {
+	if s.broker == nil || s.brokerHTTP == nil {
+		return
+	}
+	mux.Handle(connectStartPath, s.connectWrap(s.brokerHTTP.Start()))
+}
+
+// connectStartPath is the connect route's mux pattern, a literal so the
+// route-coverage walk can read it; TestConnectRoutePaths pins it to the
+// transport package's constant.
+const connectStartPath = "/connect/start"
+
 // The portal's mux patterns, as literals so the route-coverage walk can read
 // them; TestPortalRoutePaths pins them to the portal package's constants.
 const (

@@ -18,6 +18,8 @@ import (
 	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
+	"github.com/ethosagent/warden/internal/oauthbroker"
+	oauthbrokersqlite "github.com/ethosagent/warden/internal/oauthbroker/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/portal"
 	"github.com/ethosagent/warden/internal/secrets"
 	tokensvcsqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
@@ -63,6 +65,9 @@ type portalRigOpts struct {
 	// allRoutes turns on API keys and the token service, so every
 	// /dashboard/api/* route of the authz table is mounted.
 	allRoutes bool
+	// providers turns the OAuth broker on (W-P3-BRKR-03): consent.providers,
+	// the broker migrations and the sqlite GrantStore.
+	providers []config.OAuthProviderConfig
 }
 
 func newPortalRig(t *testing.T, o portalRigOpts) *portalRig {
@@ -80,6 +85,7 @@ func newPortalRig(t *testing.T, o portalRigOpts) *portalRig {
 		if o.allRoutes {
 			migs = cpstate.Enable(migs, sqlitestore.MigrationID, tokensvcsqlite.SessionsMigrationID)
 		}
+		migs = stateMigrationsWithBroker(migs, len(o.providers) > 0)
 		db, err = cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), migs)
 		if err != nil {
 			t.Fatalf("cpstate.Open: %v", err)
@@ -111,7 +117,24 @@ func newPortalRig(t *testing.T, o portalRigOpts) *portalRig {
 	}
 	logs := &syncBuf{}
 	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	var (
+		registry   *oauthbroker.Registry
+		grantStore oauthbroker.GrantStore
+	)
+	if len(o.providers) > 0 && consent != nil {
+		consent.Providers = o.providers
+		consent.Connect = config.ConsentConnect{RedirectURL: "https://cp.example/connect/callback", PendingTTL: config.DefaultConnectPendingTTL}
+		var err error
+		registry, err = oauthbroker.NewRegistry(o.providers, oauthbroker.Options{
+			LookupEnv: func(string) (string, bool) { return "client-secret-value", true }, Logger: logger,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		grantStore = oauthbrokersqlite.New(db, oauthbrokersqlite.Options{})
+	}
 	cfg := Config{
+		OAuthRegistry: registry, GrantStore: grantStore,
 		PolicyPath: writePolicyFile(t, "a.example"), State: db, Console: cc, Consent: consent,
 		ClientSecret: rigClientSecret, ConsentClientSecret: portalClientSecret, Now: clk.Now,
 		SecretStore: o.secretStore, Token: o.token, Logger: logger,

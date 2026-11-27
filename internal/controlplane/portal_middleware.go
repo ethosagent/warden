@@ -156,6 +156,24 @@ func (p *portalService) revokeBlocked(ctx context.Context, sess webauth.Session)
 // next runs only for a live, unblocked session that passed the CSRF and
 // Origin check, with portal.PrincipalFrom set.
 func (p *portalService) requireSession(next http.Handler) http.Handler {
+	return p.requireSessionWith(next, signedOutPolicy{
+		redirects: func(r *http.Request) bool { return portal.SignedOutRedirects(r.Method, r.URL.Path) },
+		status:    http.StatusFound,
+	})
+}
+
+// signedOutPolicy says which signed-out requests a session guard sends to the
+// portal sign-in (and with which status) rather than answering 401.
+type signedOutPolicy struct {
+	redirects func(r *http.Request) bool
+	status    int
+}
+
+// requireSessionWith is requireSession with its signed-out rule chosen by the
+// route: the portal pages redirect a browser GET with 302, the connect routes
+// redirect every method with 303 (a POST cannot be replayed after sign-in, so
+// its next is the portal home).
+func (p *portalService) requireSessionWith(next http.Handler, so signedOutPolicy) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		webauth.NoStore(w)
 		sc, out, code := p.authenticate(r)
@@ -167,8 +185,12 @@ func (p *portalService) requireSession(next http.Handler) http.Handler {
 			writeAuthError(w, http.StatusForbidden, portal.CodeUserBlocked)
 			return
 		case portalSignedOut:
-			if portal.SignedOutRedirects(r.Method, r.URL.Path) {
-				http.Redirect(w, r, portal.LoginURL(p.loginNext(r)), http.StatusFound)
+			if so.redirects(r) {
+				next := ""
+				if safeMethod(r.Method) {
+					next = p.loginNext(r)
+				}
+				http.Redirect(w, r, portal.LoginURL(next), so.status)
 				return
 			}
 			writeAuthError(w, http.StatusUnauthorized, portal.CodeUnauthenticated)
@@ -232,6 +254,37 @@ func (p *portalService) stripConsoleCredentials(r *http.Request) *http.Request {
 
 func safeMethod(m string) bool {
 	return m == http.MethodGet || m == http.MethodHead || m == http.MethodOptions
+}
+
+// connectWrap puts a /connect/* route behind the portal session middleware.
+// A signed-out request of any method is sent to /portal/login with 303 (a
+// relative next only for GET). A POST that carries a console credential (an
+// Authorization header: the admin bearer, a worker token or a wak_ key; or the
+// console session cookie) is answered 401 instead: none of them authenticates
+// here, and redirecting a machine client to a sign-in page would hide that.
+// Without a portal the route is 404.
+func (s *Server) connectWrap(h http.Handler) http.Handler {
+	if s.portal == nil {
+		return http.NotFoundHandler()
+	}
+	p := s.portal
+	return p.requireSessionWith(h, signedOutPolicy{
+		redirects: func(r *http.Request) bool {
+			if safeMethod(r.Method) {
+				return true
+			}
+			if r.Header.Get("Authorization") != "" {
+				return false
+			}
+			if p.consoleCookie != "" {
+				if _, err := r.Cookie(p.consoleCookie); err == nil {
+					return false
+				}
+			}
+			return true
+		},
+		status: http.StatusSeeOther,
+	})
 }
 
 // portalWrap puts h behind the portal session middleware; without a portal

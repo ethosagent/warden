@@ -318,6 +318,10 @@ func cpRouteTable() map[routeKey]authzRow {
 		{get, portalMePath, handler("portal.me")},
 		{post, portalLogoutPath, handler("portal.logout")},
 		{get, portalSubtree, handler("portal.subtree")},
+		// The OAuth broker (W-P3-BRKR-03): the portal session middleware and
+		// CSRF, mounted only when consent.providers is set. GET only redirects.
+		{get, connectStartPath, handler("connect.start")},
+		{post, connectStartPath, handler("connect.start")},
 	}
 	t := make(map[routeKey]authzRow, len(rows))
 	for _, r := range rows {

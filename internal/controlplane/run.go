@@ -34,6 +34,8 @@ import (
 	"github.com/ethosagent/warden/internal/detect"
 	"github.com/ethosagent/warden/internal/integration"
 	"github.com/ethosagent/warden/internal/keys"
+	"github.com/ethosagent/warden/internal/oauthbroker"
+	oauthbrokersqlite "github.com/ethosagent/warden/internal/oauthbroker/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/observability"
 	"github.com/ethosagent/warden/internal/secrets"
 )
@@ -393,7 +395,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		// --policy-store or console.adminAudit never trips the downgrade guard.
 		// The open is not cancellable: a shutdown signal must not abandon a
 		// migration half way through boot.
-		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsWithApprovals(stateMigrationsFor(keysCfg, consoleCfg, tokenCfg), consoleCfg.Approvals))
+		state, err = cpstate.Open(context.WithoutCancel(ctx), statePath, stateMigrationsWithBroker(stateMigrationsWithApprovals(stateMigrationsFor(keysCfg, consoleCfg, tokenCfg), consoleCfg.Approvals), oauthBrokerWanted(consentCfg)))
 		if err != nil {
 			return fail(fmt.Errorf("control-plane: state db: %w", err))
 		}
@@ -524,6 +526,11 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 			return fail(err)
 		}
 		if err := checkUserStorePersistent(consentCfg, userStore); err != nil {
+			return fail(err)
+		}
+		// Providers without a persistent consent.store would sign users in and
+		// then never keep a token: refuse (W-P3-BRKR-03).
+		if err := checkOAuthBrokerStore(consentCfg, userStore); err != nil {
 			return fail(err)
 		}
 	}
@@ -661,6 +668,28 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		agentStore = agents
 	}
 
+	// The OAuth broker (consent.providers): the provider registry reads every
+	// clientSecretEnv now, so a missing variable stops startup; the grant store
+	// sits on the state DB opened with the broker migrations above. Without a
+	// state dir the broker stays off (no cpstate to hold attempts), loudly.
+	var (
+		oauthRegistry *oauthbroker.Registry
+		grantStore    oauthbroker.GrantStore
+	)
+	if oauthBrokerWanted(consentCfg) {
+		if state == nil {
+			logger.Warn("control plane: consent.providers is set but --state-dir is not; the OAuth broker is off (no /connect routes)")
+		} else {
+			oauthRegistry, err = oauthbroker.NewRegistry(consentCfg.Providers, oauthbroker.Options{
+				LookupEnv: os.LookupEnv, Now: clk.Now, Logger: logger,
+			})
+			if err != nil {
+				return fail(fmt.Errorf("control-plane: oauth providers: %w", err))
+			}
+			grantStore = oauthbrokersqlite.New(state, oauthbrokersqlite.Options{Clock: clk})
+		}
+	}
+
 	srv := New(Config{
 		AgentStore:  agentStore,
 		State:       state,
@@ -691,6 +720,8 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		SecretStore:         secretStore,
 		Console:             consoleCfg,
 		Consent:             consentCfg,
+		OAuthRegistry:       oauthRegistry,
+		GrantStore:          grantStore,
 		UserStore:           userStore,
 		ClientSecret:        clientSecret,
 		ConsentClientSecret: consentSecret,
