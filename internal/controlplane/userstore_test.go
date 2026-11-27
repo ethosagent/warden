@@ -48,7 +48,7 @@ func wantOverlap(t *testing.T, what string, err error) {
 
 // TestUserStoreOverlap: consent.store must not share a backend namespace with
 // the distributed secretStore in either direction; the default warden-cp/
-// starts; echo needs --dev; vault waits for W-P3-PUS-01.
+// starts; echo needs --dev (vault: TestUserStoreVault).
 func TestUserStoreOverlap(t *testing.T) {
 	client := newFakeAWSClient()
 	opts := func(ss config.SecretStoreConfig) UserStoreOptions {
@@ -69,7 +69,7 @@ func TestUserStoreOverlap(t *testing.T) {
 			"default secretStore prefix": {awsUserStore(nestedUsers, "us-east-1"), config.SecretStoreConfig{Backend: config.SecretBackendAWS}},
 			"empty secretStore prefix":   {awsUserStore(nestedUsers, "us-east-1"), config.SecretStoreConfig{Backend: config.SecretBackendAWS, AWS: &config.SecretStoreAWS{Region: "us-east-1"}}},
 		} {
-			st, err := NewUserStore(c.us, opts(c.ss))
+			st, err := NewUserStore(context.Background(), c.us, opts(c.ss))
 			if st != nil {
 				t.Errorf("%s: got a store", name)
 			}
@@ -78,7 +78,7 @@ func TestUserStoreOverlap(t *testing.T) {
 	})
 
 	t.Run("disjoint starts", func(t *testing.T) {
-		st, err := NewUserStore(awsUserStore(config.DefaultConsentStoreNamePrefix, "us-east-1"), opts(awsSecretStoreCfg(workerPrefix)))
+		st, err := NewUserStore(context.Background(), awsUserStore(config.DefaultConsentStoreNamePrefix, "us-east-1"), opts(awsSecretStoreCfg(workerPrefix)))
 		if err != nil || st == nil {
 			t.Fatalf("NewUserStore = %v, %v", st, err)
 		}
@@ -103,7 +103,7 @@ func TestUserStoreOverlap(t *testing.T) {
 		for name, ss := range map[string]config.SecretStoreConfig{
 			"env": {}, "echo": {Backend: config.SecretBackendEcho},
 		} {
-			if _, err := NewUserStore(awsUserStore(workerPrefix, "us-east-1"), opts(ss)); err != nil {
+			if _, err := NewUserStore(context.Background(), awsUserStore(workerPrefix, "us-east-1"), opts(ss)); err != nil {
 				t.Errorf("%s secretStore: %v", name, err)
 			}
 		}
@@ -113,7 +113,7 @@ func TestUserStoreOverlap(t *testing.T) {
 		keys := config.KeysConfig{Enabled: true, Store: config.KeysStore{Backend: config.KeysBackendAWS, AWS: &config.KeysStoreAWS{Region: "us-east-1", NamePrefix: config.DefaultConsentStoreNamePrefix + "keys/"}}}
 		o := opts(awsSecretStoreCfg(workerPrefix))
 		o.Keys = keys
-		_, err := NewUserStore(awsUserStore(config.DefaultConsentStoreNamePrefix, "us-east-1"), o)
+		_, err := NewUserStore(context.Background(), awsUserStore(config.DefaultConsentStoreNamePrefix, "us-east-1"), o)
 		if err == nil || !strings.Contains(err.Error(), "keys.store.aws.namePrefix") {
 			t.Fatalf("err = %v, want the keys overlap", err)
 		}
@@ -121,27 +121,19 @@ func TestUserStoreOverlap(t *testing.T) {
 
 	t.Run("echo needs dev", func(t *testing.T) {
 		echo := &config.ConsentStore{Backend: config.ConsentStoreBackendEcho, NamePrefix: config.DefaultConsentStoreNamePrefix}
-		if _, err := NewUserStore(echo, opts(config.SecretStoreConfig{Backend: config.SecretBackendEcho})); err == nil || !strings.Contains(err.Error(), "--dev") {
+		if _, err := NewUserStore(context.Background(), echo, opts(config.SecretStoreConfig{Backend: config.SecretBackendEcho})); err == nil || !strings.Contains(err.Error(), "--dev") {
 			t.Fatalf("echo without --dev err = %v", err)
 		}
 		o := opts(config.SecretStoreConfig{Backend: config.SecretBackendEcho})
 		o.Dev = true
-		st, err := NewUserStore(echo, o)
+		st, err := NewUserStore(context.Background(), echo, o)
 		if err != nil || st == nil || secrets.IsPersistent(st) {
 			t.Fatalf("echo with --dev = %v, %v (want a non-persistent store)", st, err)
 		}
 	})
 
-	t.Run("vault not yet available", func(t *testing.T) {
-		v := &config.ConsentStore{Backend: config.ConsentStoreBackendVault, NamePrefix: config.DefaultConsentStoreNamePrefix,
-			Vault: &config.ConsentStoreVault{Addr: "https://vault.example.com", Mount: "secret", TokenEnv: "VAULT_TOKEN"}}
-		if _, err := NewUserStore(v, opts(config.SecretStoreConfig{})); err == nil || !strings.Contains(err.Error(), "consent.store.backend vault needs W-P3-PUS-01") {
-			t.Fatalf("vault err = %v", err)
-		}
-	})
-
 	t.Run("absent", func(t *testing.T) {
-		if st, err := NewUserStore(nil, opts(awsSecretStoreCfg(workerPrefix))); st != nil || err != nil {
+		if st, err := NewUserStore(context.Background(), nil, opts(awsSecretStoreCfg(workerPrefix))); st != nil || err != nil {
 			t.Fatalf("nil block = %v, %v", st, err)
 		}
 	})
