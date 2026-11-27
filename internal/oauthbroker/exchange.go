@@ -9,11 +9,6 @@ import (
 	"time"
 )
 
-// MaxProviderResponseBytes caps a provider token endpoint response. A real
-// response is well under 8 KiB; the cap is the transport's, so a hostile or
-// broken endpoint cannot make the control plane buffer an unbounded body.
-const MaxProviderResponseBytes = 64 << 10
-
 // ExchangeTimeout bounds one authorization code exchange.
 const ExchangeTimeout = 10 * time.Second
 
