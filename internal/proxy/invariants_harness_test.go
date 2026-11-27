@@ -332,11 +332,15 @@ type invEnv struct {
 	rawTCPAddr string
 	useRawTLS  bool
 
-	// transparentAddr/httpAddr are the bound transparent listeners (#376), ""
-	// when the env runs forward-only; plainSrv is their plain upstream.
-	tlsAddr  string
-	httpAddr string
-	plainSrv *httptest.Server
+	// proxyAddr is the CONNECT listener. tlsAddr/httpAddr are the bound
+	// transparent listeners (#376), "" when the env runs forward-only; plainSrv
+	// is their plain upstream. The env binds all three itself and injects them
+	// (Config.Listener / Transparent*Listener), so each address is known before
+	// Serve runs and nothing polls for readiness.
+	proxyAddr string
+	tlsAddr   string
+	httpAddr  string
+	plainSrv  *httptest.Server
 
 	// tlsUpstreams counts upstream dials made through the TLS seam. A plain-HTTP
 	// session must never make one — the count is the seam-side witness that the
@@ -391,8 +395,22 @@ func newInvEnv(t *testing.T, o invOpts) *invEnv {
 	if sec == nil {
 		sec = &fakes.FakeSecretProvider{Values: map[string]string{invPlaceholder: invCanary}}
 	}
+	// listen binds a loopback port-0 listener the proxy will own. Serve closes
+	// injected listeners on ctx-done; the cleanup is a backstop for an env that
+	// fails before Serve starts.
+	listen := func() net.Listener {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		return ln
+	}
+	proxyLn := listen()
+	e.proxyAddr = proxyLn.Addr().String()
 	cfg := Config{
-		ListenAddr: "127.0.0.1:0",
+		ListenAddr: e.proxyAddr,
+		Listener:   proxyLn,
 		Policy:     policy.NewEvaluator(config.Policy{Allowlist: allow, Denylist: o.denylist}),
 		Secrets:    sec,
 		Analytics:  e.store,
@@ -425,8 +443,11 @@ func newInvEnv(t *testing.T, o invOpts) *invEnv {
 		// listeners come up; a plain sibling of the same backend handler backs
 		// the plain-HTTP rows.
 		cfg.Mode = config.ProxyModeBoth
-		cfg.TransparentHTTPSListen = "127.0.0.1:0"
-		cfg.TransparentHTTPListen = "127.0.0.1:0"
+		tlsLn, httpLn := listen(), listen()
+		cfg.TransparentHTTPSListener = tlsLn
+		cfg.TransparentHTTPListener = httpLn
+		e.tlsAddr = tlsLn.Addr().String()
+		e.httpAddr = httpLn.Addr().String()
 		e.plainSrv = httptest.NewServer(http.HandlerFunc(e.backend.handle))
 		t.Cleanup(e.plainSrv.Close)
 	}
@@ -465,26 +486,24 @@ func newInvEnv(t *testing.T, o invOpts) *invEnv {
 		return nil, fmt.Errorf("invariants: no tcp upstream")
 	}
 
+	// The listeners are already bound, so a client may dial as soon as this
+	// returns: the kernel backlog holds the connection until Serve's accept
+	// loops start, and Serve installs the loop guard before accepting. Serve's
+	// error is not swallowed — an early exit or a non-nil return fails the test.
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = p.Serve(ctx) }()
-	for i := 0; i < 200 && p.Addr() == nil; i++ {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if p.Addr() == nil {
-		t.Fatal("proxy did not start")
-	}
-	if o.transparent {
-		if a := p.TransparentHTTPSAddr(); a != nil {
-			e.tlsAddr = a.String()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- p.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-serveErr:
+			if err != nil {
+				t.Errorf("proxy Serve: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("proxy Serve did not return after cancel")
 		}
-		if a := p.TransparentHTTPAddr(); a != nil {
-			e.httpAddr = a.String()
-		}
-		if e.tlsAddr == "" {
-			t.Fatal("transparent env did not bind the :443 listener")
-		}
-	}
+	})
 	return e
 }
 
@@ -558,7 +577,7 @@ func serveRaw(ln net.Listener, silent bool, tlsCfg *tls.Config) {
 // connectRaw opens a CONNECT tunnel to host:port and returns the connection and
 // the status line; the caller owns the conn.
 func (e *invEnv) connectRaw(target string) (net.Conn, *bufio.Reader, string, error) {
-	conn, err := net.DialTimeout("tcp", e.p.Addr().String(), 2*time.Second)
+	conn, err := net.DialTimeout("tcp", e.proxyAddr, 2*time.Second)
 	if err != nil {
 		return nil, nil, "", err
 	}
