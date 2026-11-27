@@ -206,6 +206,18 @@ func FlagNoGroupPolicy(views []dashboard.WorkerView, scopedEntries int) {
 	}
 }
 
+// FlagNoUserLimits sets NoUserLimits on every view whose caps lack userlimits/v1
+// while the served policy carries per-user limits: such a worker does not
+// enforce them. A legacy worker (no caps) is flagged too.
+func FlagNoUserLimits(views []dashboard.WorkerView, limitsServed bool) {
+	if !limitsServed {
+		return
+	}
+	for i := range views {
+		views[i].NoUserLimits = !slices.Contains(views[i].Caps, config.CapUserLimitsV1)
+	}
+}
+
 // FlagNoIdentityChallenge sets NoIdentityChallenge on every view whose caps lack
 // identity/challenge-v1 while the served settings turn challenge mode on. Such
 // a worker rejects the unknown mode and keeps allowing; a legacy worker (no

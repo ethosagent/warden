@@ -13,6 +13,7 @@ package dashboard
 //	GET  /dashboard/api/policy/versions/{v}             viewer
 //	GET  /dashboard/api/policy/versions/{v}/diff        viewer
 //	POST /dashboard/api/policy/versions/{v}/rollback    editor, audited policy.rollback
+//	GET  /dashboard/api/usage/users                     viewer, traffic:read (W-P3-PUL-05)
 //	POST /dashboard/api/backup                          admin, audited backup.run (W-P1-OPS1-11)
 //
 //	GET    /dashboard/api/blocked-users                 admin   (W-P1-BLOCK-11)
@@ -57,6 +58,7 @@ func (s *Server) registerRoutes(mux *routeMux) {
 	mux.HandleFunc("/dashboard/api/policy/versions", s.handlePolicyVersions)
 	mux.HandleFunc("/dashboard/api/policy/versions/", s.handlePolicyVersion)
 	mux.HandleFunc("/dashboard/api/backup", s.handleBackup)
+	mux.HandleFunc("/dashboard/api/usage/users", s.handleUserUsage)
 	mux.HandleFunc("/dashboard/api/workers/", s.handleWorkerRevoke)
 	mux.HandleFunc("/dashboard/api/worker-tokens", s.handleWorkerTokens)
 	mux.HandleFunc("/dashboard/api/worker-tokens/", s.handleWorkerTokenByID)

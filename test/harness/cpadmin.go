@@ -77,7 +77,7 @@ func (c *CPClient) Do(method, path, bearer string, body []byte) (int, string, er
 		return 0, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
 	return resp.StatusCode, string(b), nil
 }
 

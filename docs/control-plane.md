@@ -1430,6 +1430,7 @@ fails when the two differ.
 | `/dashboard/api/token-sessions/revoke` | POST | admin | `token_sessions.revoke_all` | `none` |
 | `/dashboard/api/token-sessions/{sid}/revoke` | POST | admin | `token_sessions.revoke` | `none` |
 | `/dashboard/api/traffic` | GET | viewer | `traffic.read` | `traffic:read` |
+| `/dashboard/api/usage/users` | GET | viewer | `usage.users.read` | `traffic:read` |
 | `/dashboard/api/worker-enrollments` | GET | admin | `worker_enroll_token.read` | `workers:admin` |
 | `/dashboard/api/worker-enrollments` | POST | admin | `worker_enroll_token.create` | `none` |
 | `/dashboard/api/worker-enrollments/{id}` | DELETE | admin | `worker_enroll_token.revoke` | `workers:admin` |

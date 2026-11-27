@@ -112,6 +112,12 @@ func WorkerCaps() []string {
 // a list it cannot validate and would freeze on its last-known-good policy.
 const CapAgentRegV1 = "agentreg/v1"
 
+// CapUserLimitsV1 is the capability a worker advertises when it enforces
+// per-user rate limits (W-P3-PUL-09 adds it to WorkerCaps). The dashboard
+// warns about connected workers that lack it while user limits are served
+// (W-P3-PUL-05).
+const CapUserLimitsV1 = "userlimits/v1"
+
 // CapUserCostV1 is the capability a worker advertises when it enforces
 // dailyCostUSD per-user cost caps and costBlockedUsers (W-P3-PUL-04). An old
 // worker fails open on cost caps, so a policy save that adds or sets a

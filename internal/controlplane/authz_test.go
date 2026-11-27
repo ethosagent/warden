@@ -697,6 +697,7 @@ func TestAuthzScopeClassification(t *testing.T) {
 		"GET /dashboard/api/settings":                 "settings:read",
 		"GET /dashboard/api/traffic":                  "traffic:read",
 		"GET /dashboard/api/analytics":                "traffic:read",
+		"GET /dashboard/api/usage/users":              "traffic:read",
 		"GET /dashboard/api/endpoints":                "traffic:read",
 		"GET /dashboard/api/workers":                  "traffic:read",
 		"GET /dashboard/api/mcp":                      "traffic:read",

@@ -843,11 +843,26 @@ func (s *Server) Handler() http.Handler {
 	// worker whose policy version differs from what the CP currently serves,
 	// and (versioned mode) the version its heartbeat ETag maps to.
 	var tracker WorkerTracker = s.registry
+	// The usage view reads the served limit rules and cost block list, and the
+	// cost block computation state (W-P3-PUL-05).
+	dash.SetUsagePolicy(func() config.Policy {
+		w, _, _, _ := s.policy.snapshot()
+		p := policyOfWire(w)
+		p.CostBlockedUsers = w.CostBlockedUsers
+		return p
+	})
+	dash.SetCostBlockStatus(func() dashboard.CostBlockStatus {
+		if s.userCost == nil {
+			return dashboard.CostBlockStatus{}
+		}
+		return dashboard.CostBlockStatus{Enabled: true, Truncated: s.userCost.Truncated(), RecomputeErrors: s.userCost.RecomputeErrors()}
+	})
 	dash.SetBundlesServed(func() bool { return s.policy.bundleHeadSeq() > 0 })
 	dash.SetWorkers(func() []dashboard.WorkerView {
 		cur := s.policy.currentETag()
 		views := tracker.Views()
 		FlagNoGroupPolicy(views, s.scopedEntries())
+		FlagNoUserLimits(views, s.userLimitsServed())
 		FlagNoIdentityChallenge(views, s.challengeServed())
 		FlagNoIdentityRequire(views, s.servedSettings())
 		for i := range views {
@@ -2062,6 +2077,13 @@ func policyOfWire(w policyWire) config.Policy {
 		Allowlist: w.Allowlist, Denylist: w.Denylist,
 		UserLimits: w.UserLimits, DefaultUserLimit: w.DefaultUserLimit, AnonymousLimit: w.AnonymousLimit,
 	}
+}
+
+// userLimitsServed reports whether the served policy carries any per-user
+// limit rule.
+func (s *Server) userLimitsServed() bool {
+	w, _, ok, _ := s.policy.snapshot()
+	return ok && (len(w.UserLimits) > 0 || w.DefaultUserLimit != nil || w.AnonymousLimit != nil)
 }
 
 // hasUserLimits reports whether py carries any of the three per-user limit keys.
