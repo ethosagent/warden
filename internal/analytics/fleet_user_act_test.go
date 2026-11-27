@@ -168,7 +168,7 @@ func TestFleetStoresNoRawToken(t *testing.T) {
 				continue
 			}
 			l := strings.ToLower(f.Name + " " + f.Tag.Get("json"))
-			if (strings.Contains(l, "token") && f.Name != "IdentityTokenType") || strings.Contains(l, "jwt") || strings.Contains(l, "bearer") {
+			if (strings.Contains(l, "token") && f.Name != "IdentityTokenType" && f.Name != "UserTokenProvider" && f.Name != "UserTokenRetried") || strings.Contains(l, "jwt") || strings.Contains(l, "bearer") {
 				t.Errorf("event field %s can carry token content", f.Name)
 			}
 		}
@@ -191,7 +191,7 @@ func TestFleetStoresNoRawToken(t *testing.T) {
 			t.Fatal(err)
 		}
 		l := strings.ToLower(n)
-		if (strings.Contains(l, "token") && n != "identity_token_type") || strings.Contains(l, "jwt") || strings.Contains(l, "bearer") {
+		if (strings.Contains(l, "token") && n != "identity_token_type" && n != "user_token_provider" && n != "user_token_retried") || strings.Contains(l, "jwt") || strings.Contains(l, "bearer") {
 			t.Errorf("fleet column %q can carry token content", n)
 		}
 	}

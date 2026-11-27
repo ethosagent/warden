@@ -125,13 +125,15 @@ type Record struct {
 // into Record, each with the reason. TestEventFieldsAccountedFor enforces
 // that every Event field is either mapped by FromEvent or listed here.
 var excludedEventFields = map[string]string{
-	"SecretRef":      "references a secret by hash/last-4; a credential-adjacent value never leaves the store",
-	"Evidence":       "masked scan samples; content-derived, not needed to explain a decision",
-	"AddrClass":      "SSRF detail already summarised by the ssrf_* reason",
-	"DLPEncoded":     "reserved and always false in this phase",
-	"UID":            "set only at central sync, after the line is written",
-	"ProxyID":        "set by the aggregating store at read time; the line carries Meta.ProxyID",
-	"IdentityReason": "not exported in v1: a non-valid status needs no detail on the line",
+	"SecretRef":         "references a secret by hash/last-4; a credential-adjacent value never leaves the store",
+	"Evidence":          "masked scan samples; content-derived, not needed to explain a decision",
+	"AddrClass":         "SSRF detail already summarised by the ssrf_* reason",
+	"DLPEncoded":        "reserved and always false in this phase",
+	"UID":               "set only at central sync, after the line is written",
+	"ProxyID":           "set by the aggregating store at read time; the line carries Meta.ProxyID",
+	"IdentityReason":    "not exported in v1: a non-valid status needs no detail on the line",
+	"UserTokenProvider": "per-user token provider (W-P3-PUS-10) feeds the consent portal via analytics; not on the v1 decision line",
+	"UserTokenRetried":  "per-user token 401 retry flag (W-P3-PUS-10); analytics only, not on the v1 decision line",
 }
 
 // ExcludedEventFields returns a copy of the deliberately unmapped Event fields

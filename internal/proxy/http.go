@@ -162,6 +162,12 @@ type requestScope struct {
 	// Event.SwappedRefs.
 	refs         []secrets.Reference
 	swappedNames []string
+	// userTokenProvider / userTokenRetried are set by the per-user swap
+	// (W-P3-PUS-04) and the 401 retry (W-P3-PUS-05); recorded on the allow event
+	// as Event.UserTokenProvider / UserTokenRetried. A registered provider id
+	// only, never a token or ref.
+	userTokenProvider string
+	userTokenRetried  bool
 
 	// echoSecrets are the exact real values put into THIS request (swapped
 	// placeholders and auth-transformer injections); the echo guard checks the
@@ -1351,21 +1357,7 @@ func (p *Proxy) relayMCPSSE(s *requestScope) (terminal bool) {
 			Evidence:       s.evidence,
 		})
 	} else {
-		p.recordEvent(s.resolved(), analytics.Event{
-			Timestamp:      time.Now(),
-			Domain:         s.domain,
-			Port:           s.port,
-			Protocol:       "mcp",
-			Method:         s.req.Method,
-			URL:            fullURL,
-			Decision:       "allow",
-			ResponseStatus: s.resp.StatusCode,
-			Tool:           s.mcpTool,
-			Reason:         preferEchoReason(s.mcpReason, s.echoMonitorReason),
-			LatencyMs:      s.latencyMs(),
-			SwappedRefs:    s.swappedNames,
-			Evidence:       s.evidence,
-		})
+		p.recordMCPAllowEvent(s, fullURL)
 		p.cfg.Metrics.RecordRequest("allow", "mcp")
 		p.logDecision(decisionLog{
 			Domain: s.domain, Port: s.port, Protocol: "mcp",
@@ -1475,6 +1467,34 @@ func (p *Proxy) httpResponseScan(s *requestScope) (blocked bool) {
 	return false
 }
 
+// stampUserToken copies the per-user token fields onto an event. Every
+// scope-based event (allow, deny, MCP, WebSocket) uses it so the rule is one.
+func (s *requestScope) stampUserToken(ev *analytics.Event) {
+	ev.UserTokenProvider = s.userTokenProvider
+	ev.UserTokenRetried = s.userTokenRetried
+}
+
+// recordMCPAllowEvent records the allow event of an MCP SSE relay.
+func (p *Proxy) recordMCPAllowEvent(s *requestScope, fullURL string) {
+	ev := analytics.Event{
+		Timestamp:      time.Now(),
+		Domain:         s.domain,
+		Port:           s.port,
+		Protocol:       "mcp",
+		Method:         s.req.Method,
+		URL:            fullURL,
+		Decision:       "allow",
+		ResponseStatus: s.resp.StatusCode,
+		Tool:           s.mcpTool,
+		Reason:         preferEchoReason(s.mcpReason, s.echoMonitorReason),
+		LatencyMs:      s.latencyMs(),
+		SwappedRefs:    s.swappedNames,
+		Evidence:       s.evidence,
+	}
+	s.stampUserToken(&ev)
+	p.recordEvent(s.resolved(), ev)
+}
+
 // recordAllowEvent writes the single allow audit event for a forwarded request:
 // the by-reference secret list, optional cost estimate, MCP tool/reason, and any
 // judge reason — exactly one StoreEvent per allowed request. It also emits the
@@ -1548,6 +1568,9 @@ func (p *Proxy) recordAllowEvent(s *requestScope) {
 		LatencyMs:   s.latencyMs(),
 		SwappedRefs: s.swappedNames,
 		Evidence:    s.evidence,
+
+		UserTokenProvider: s.userTokenProvider,
+		UserTokenRetried:  s.userTokenRetried,
 	})
 	p.cfg.Metrics.RecordRequest("allow", proto)
 	for _, name := range s.swappedNames {

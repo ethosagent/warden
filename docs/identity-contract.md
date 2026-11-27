@@ -617,6 +617,8 @@ Event fields (on `/dashboard/api/traffic` and in the fleet view):
 | `user_sid` | Status `valid` and the token has `sid` |
 | `user_act` | Status `valid` and the token is a Warden token: the agent it was minted for (`act.sub`) |
 | `identity_token_type` | Status `valid` and the verifier says which kind: `warden` or `idp` |
+| `user_token_provider` | The per-user OAuth provider involved in the request (swapped, or required by a JIT deny): the registered provider id, never a token or scope (not the LLM cost `provider`) |
+| `user_token_retried` | The request was replayed once after an upstream 401 with a refreshed per-user token |
 
 The unverified `sub` or `email` of an expired or invalid token is never stored.
 

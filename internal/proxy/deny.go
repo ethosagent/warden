@@ -66,6 +66,7 @@ func (p *Proxy) emitDeny(s *requestScope, reason denyreason.Reason, extra ...den
 		ev.Evidence = x.Evidence
 		ev.AddrClass = x.AddrClass
 	}
+	s.stampUserToken(&ev)
 	p.emitDenyEvent(s.resolved(), ev)
 }
 
