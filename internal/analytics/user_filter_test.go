@@ -176,9 +176,7 @@ func TestUserFilterUsesIndexes(t *testing.T) {
 		if !strings.Contains(plan2.String(), "idx_events_user_sub_ts (user_sub=? AND ts>?)") {
 			t.Errorf("%s: ts-bounded plan does not use the (user_sub, ts) range:\n%s", name, plan2.String())
 		}
-		// The local store also has (user_sub, limit_rule, ts) (W-P3-PUL-02); its
-		// user_sub prefix serves the equality lookup just as well.
-		usesSub := strings.Contains(plan.String(), "idx_events_user_sub_ts") || strings.Contains(plan.String(), "idx_events_user_rule_ts")
+		usesSub := strings.Contains(plan.String(), "idx_events_user_sub_ts")
 		if !usesSub || !strings.Contains(plan.String(), "idx_events_user_email_lower") {
 			t.Errorf("%s: plan does not use both user indexes:\n%s", name, plan.String())
 		}

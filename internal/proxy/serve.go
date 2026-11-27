@@ -364,7 +364,7 @@ func (p *Proxy) handleConn(conn net.Conn) {
 		// identities of many users, so it is never refused on the anonymous
 		// bucket here; each of its requests is charged to its own subject.
 		if g.verdict.Decision == policy.Allow && ci.status() == identity.StatusValid {
-			if p.connectUserLimitPeek(conn, ci, domain, port) {
+			if p.connectUserLimitPeek(conn, ci, domain, port, false) {
 				return
 			}
 		}
@@ -399,8 +399,9 @@ func (p *Proxy) handleConn(conn net.Conn) {
 
 	// Every branch that reaches here is a policy Allow. A raw tunnel carries
 	// only the CONNECT identity, so an exhausted user (or anonymous bucket) is
-	// refused here, before the 200; tunnel charges it once it is dialed.
-	if p.connectUserLimitPeek(conn, ci, domain, port) {
+	// refused here, before the 200; tunnel charges it once it is dialed. Its
+	// bytes cannot be priced, so a cost-capped rule refuses it here too.
+	if p.connectUserLimitPeek(conn, ci, domain, port, true) {
 		return
 	}
 	_, _ = fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")

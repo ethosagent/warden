@@ -7,8 +7,9 @@ import (
 	"testing"
 )
 
-// An old warden.db opens with agent_id and limit_rule added and the
-// (user_sub, limit_rule, ts) index created, old rows are kept, the values
+// An old warden.db opens with agent_id and limit_rule added and the cost seed
+// index created (W-P3-PUL-04 dropped W-P3-PUL-02's (user_sub, limit_rule, ts)
+// index), old rows are kept, the values
 // round-trip through every write and read path, and a second open is a no-op
 // (W-P3-PUL-02).
 func TestMigrate_AgentIDLimitRule(t *testing.T) {
@@ -24,8 +25,13 @@ func TestMigrate_AgentIDLimitRule(t *testing.T) {
 		}
 	}
 	var idx int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_events_user_rule_ts'`).Scan(&idx); err != nil || idx != 1 {
-		t.Errorf("idx_events_user_rule_ts: count %d, err %v", idx, err)
+	// W-P3-PUL-04 replaced the (user_sub, limit_rule, ts) index with the
+	// covering ts-leading cost seed index and drops the old one.
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_events_ts_user_rule_cost'`).Scan(&idx); err != nil || idx != 1 {
+		t.Errorf("idx_events_ts_user_rule_cost: count %d, err %v", idx, err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_events_user_rule_ts'`).Scan(&idx); err != nil || idx != 0 {
+		t.Errorf("idx_events_user_rule_ts: count %d, err %v; want dropped", idx, err)
 	}
 	ev := attributedEvent()
 	ev.AgentID, ev.LimitRule = "claude-code", "eng-llm"

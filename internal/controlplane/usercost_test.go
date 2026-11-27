@@ -569,7 +569,6 @@ func TestUserCostAggregator_PersistWriteFailure(t *testing.T) {
 // persisted list, so a failing rollup at startup holds /policy (never a
 // cost-capped wire without the list) until the loop's retry succeeds.
 func TestUserCostAggregator_NoStateFailsClosed(t *testing.T) {
-	config.LiftUserLimitsGuardForTesting(t)
 	path := filepath.Join(t.TempDir(), "policy.yaml")
 	body := "policy:\n  allowlist:\n    - domain: api.openai.com\n  userLimits:\n    - name: eng-llm\n      match: {groups: [eng]}\n      dailyCostUSD: 0.01\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

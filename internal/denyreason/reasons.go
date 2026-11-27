@@ -186,6 +186,20 @@ const (
 	// into an allow.
 	UserRateLimited Reason = "user_rate_limited"
 
+	// UserCostLimited: the per-user limit rule that applies to a request to a
+	// cost-tracked destination has a dailyCostUSD, and the user's estimated
+	// spend under it today (the worker's ledger) is at or over that cap, or the
+	// control plane lists the user as over it today (costBlockedUsers), or the
+	// ledger is full and the key is new (fail closed; W-P3-PUL-04). Checked
+	// only after an allow.
+	UserCostLimited Reason = "user_cost_limited"
+
+	// UserCostUnmeasurable: a cost-capped per-user rule applies to a request
+	// to a cost-tracked destination whose traffic the worker cannot measure (a
+	// raw tunnel without TLS termination, an opaque passthrough, a WebSocket),
+	// so it is refused rather than passed unmetered (W-P3-PUL-04).
+	UserCostUnmeasurable Reason = "user_cost_unmeasurable"
+
 	// Unspecified: the never-in-practice fallback the proxy's emitDeny
 	// substitutes when a deny reaches it without a reason. The deny path is one
 	// chokepoint (internal/proxy emitDeny/emitDenyEvent), so this label on a
@@ -214,7 +228,7 @@ var declared = []Reason{
 	DLPBlock, DLPRedact,
 	MCPWS, MCPWSUnscannable, MCPSSEEventTooLarge, MCPGatewayDeny,
 	HTTPResponseLeak, HTTPResponseInjection,
-	UserBlocked, AgentDisabled, UserRateLimited,
+	UserBlocked, AgentDisabled, UserRateLimited, UserCostLimited, UserCostUnmeasurable,
 	Unspecified,
 }
 

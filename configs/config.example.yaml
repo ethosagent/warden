@@ -110,9 +110,18 @@ policy:
   # Per-user limits (phase 3). rateLimit is enforced on every request, h2
   # stream and WebSocket upgrade (a raw tunnel without a CA is charged once at
   # CONNECT): over it the agent gets 429 {"error":"user_rate_limited"} with
-  # Retry-After. dailyCostUSD is NOT YET ENFORCED: a rule that sets it fails to
-  # load until cost caps ship. Rate buckets live in worker memory and start
-  # empty after a restart.
+  # Retry-After. dailyCostUSD caps the ESTIMATED spend (bytes/4 at built-in
+  # provider prices, not billing figures) per user and rule per UTC day on the
+  # destinations the cost estimator knows (api.openai.com, api.anthropic.com,
+  # generativelanguage.googleapis.com, api.cohere.com); other destinations are
+  # never refused for cost. At or over the cap the agent gets 403
+  # {"error":"user_cost_limited"} with Retry-After to the next UTC midnight.
+  # Traffic the worker cannot measure (raw tunnel without a CA, WebSocket) to
+  # such a destination is refused with user_cost_unmeasurable. The cap is
+  # soft: requests in flight are counted when they finish, and a fleet shares
+  # spend only through the control plane's cost block list. Spend is reseeded
+  # from local events after a restart; rate buckets live in worker memory and
+  # start empty after a restart.
   # Off when absent; /policy and its ETag are then unchanged. Exactly one rule
   # applies per request: rules matching by users, then groups, then agents-only
   # rules (first in list order wins within a tier), then defaultUserLimit. A
@@ -126,7 +135,7 @@ policy:
   #     match: {groups: [eng], domains: [api.openai.com]}
   #     perAgent: false
   #     rateLimit: 60/minute
-  #     # dailyCostUSD: 5   # not yet enforced (refused at load)
+  #     dailyCostUSD: 5
   # defaultUserLimit: {rateLimit: 600/hour}
   # anonymousLimit: {rateLimit: 5/minute}
 

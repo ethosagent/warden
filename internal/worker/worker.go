@@ -700,6 +700,24 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 	// Cost estimator: always on. It only attributes a heuristic dollar figure to
 	// traffic that matches a known provider domain; everything else is untouched.
 	costEstimator := cost.NewEstimator()
+	// Per-user daily spend ledger (W-P3-PUL-04): enforces dailyCostUSD on
+	// requests to destinations the estimator tracks. Seeded from today's local
+	// events so a restart keeps a capped user capped. A failed seed starts it
+	// empty (the cap is soft; fleet cost blocks still apply) and is logged.
+	userCost := cost.NewLedger(clk.Now)
+	var costSeedFailures int64
+	if n, seedErr := seedCostLedger(ctx, store, userCost, agentID); seedErr != nil {
+		costSeedFailures = 1
+		logger.Warn("user cost ledger not seeded from the local store; today's earlier spend is not counted", "error", seedErr)
+	} else if n > 0 {
+		logger.Debug("user cost ledger seeded", "keys", n)
+	}
+	if ucErr := metrics.RegisterUserCostLedger(
+		func() int64 { return int64(userCost.Refused()) },
+		func() int64 { return costSeedFailures },
+	); ucErr != nil {
+		logger.Warn("user cost metrics not registered", "error", ucErr)
+	}
 
 	// Optional auth transforms (OAuth2 / SigV4 / HMAC / API-key) per destination.
 	// The fetch client deliberately gets NO upstream.allowPrivateCIDRs: the SSRF
@@ -906,6 +924,7 @@ func Run(ctx context.Context, out io.Writer, p Params) error {
 		DLP:               dlpScanner,
 		Transformers:      transformers,
 		Cost:              costEstimator,
+		UserCost:          userCost,
 		UpstreamResolver:  upstreamDNS,
 
 		// Interception mode (#376): internal/config validated the proxy block
