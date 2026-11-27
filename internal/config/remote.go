@@ -540,6 +540,13 @@ type remoteWire struct {
 	// BlockedUsers is decoded here, not through Policy (whose field is
 	// json:"-" for rule X2), then copied onto the policy in parseRemotePolicy.
 	BlockedUsers []BlockedUser `json:"blockedUsers,omitempty"`
+	// UserLimits, DefaultUserLimit, AnonymousLimit and CostBlockedUsers
+	// (W-P3-PUL-01) likewise: copied onto the policy and validated in
+	// parseRemotePolicy.
+	UserLimits       []UserLimit       `json:"userLimits,omitempty"`
+	DefaultUserLimit *UserLimit        `json:"defaultUserLimit,omitempty"`
+	AnonymousLimit   *UserLimit        `json:"anonymousLimit,omitempty"`
+	CostBlockedUsers []CostBlockedUser `json:"costBlockedUsers,omitempty"`
 	// RegisteredAgents likewise (W-P2-AREG-04): decoded here, sorted and
 	// validated in parseRemotePolicy.
 	RegisteredAgents []RegisteredAgent `json:"registeredAgents,omitempty"`
@@ -575,6 +582,11 @@ func parseRemotePolicy(body []byte) (*Policy, *SettingsWire, error) {
 		p.Denylist[i].Domain = strings.ToLower(p.Denylist[i].Domain)
 	}
 	p.BlockedUsers = normalizeBlockedUsers(w.BlockedUsers)
+	p.UserLimits, p.DefaultUserLimit, p.AnonymousLimit = w.UserLimits, w.DefaultUserLimit, w.AnonymousLimit
+	p.CostBlockedUsers = w.CostBlockedUsers
+	if err := NormalizeUserLimits(&p); err != nil {
+		return nil, nil, err
+	}
 	if len(w.RegisteredAgents) > 0 {
 		agents := append([]RegisteredAgent(nil), w.RegisteredAgents...)
 		SortRegisteredAgents(agents)
