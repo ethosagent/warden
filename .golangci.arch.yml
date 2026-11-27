@@ -78,6 +78,7 @@ linters:
             - '!${base-path}/internal/integration/**'
             - '!${base-path}/internal/integration/webhook/**'
             - '!${base-path}/internal/mcp/poisoned/**'
+            - '!${base-path}/internal/webauth/**'
             - '!${base-path}/tools/**'
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'
@@ -85,6 +86,7 @@ linters:
             - '!${base-path}/internal/identity/identitytest/**'
             - '!${base-path}/test/**'
             - '!${base-path}/internal/agentreg/agentregtest/**'
+            - '!${base-path}/internal/webauth/webauthtest/**'
             - '!**/*_test.go'
           deny:
             - pkg: net
@@ -154,6 +156,7 @@ linters:
             - '!${base-path}/internal/integration/**'
             - '!${base-path}/internal/integration/webhook/**'
             - '!${base-path}/internal/mcp/poisoned/**'
+            - '!${base-path}/internal/webauth/**'
             - '!${base-path}/tools/**'
             - '!${base-path}/internal/archtest/**'
             - '!${base-path}/internal/dnstest/**'
@@ -161,6 +164,7 @@ linters:
             - '!${base-path}/internal/identity/identitytest/**'
             - '!${base-path}/test/**'
             - '!${base-path}/internal/agentreg/agentregtest/**'
+            - '!${base-path}/internal/webauth/webauthtest/**'
             - '!${base-path}/internal/identity/adapters/oidc/**'
             - '!${base-path}/internal/workerca/adapters/cpclient/**'
             - '!${base-path}/internal/config/**'
@@ -212,6 +216,7 @@ linters:
             - '!${base-path}/internal/integration/**'
             - '!${base-path}/internal/integration/webhook/**'
             - '!${base-path}/internal/mcp/poisoned/**'
+            - '!${base-path}/internal/webauth/**'
             - '!${base-path}/internal/config/**'
             - '!${base-path}/internal/denyreason/**'
             - '!${base-path}/internal/identity/**'
@@ -233,6 +238,7 @@ linters:
             - '!${base-path}/internal/identity/identitytest/**'
             - '!${base-path}/test/**'
             - '!${base-path}/internal/agentreg/agentregtest/**'
+            - '!${base-path}/internal/webauth/webauthtest/**'
             - '!**/*_test.go'
           deny:
             - pkg: database/sql

@@ -648,8 +648,8 @@ func TestSessionOriginNormalized(t *testing.T) {
 		"http://[::1]:8081/auth/callback":       "http://[::1]:8081",
 	} {
 		c, err := NewSessionCookie(in)
-		if err != nil || c.origin != want {
-			t.Errorf("NewSessionCookie(%q).origin = %q, %v; want %q", in, c.origin, err, want)
+		if err != nil || c.Origin() != want {
+			t.Errorf("NewSessionCookie(%q).origin = %q, %v; want %q", in, c.Origin(), err, want)
 		}
 	}
 }
