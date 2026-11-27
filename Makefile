@@ -15,7 +15,8 @@ E2E_COMPOSE := -f deploy/compose/docker-compose.control-plane.yml -f deploy/comp
 # Every file gen.sh produces; e2e-up regenerates when ANY one is missing, not
 # only the CA cert (a half-populated certs dir would boot a broken stack).
 E2E_CERTS := proxy-ca.crt proxy-ca.key upstream-ca.crt upstream-ca.key \
-             upstream-server.crt upstream-server.key upstream-ca-bundle.crt
+             upstream-server.crt upstream-server.key upstream-ca-bundle.crt \
+             fakeaws-server.crt fakeaws-server.key
 
 # up --build unless WARDEN_IMAGE is set: the build cache makes a no-op rebuild
 # fast, and a source edit ALWAYS reaches the containers (a pre-existing image

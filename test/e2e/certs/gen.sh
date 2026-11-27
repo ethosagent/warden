@@ -12,6 +12,9 @@
 #                                  (api/llm/mcp/evil.example.test). Separate on
 #                                  purpose: the fake upstream must never hold
 #                                  the proxy CA's key.
+#   2b. fakeaws-server.crt/key   — a leaf from the same fake-upstream CA for
+#                                  the identity stack's fake AWS Secrets
+#                                  Manager (secretsmanager.us-east-1.amazonaws.com).
 #   3. upstream-ca-bundle.crt    — upstream-ca.crt PREPENDED to the host's
 #                                  system CA bundle. Workers point
 #                                  SSL_CERT_FILE at it (Go's system pool honors
@@ -82,6 +85,34 @@ EXT
 	echo "generated fake-upstream leaf: $LEAF_CRT (api/llm/mcp/evil.example.test + fakeupstream)"
 else
 	echo "$LEAF_CRT already exists — keeping it."
+fi
+
+# --- 2b. the fake AWS Secrets Manager leaf (identity stack) ---------------
+# The CP's consent.store (backend aws) dials the REAL endpoint name
+# secretsmanager.us-east-1.amazonaws.com; on the identity stack a cp-net alias
+# points it at the fakeaws container (docker-compose.e2e-identity.yml), which
+# serves this leaf. Signed by the fake-upstream CA, so the CP verifies it via
+# SSL_CERT_FILE=upstream-ca-bundle.crt like the workers verify the upstreams.
+AWS_KEY="fakeaws-server.key"
+AWS_CRT="fakeaws-server.crt"
+if [ ! -f "$AWS_CRT" ] || [ ! -f "$AWS_KEY" ]; then
+	openssl req -newkey rsa:2048 -nodes \
+		-keyout "$AWS_KEY" -out "$AWS_KEY.csr" \
+		-subj "/CN=secretsmanager.us-east-1.amazonaws.com/O=Warden E2E"
+	openssl x509 -req -in "$AWS_KEY.csr" \
+		-CA "$UP_CA_CRT" -CAkey "$UP_CA_KEY" -CAcreateserial \
+		-days "$DAYS" -out "$AWS_CRT" \
+		-extfile <(cat <<EXT
+subjectAltName = DNS:secretsmanager.us-east-1.amazonaws.com,DNS:fakeaws
+basicConstraints = CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+EXT
+		)
+	rm -f "$AWS_KEY.csr"
+	echo "generated fake AWS leaf: $AWS_CRT (secretsmanager.us-east-1.amazonaws.com)"
+else
+	echo "$AWS_CRT already exists — keeping it."
 fi
 
 # --- 3. the bundle workers see via SSL_CERT_FILE ---------------------------

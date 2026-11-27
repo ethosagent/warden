@@ -961,6 +961,9 @@ With the block enabled and `--state-dir` set the control plane mounts:
 | `GET /portal/login?next=<path>` | stores a `purpose=portal` row in `oidc_pending` (10 min TTL, single use, its own 10,000 cap), sets the `__Host-warden_portal_login` binding cookie and redirects to the IdP (S256 PKCE, state, nonce) as the portal client |
 | `GET /portal/callback` | consumes only a `purpose=portal` row (a console state, or a missing or wrong binding cookie, is `state_invalid`), exchanges the code and verifies the ID token for the portal client (audience and `azp` = `consent.oidc.clientID`, RS256/ES256, nonce, 60s skew), admits the user and creates a `portal_sessions` row |
 | `GET /portal` | a minimal no-store page: the signed-in email and a sign-out form, or a sign-in link |
+| `GET /portal/api/me` | portal session: `{sub, email, expiresAt, csrf, link:{status, relinkDueAt}}`, `Cache-Control: no-store`; `401` without a session |
+| `POST /portal/logout` | portal session + CSRF: deletes the `portal_sessions` row and clears the cookie (`204`; a form post is redirected `303` to `/portal`); the IdP link and its stored refresh token stay |
+| `/portal/*` (any other path) | portal session, then `404` until a later page is mounted there |
 
 - `next` is kept only for a same-origin path under `/portal/` or `/connect/` (no
   scheme, no `//`, no backslash, no dot segment); anything else lands on `/portal`.
@@ -1025,7 +1028,50 @@ creates the session, so offboarding can later refresh it to detect disabled user
 - Each stored link logs `idp_link_stored` with `user_key`, `ref` and
   `generation`; with admin audit on it records `user.idp_linked` (target
   `idp_link`, `target_ref` the user key). The token is never logged or recorded.
-  `GET /portal` shows the link status, generation and when to sign in again.
+  `GET /portal` shows the link status, generation and when to sign in again;
+  `GET /portal/api/me` reports `link.status` (`linked`, `missing`, `unknown` on a
+  read error, `disabled` with the IdP link off) and `link.relinkDueAt`.
+
+### Portal session middleware
+
+Every portal route but `/portal/login`, `/portal/callback` and `/portal` runs behind
+the portal session middleware (and `/connect/*` will):
+
+- It reads only the `__Host-warden_portal` cookie and `portal_sessions`. A console
+  session cookie, the `WARDEN_CP_TOKEN` bearer, a worker token or certificate and a
+  `wak_` API key are never read, so none of them opens a portal route (the
+  `Authorization` header and the console cookie are also stripped before a portal
+  handler runs); and the
+  console's middleware never reads the portal cookie, so a portal session gets `401`
+  on every `/dashboard/api/*` route, on `/central/secrets` and on `/auth/me`. The
+  worker routes (`/policy`, `/control/heartbeat`, `/central/ingest`) never touch the
+  portal store.
+- No session: a browser `GET`/`HEAD` outside `/portal/api/` is redirected `302` to
+  `/portal/login?next=<path>`; anything else is `401 {"error":"unauthenticated"}`.
+- The block list is rechecked on every request from the in-memory snapshot: a blocked
+  `sub` or email gets `403 {"error":"user_blocked"}` and all of that principal's portal
+  sessions are deleted. Adding a block entry (API, CLI or offboarding) also deletes
+  them at once. While no block list has loaded, or the session store fails, the answer
+  is `503` (`block_list_unavailable`, `session_store_unavailable`).
+- CSRF: every request other than `GET`, `HEAD` and `OPTIONS` must send
+  `X-Warden-CSRF` (or a `csrf` field in an `application/x-www-form-urlencoded` body)
+  equal to `HMAC-SHA256(raw portal session id, "warden-portal-csrf")`, the token
+  `/portal/api/me` serves. The console's token (label `warden-csrf`) never validates
+  here. An `Origin` header, when sent, must equal the `consent.oidc.redirectURL`
+  origin. Failures are `403 {"error":"csrf"}` and log `portal_csrf_denied` (session
+  short hash, method, path). Bodies of state-changing requests are capped at 64 KiB.
+- Logs: `portal_logout`, `portal_csrf_denied` and `portal_session_revoked` (`by_sub`,
+  `target_sub`, `count`); never a cookie value, CSRF token or full session handle. With
+  admin audit on a logout records `portal.logout` (target `portal_session`).
+- With consent disabled every `/portal/*` path is `404`.
+
+### End-to-end test
+
+`make e2e-identity-scenario NAME=TestPortalSignIn` runs the portal sign-in
+against the L2 identity stack (real Dex with the seeded LDAP users, the
+`warden-portal` client, `consent.store` on a fake AWS Secrets Manager); see
+[docker-end-to-end.md](docker-end-to-end.md) "The L2 identity stack", next to
+the console SSO tests (`make e2e-identity-scenario NAME=TestConsoleSSO`).
 
 ## API keys (`console.apiKeys`)
 
@@ -1462,6 +1508,12 @@ The *Console sessions* card on the Settings page uses the same API:
   tokens never reach them (`401` without a session). Each revoke logs
   `console_session_revoked` with `by_sub`, `target_sub` and `count` (and the first 8
   hex characters of a revoked handle), never a cookie value.
+- `?kind=portal` lists and revokes consent portal sessions (`portal_sessions`) the
+  same way, with the same admin gate, CSRF rule and value-free fields (each row also
+  carries `"kind":"portal"`); `?kind=console` or no `kind` is the console. A portal
+  revoke by `sub` ends portal sign-ins only (API keys and the IdP link stay) and logs
+  `portal_session_revoked`. `404 portal_disabled` when the portal is off; any other
+  `kind` is `400 invalid_kind`.
 
 **The UI follows the role.** After `GET /auth/me` succeeds the dashboard shows the
 signed-in email, the role and a *Log out* button, and hides every control whose

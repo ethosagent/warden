@@ -574,3 +574,33 @@ func (c cancelOnPut) Put(ctx context.Context, key, value string) error {
 	}
 	return c.MemorySecretStore.Put(ctx, key, value)
 }
+
+// failingGet is a LinkRepo whose Get fails.
+type failingGet struct{ portal.LinkRepo }
+
+func (failingGet) Get(context.Context, string, string) (portal.IdPLink, error) {
+	return portal.IdPLink{}, errors.New("database is locked")
+}
+
+// TestIdPLinkStatus: LinkStatus (the LinkReader behind GET /portal/api/me)
+// reports missing before a login, linked with relink_due_at after one, and
+// unknown with the error when the row cannot be read.
+func TestIdPLinkStatus(t *testing.T) {
+	ctx := context.Background()
+	st := fakes.NewMemorySecretStore()
+	r := newLinkRig(t, st)
+	if got, err := r.store.LinkStatus(ctx, linkIss, linkSub); err != nil || got.Status != portal.LinkMissing || !got.RelinkDueAt.IsZero() {
+		t.Fatalf("before login: %+v, %v; want missing", got, err)
+	}
+	if err := r.store.StoreLink(ctx, link(linkToken)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.store.LinkStatus(ctx, linkIss, linkSub)
+	if err != nil || got.Status != portal.LinkLinked || !got.RelinkDueAt.Equal(linkEpoch.Add(linkLifetime)) {
+		t.Fatalf("after login: %+v, %v; want linked, due %v", got, err, linkEpoch.Add(linkLifetime))
+	}
+	ls := newStoreOver(t, r, failingGet{r.repo}, st)
+	if got, err := ls.LinkStatus(ctx, linkIss, linkSub); err == nil || got.Status != portal.LinkUnknown {
+		t.Fatalf("read error: %+v, %v; want unknown and an error", got, err)
+	}
+}

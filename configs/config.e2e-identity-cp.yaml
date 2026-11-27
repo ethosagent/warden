@@ -1,7 +1,8 @@
 # Warden control-plane config for the L2 IDENTITY stack (deploy/compose/
 # docker-compose.e2e-identity.yml): a copy of config.e2e-cp.yaml plus the
 # console block below (W-P1-SSO-07), which puts the console in oidc mode
-# against the stack's Dex, and an echo secretStore that mounts /central/secrets.
+# against the stack's Dex, an echo secretStore that mounts /central/secrets, and
+# the consent portal block (W-P3-CSIG-07).
 # Keep the two files otherwise in step.
 #
 # Original header, for the HERMETIC e2e stack (deploy/compose/
@@ -64,6 +65,30 @@ console:
     admin: [warden-admins]
     editor: [warden-editors]
     viewer: [warden-viewers]
+
+# Consent portal sign-in (W-P3-CSIG-07, test/e2e/identity/portal_signin_test.go):
+# the warden-portal Dex client, the same split horizon as the console, and the
+# IdP link on, so a login keeps the user's refresh token in the CP-only
+# consent.store. consent.oidc.issuer must equal identity.issuer below. The
+# store is aws against the stack's fake Secrets Manager (fake-aws in
+# docker-compose.e2e-identity.yml, persistent for the container's life), never
+# echo: the IdP link refuses a store that keeps nothing. Its default namePrefix
+# warden-cp/ does not overlap the echo secretStore above.
+consent:
+  enabled: true
+  oidc:
+    issuer: http://localhost:5556/dex
+    internalIssuerURL: http://dex:5556
+    clientID: warden-portal
+    clientSecretEnv: WARDEN_PORTAL_DEX_CLIENT_SECRET
+    redirectURL: https://localhost:7070/portal/callback
+  idpLink:
+    enabled: true
+    refreshLifetime: 720h
+  store:
+    backend: aws
+    aws:
+      region: us-east-1
 
 # Group-gated MCP tool (W-P1-GPOL-14, test/e2e/identity/group_policy_test.go):
 # the worker pulls this block as CP settings and enforces it. The poisoned MCP

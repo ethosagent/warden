@@ -34,6 +34,13 @@
 #     /opt/warden (no new image). agent-1 stays on w1-internal only.
 #   - the CP already runs with --state-dir /data on the cp-data named volume
 #     (docker-compose.control-plane.yml); nothing to change here.
+#   - fake-aws is a hermetic AWS Secrets Manager (test/e2e/fakeaws) for the
+#     CP's consent.store (W-P3-CSIG-07, portal_signin_test.go). The CP dials
+#     the real endpoint name secretsmanager.us-east-1.amazonaws.com; a cp-net
+#     alias resolves it to fake-aws, whose leaf (test/e2e/certs/fakeaws-server.crt)
+#     the CP trusts through SSL_CERT_FILE. No warden code has an endpoint
+#     override. fake-aws sits on cp-net only (internal) and keeps its secrets
+#     in memory for the life of the container, so they survive CP restarts.
 services:
   dex:
     # Replace (not merge) the networks: dex needs cp-net (workers and CP reach
@@ -48,9 +55,18 @@ services:
     depends_on:
       dex:
         condition: service_healthy
+      fake-aws:
+        condition: service_healthy
     environment:
       - WARDEN_CONSOLE_DEX_CLIENT_SECRET=${WARDEN_CONSOLE_DEX_CLIENT_SECRET:?set it (see dex/.env.example)}
+      - WARDEN_PORTAL_DEX_CLIENT_SECRET=${WARDEN_PORTAL_DEX_CLIENT_SECRET:?set it (see dex/.env.example)}
       - WARDEN_DEX_CLIENT_SECRET=${WARDEN_DEX_CLIENT_SECRET:?set it (see dex/.env.example)}
+      # consent.store (backend aws) against fake-aws: throwaway lab credentials
+      # (the fake checks only that requests are SigV4-signed), and the lab
+      # upstream CA added to the system pool so the CP verifies fake-aws.
+      - AWS_ACCESS_KEY_ID=warden-e2e-fake-access-key-id
+      - AWS_SECRET_ACCESS_KEY=warden-e2e-fake-aws-secret-not-a-real-key
+      - SSL_CERT_FILE=/etc/warden/certs/upstream-ca-bundle.crt
     volumes:
       # Same container target as the e2e mount: swaps in the identity copy.
       - ../../configs/config.e2e-identity-cp.yaml:/etc/warden/config.yaml:ro
@@ -63,6 +79,39 @@ services:
       - WARDEN_DEX_CLIENT_SECRET=${WARDEN_DEX_CLIENT_SECRET:?set it (see dex/.env.example)}
     volumes:
       - ../../configs/config.e2e-identity-worker.yaml:/etc/warden/config.yaml:ro
+
+  # Hermetic AWS Secrets Manager for consent.store (see the header). Same image
+  # as fakeupstream (its Dockerfile builds both binaries). It binds 443 as a
+  # non-root user via the per-netns sysctl, like fakeupstream. The control
+  # listener (stored names and values, for the test) is loopback-only: the
+  # test reads it with `docker exec`.
+  fake-aws:
+    build:
+      context: ../..
+      dockerfile: test/e2e/fakeupstream/Dockerfile
+    image: warden-e2e-fakeupstream:local
+    entrypoint: ["fakeaws"]
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    networks:
+      cp-net:
+        aliases:
+          - secretsmanager.us-east-1.amazonaws.com
+    environment:
+      # The only access key id fake-aws accepts: the CP's (AWS_ACCESS_KEY_ID on
+      # control-plane above). No worker holds it, so no worker can reach
+      # consent.store even on cp-net.
+      - FAKEAWS_ACCESS_KEY_ID=warden-e2e-fake-access-key-id
+      - FAKEAWS_CERT=/etc/fakeaws/fakeaws-server.crt
+      - FAKEAWS_KEY=/etc/fakeaws/fakeaws-server.key
+    volumes:
+      - ../../test/e2e/certs:/etc/fakeaws:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8082/_health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
   # One-shot: copy the static warden binary into the shared volume, then exit.
   warden-bin:

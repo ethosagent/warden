@@ -50,6 +50,9 @@ type portalService struct {
 	flow     *webauth.Flow
 	pending  *webauth.PendingStore
 	sessions *PortalSessionStore
+	// store is what the session middleware, me and logout read and write:
+	// sessions, or a test's counting fake.
+	store portalSessionBackend
 	// blocks is the block list; nil means none is kept.
 	blocks *BlockStore
 	// links stores the IdP link on login (W-P3-CSIG-03): linkStore over
@@ -59,8 +62,11 @@ type portalService struct {
 	// linkStore is the concrete store behind links (nil when the IdP link is
 	// off or no consent.store is configured); the stub page reads it.
 	linkStore *portal.LinkStore
-	cookie    webauth.Cookie
-	logger    *slog.Logger
+	// linkStatus reads the IdP link status GET /portal/api/me reports
+	// (linkStore when wired); nil reports "unknown".
+	linkStatus portal.LinkReader
+	cookie     webauth.Cookie
+	logger     *slog.Logger
 
 	// audit records a callback's outcome in the admin audit log
 	// (Server.recordPortalLogin); nil when admin audit is disabled.
@@ -68,6 +74,12 @@ type portalService struct {
 	// linkAudit records user.idp_linked after a stored link
 	// (Server.recordIdPLinked); nil when admin audit is disabled.
 	linkAudit func(r *http.Request, iss, sub, email string)
+	// consoleCookie is the console session cookie's name, stripped from a
+	// request before a portal handler sees it ("" without console sessions).
+	consoleCookie string
+	// auditLogout records a portal logout (Server.recordPortalLogout); nil
+	// when admin audit is disabled.
+	auditLogout func(r *http.Request, p portal.Principal, status int)
 }
 
 // initPortal builds the portal when the consent block is enabled and a state
@@ -78,7 +90,7 @@ func (s *Server) initPortal() {
 		return
 	}
 	cc := *s.cfg.Consent
-	p := &portalService{cfg: cc, blocks: s.blocks, logger: s.cfg.Logger}
+	p := &portalService{cfg: cc, blocks: s.blocks, logger: s.cfg.Logger, consoleCookie: s.sessionCookie.Name}
 	s.portal = p
 	cookie, err := webauth.NewCookie(cc.OIDC.RedirectURL, portal.SessionCookieBase)
 	if err != nil {
@@ -90,6 +102,11 @@ func (s *Server) initPortal() {
 	}
 	p.cookie = cookie
 	p.sessions = NewPortalSessionStore(s.cfg.State.SQL(), cc.Session.Idle, cc.Session.Absolute, s.cfg.Now)
+	p.store = p.sessions
+	// Blocking a principal ends their portal sessions at once (W-P3-CSIG-04).
+	if s.blocks != nil {
+		s.blocks.SetPortalSessionRevoker(p.sessions)
+	}
 	if cc.IdPLink.Enabled {
 		s.initIdPLinks(p)
 	}
@@ -308,37 +325,16 @@ func (p *portalService) finishLogin(w http.ResponseWriter, r *http.Request, logi
 }
 
 // session returns the live portal session the request's portal cookie names,
-// with its raw id. Only the portal cookie and portal_sessions are read; a
-// blocked principal, or any principal while no block list has loaded, has no
-// session. Activity is recorded at most once a
-// minute. W-P3-CSIG-04's RequireSession builds on it.
+// with its raw id: authenticate's signed-in outcome. Only the portal cookie
+// and portal_sessions are read; a blocked principal (whose portal sessions
+// are deleted), or any principal while no block list has loaded, has no
+// session.
 func (p *portalService) session(r *http.Request) (webauth.Session, string, bool) {
-	if p.sessions == nil {
+	sc, out, _ := p.authenticate(r)
+	if out != portalSignedIn {
 		return webauth.Session{}, "", false
 	}
-	rawID, ok := p.cookie.From(r)
-	if !ok {
-		return webauth.Session{}, "", false
-	}
-	sess, live, err := p.sessions.Lookup(r.Context(), rawID)
-	if err != nil {
-		p.logger.Error("portal session lookup failed", "error", err)
-		return webauth.Session{}, "", false
-	}
-	if !live {
-		return webauth.Session{}, "", false
-	}
-	// Without a loaded block list nobody can be told apart from a blocked
-	// user, so no session authenticates (fail closed).
-	if p.blocks != nil && (!p.blocks.Ready() || p.blocks.IsBlocked(sess.Sub, sess.Email)) {
-		return webauth.Session{}, "", false
-	}
-	if webauth.TouchDue(sess, p.sessions.Now()) {
-		if _, err := p.sessions.Touch(r.Context(), rawID); err != nil {
-			p.logger.Warn("portal session touch failed", "session", shortHash(sess.IDHash), "error", err)
-		}
-	}
-	return sess, rawID, true
+	return sc.sess, sc.rawID, true
 }
 
 // portalLoginMessages are the texts the stub page shows for a login_error;

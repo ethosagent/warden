@@ -333,6 +333,19 @@ make e2e-identity-down                                # down -v
   `identity:` block in attribute mode (issuer `http://localhost:5556/dex`,
   `internalIssuerURL: http://dex:5556`, W-P1-IDC-03); `TestIdentitySmoke` proves
   it with a curl agent.
+- **Consent portal and a fake Secrets Manager.** The CP config also enables
+  `consent:` (W-P3-CSIG-07: the `warden-portal` Dex client, the same split
+  horizon, the IdP link on) with `consent.store` backend `aws`. The stack's
+  `fake-aws` service (`test/e2e/fakeaws`, built into the fakeupstream image)
+  stands in for AWS Secrets Manager: it sits on `cp-net` only, under the network
+  alias `secretsmanager.us-east-1.amazonaws.com`, the real endpoint name the
+  CP's client dials, and serves a leaf from the lab upstream CA
+  (`test/e2e/certs/fakeaws-server.crt`) that the CP trusts through
+  `SSL_CERT_FILE`. The CP gets throwaway AWS credentials and
+  `WARDEN_PORTAL_DEX_CLIENT_SECRET` as env. No warden code has an endpoint
+  override. The fake keeps secrets in memory for the container's life, so they
+  survive CP restarts, and the test reads them through its loopback control
+  port with `docker exec`.
 - **The warden CLI in agent-1.** A one-shot `warden-bin` service copies the
   static `warden` binary from the warden image into a volume that agent-1 mounts
   read-only at `/opt/warden`; no extra image is built.
@@ -381,7 +394,22 @@ and `/central/secrets` and `200` on `/policy`), the split horizon (the login
 redirect points at the public issuer while the CP completes the callback over
 `dex:5556`), an admin revoke ending a viewer's session, and Dex down (CP
 restarted: `/policy` `200`, `/auth/login` `503 idp_unavailable`; the test brings
-Dex and the CP back afterwards). In CI, `.github/workflows/e2e.yml`
+Dex and the CP back afterwards). `TestPortalSignIn`
+(`make e2e-identity-scenario NAME=TestPortalSignIn`) proves the consent sign-in
+the same way: alice signs in at `/portal/login` and lands on `/portal` with a
+`__Host-warden_portal` session; `GET /portal/api/me` returns her sub and a
+`linked` IdP link; `fake-aws` holds `warden-cp/idp/<userKey>` and that token
+refreshes at Dex's token endpoint as `warden-portal`; the copied state DB's
+`idp_links` row holds only the Reference, generation and dates (and no state
+file holds the token); the portal cookie gets `401` on `/dashboard/api/*`,
+`/central/secrets` and `/auth/me`; a logout without `X-Warden-CSRF` or with a
+foreign `Origin` is `403`; the refreshed `warden-portal` ID token is recorded
+`invalid`/`wrong_aud` by worker-1; a second sign-in stores a new token and
+bumps the generation (the test log records whether Dex invalidated the first chain);
+with Dex stopped and the CP restarted `/portal/login` is `503 idp_unavailable`
+while the existing portal session and `/policy` still answer `200`; and the CP,
+worker-1 and fake-aws logs hold no password, code, cookie, CSRF token or token.
+In CI, `.github/workflows/e2e.yml`
 runs `make e2e-identity` in its own job, `e2e-identity` (separate runner, 15 minute cap, `E2E_IDENTITY_TIMEOUT=8m`), so the `e2e` job keeps its 15 minute cap. Its failure log is the `e2e-identity-diagnostics` artifact, and the risk:critical gate waits for it as well as for `e2e`.
 
 ## Drive it by hand

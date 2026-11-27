@@ -32,7 +32,8 @@
 #
 # E2E_IDENTITY=1 (set by `make e2e-identity-up`) checks the identity stack: the
 # compose files gain docker-compose.identity.yml + docker-compose.e2e-identity.yml
-# and the service list gains dex and ldap (W-P1-DEX-04). dex has the published
+# and the service list gains dex and ldap (W-P1-DEX-04) and fake-aws (cp-net
+# only, W-P3-CSIG-07). dex has the published
 # bridge (like the CP) and ldap sits on the internal idp-net only. ldap has no
 # nslookup, so its UDP DNS negative is a raw query over bash's /dev/udp (an
 # answer byte back is a leak).
@@ -50,7 +51,7 @@ DNS_SERVER=1.1.1.1
 SERVICES=(control-plane worker-1 worker-2 worker-3 fakeupstream agent-1 agent-2 agent-3)
 if [ "${E2E_IDENTITY:-}" = 1 ]; then
 	E2E_COMPOSE+=(-f deploy/compose/docker-compose.identity.yml -f deploy/compose/docker-compose.e2e-identity.yml)
-	SERVICES+=(dex ldap)
+	SERVICES+=(dex ldap fake-aws)
 fi
 [ -n "${HERMETICITY_SERVICES:-}" ] && read -ra SERVICES <<<"$HERMETICITY_SERVICES"
 
@@ -69,6 +70,7 @@ positive_control() {
 	agent-3) echo "http://worker-3:9090/healthz" ;;                 # its only neighbor
 	dex) echo "http://127.0.0.1:5558/healthz" ;;                    # its own telemetry listener
 	ldap) echo "http://dex:5558/healthz" ;;                         # idp-net → dex telemetry
+	fake-aws) echo "http://127.0.0.1:8082/_health" ;;               # its own control listener
 	*) echo "" ;;
 	esac
 }

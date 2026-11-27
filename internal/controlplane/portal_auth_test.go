@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"github.com/ethosagent/warden/internal/adminaudit"
+	"github.com/ethosagent/warden/internal/apikeys"
+	"github.com/ethosagent/warden/internal/apikeys/adapters/sqlitestore"
 	"github.com/ethosagent/warden/internal/config"
 	"github.com/ethosagent/warden/internal/cpstate"
 	"github.com/ethosagent/warden/internal/portal"
 	"github.com/ethosagent/warden/internal/secrets"
+	tokensvcsqlite "github.com/ethosagent/warden/internal/tokensvc/adapters/sqlite"
 	"github.com/ethosagent/warden/internal/webauth"
 	"github.com/ethosagent/warden/internal/webauth/webauthtest"
 	"github.com/ethosagent/warden/test/fakes"
@@ -53,9 +56,16 @@ type portalRigOpts struct {
 	noConsent     bool
 	noState       bool
 	links         portal.LinkWriter
+	linkStatus    portal.LinkReader
 	// userStore is consent.store (Config.UserStore); nil gets a fresh
 	// fakes.MemorySecretStore, so the real LinkStore stores the IdP link.
 	userStore secrets.SecretStore
+	// secretStore mounts /central/secrets; token is the WARDEN_CP_TOKEN bearer.
+	secretStore secrets.SecretStore
+	token       string
+	// allRoutes turns on API keys and the token service, so every
+	// /dashboard/api/* route of the authz table is mounted.
+	allRoutes bool
 }
 
 func newPortalRig(t *testing.T, o portalRigOpts) *portalRig {
@@ -69,7 +79,11 @@ func newPortalRig(t *testing.T, o portalRigOpts) *portalRig {
 	var db *cpstate.DB
 	if !o.noState {
 		var err error
-		db, err = cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), StateMigrations())
+		migs := StateMigrations()
+		if o.allRoutes {
+			migs = cpstate.Enable(migs, sqlitestore.MigrationID, tokensvcsqlite.SessionsMigrationID)
+		}
+		db, err = cpstate.Open(context.Background(), filepath.Join(t.TempDir(), "warden-cp.db"), migs)
 		if err != nil {
 			t.Fatalf("cpstate.Open: %v", err)
 		}
@@ -103,15 +117,37 @@ func newPortalRig(t *testing.T, o portalRigOpts) *portalRig {
 	if userStore == nil {
 		userStore = fakes.NewMemorySecretStore()
 	}
-	srv := New(Config{
+	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	cfg := Config{
 		PolicyPath: writePolicyFile(t, "a.example"), State: db, Console: cc, Consent: consent, UserStore: userStore,
 		ClientSecret: rigClientSecret, ConsentClientSecret: portalClientSecret, Now: clk.Now,
-		Logger: slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-	})
+		SecretStore: o.secretStore, Token: o.token, Logger: logger,
+	}
+	if o.allRoutes {
+		reg := newAPIKeyRegistry()
+		store, err := sqlitestore.New(db, sqlitestore.Options{Registry: reg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ix, err := apikeys.NewIndex(context.Background(), store, apikeys.IndexOptions{Now: time.Now, After: time.After, Logger: logger})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Console.APIKeys = config.ConsoleAPIKeys{Enabled: true, DefaultTTL: config.DefaultAPIKeyTTL, MaxTTL: config.DefaultAPIKeyMaxTTL,
+			MaxPerOwner: config.DefaultAPIKeysMaxPerOwner, RatePerKey: config.DefaultAPIKeysRatePerKey}
+		cfg.APIKeyIndex, cfg.APIKeyStore, cfg.APIKeyRegistry = ix, store, reg
+	}
+	srv := New(cfg)
+	if o.allRoutes {
+		srv.EnableTokens(&fakeExchanger{}, testTokenIssuer, TokenEdge{Sessions: tokensvcsqlite.NewSessions(db)})
+	}
 	if srv.portal != nil && srv.portal.provider != nil {
 		srv.portal.provider.SetBackoff(10*time.Millisecond, 20*time.Millisecond)
 		if o.links != nil {
 			srv.portal.links = o.links
+		}
+		if o.linkStatus != nil {
+			srv.portal.linkStatus = o.linkStatus
 		}
 	}
 	if srv.auth != nil && srv.auth.provider != nil {
